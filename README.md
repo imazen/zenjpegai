@@ -16,6 +16,8 @@ scaling (RVS), channel gain flags (GRFS), latent scaling (LSBS) and quality maps
 reference decoder's in about 0.005 % of samples, each by one step (convolution summation order).
 `PORTING.md` tracks every module, what is missing, and which test proves each piece.
 
+New here? Start with [`CONTRIBUTING.md`](CONTRIBUTING.md): setup, code map, how parity is proven, what to do next.
+
 ## Use
 
 ```rust

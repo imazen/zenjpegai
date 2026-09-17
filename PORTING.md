@@ -254,3 +254,27 @@ The reference runs locally from `~/work/zen/jpeg-ai-reference-software` (see `CL
 the environment recipe). Reference bitstreams, decoded images and intermediate tensor dumps
 used by the parity tests live under `/mnt/v/output/zenjpegai/reference/`; they are produced by
 `scripts/make_reference_vectors.sh` and are not committed (size).
+
+## Work queue
+
+Ordered by value. Each item names the upstream source and the gate that closes it. Agents append
+their own open items below when they stop.
+
+1. **Encoder** (nothing ported above the entropy coder). Upstream: `coding_engine.py::compress`,
+   `ccs_sgmm_tool.py`, `sep_chan_tool.py`, `common_modules.py::compress*/encode*`,
+   `components/autoencoder_data/encoder/*`, `autoencoder_hyper/encoder/basic.py`, contexts in the
+   encode direction, `quantization/`, `bitrate_matcher/`. Gates: layer outputs vs
+   `dump_encode.py` dumps; integer decisions equal given the reference's `y`; streams decode with
+   our decoder AND the reference decoder; size within 0.5 % and PSNR within 0.02 dB of the
+   reference encoder at the same (model, beta); faster than it.
+2. **Browser**: wasm SIMD + threads builds, polyfill, Playwright, Pages workflow (`wasm/`, `web/`;
+   status in `web/README.md`). GPU (`gpu/`, wgpu) synthesis backend and its wiring into the web
+   build (status in `gpu/README.md`).
+3. **Zen codec standards**: zencodec traits, limits + measured memory, `unstable-internals`
+   visibility, no_std check, build-time report, CI on all required platforms (status: see the
+   entries the standards agent appended below and `.github/workflows/`).
+4. **Decoder leftovers**: eICCI on chroma-subsampled pictures; user-defined colour transform
+   (`colour_transform_idx = 2`; upstream's inverse looks wrong, needs a decision, not a port);
+   `cube flags` stream vector; exhaustive check of `tools::gain::scaler_from_log` vs `torch.exp`.
+5. **Speed**: Winograd / int8-VNNI kernels, padding-free transposed convolution, SIMD `exp` for
+   HOP's ELU gate; re-run `scripts/bench/decode_end_to_end.sh` after each and commit the TSV.
