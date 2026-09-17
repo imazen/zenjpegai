@@ -3,6 +3,7 @@
 #[cfg(feature = "std")]
 mod api;
 pub mod entropy;
+pub mod limits;
 pub mod output;
 pub mod reconstruct;
 

@@ -5,6 +5,8 @@ use std::sync::{Arc, Mutex};
 
 use whereat::{At, at};
 
+use super::entropy::ComponentEntropy;
+use super::limits::{Limits, MemoryEstimate};
 use super::output::{Picture, RgbImage, finish, to_source_format};
 use super::reconstruct::{post_process_latent, reconstruct_latent_with, synthesize_with};
 use super::{Headers, decode_entropy_stage_progressive, read_headers};
@@ -35,6 +37,7 @@ pub struct Decoder {
     tables: AnsTables,
     operating_point: Option<OperatingPoint>,
     max_channels: [Option<u16>; 2],
+    limits: Limits,
     cache: Mutex<HashMap<(usize, OperatingPoint), Arc<ModelSet>>>,
     icci_nets: filters::icci::NetCache,
 }
@@ -64,6 +67,7 @@ impl Decoder {
             tables: AnsTables::new(),
             operating_point: None,
             max_channels: [None, None],
+            limits: Limits::default(),
             cache: Mutex::new(HashMap::new()),
             icci_nets: Default::default(),
         }
@@ -82,6 +86,20 @@ impl Decoder {
     pub fn max_channels(mut self, luma: Option<u16>, chroma: Option<u16>) -> Self {
         self.max_channels = [luma, chroma];
         self
+    }
+
+    /// Resource limits for every decode of this decoder (default: [`Limits::default`]).
+    pub fn limits(mut self, limits: Limits) -> Self {
+        self.limits = limits;
+        self
+    }
+
+    /// Predicted heap use of decoding `stream` with this decoder's operating point, from the
+    /// headers alone (see [`crate::estimate_memory`]).
+    pub fn estimate_memory(&self, stream: &[u8]) -> Result<MemoryEstimate, At<Error>> {
+        let headers = self.read_headers(stream)?;
+        let op = self.pick_operating_point(&headers)?;
+        Ok(crate::estimate_memory(&headers.picture, op))
     }
 
     pub fn engine(&self) -> &Engine {
@@ -110,6 +128,33 @@ impl Decoder {
             c.insert((id, op), set.clone());
         }
         Ok(set)
+    }
+
+    /// Load and pack the networks `stream` needs, without decoding it. Decoding does this on
+    /// first use; calling it up front moves the cost (tens of milliseconds and the models'
+    /// memory) out of the first decode.
+    pub fn preload(&self, stream: &[u8]) -> Result<(), At<Error>> {
+        let headers = self.read_headers(stream)?;
+        let op = self.pick_operating_point(&headers)?;
+        self.model_set(headers.picture.model_id as usize, op)
+            .map_err(|e| at!(e))?;
+        Ok(())
+    }
+
+    /// The synthesis transform a decode of this stream would run.
+    fn pick_operating_point(&self, headers: &Headers) -> Result<OperatingPoint, At<Error>> {
+        let hdr = &headers.picture;
+        let default_op = *hdr
+            .synthesis_transforms
+            .first()
+            .ok_or_else(|| at!(Error::InvalidData("no synthesis transform listed")))?;
+        match self.operating_point {
+            None => Ok(default_op),
+            Some(op) if hdr.synthesis_transforms.contains(&op) => Ok(op),
+            Some(_) => Err(at!(Error::InvalidArgument(
+                "the stream does not allow the requested operating point"
+            ))),
+        }
     }
 
     /// Parse the headers only.
@@ -170,22 +215,19 @@ impl Decoder {
 
     fn decode_inner(&self, stream: &[u8], stop: &dyn enough::Stop) -> Result<Picture, At<Error>> {
         stop.check().map_err(|r| at!(Error::from(r)))?;
+        self.limits.check_input(stream.len()).map_err(|e| at!(e))?;
         let cs = Codestream::parse(stream).map_err(|e| at!(e))?;
         let headers = read_headers(&cs).map_err(|e| at!(e))?;
         let hdr = &headers.picture;
-        let default_op = *hdr
-            .synthesis_transforms
-            .first()
-            .ok_or_else(|| at!(Error::InvalidData("no synthesis transform listed")))?;
-        let op = match self.operating_point {
-            None => default_op,
-            Some(op) if hdr.synthesis_transforms.contains(&op) => op,
-            Some(_) => {
-                return Err(at!(Error::InvalidArgument(
-                    "the stream does not allow the requested operating point"
-                )));
+        let op = self.pick_operating_point(&headers)?;
+        // Limits are judged on the header alone, before any picture-sized allocation.
+        let estimate = self.limits.check_header(hdr, op).map_err(|e| at!(e))?;
+        if let Some(max) = self.limits.max_memory_bytes {
+            let room = usize::try_from(max - estimate.live_bytes).unwrap_or(usize::MAX);
+            if crate::nn::fast::pool_limit() > room {
+                crate::nn::fast::set_pool_limit(room);
             }
-        };
+        }
         let set = self
             .model_set(hdr.model_id as usize, op)
             .map_err(|e| at!(e))?;
@@ -200,15 +242,22 @@ impl Decoder {
             stop,
         )
         .map_err(|e| at!(e))?;
-        let [ent_y, ent_uv] = ent;
+        let [mut ent_y, mut ent_uv] = ent;
+        // Reconstruction reads the hyper-latent and the residual (LSBS also the `likely` map),
+        // the LEF reads the luma scale map; the rest of the entropy stage's output is dead.
+        let filters = headers.tools.any_post_filter();
+        shed_entropy(&mut ent_y, filters).map_err(|e| at!(e))?;
+        shed_entropy(&mut ent_uv, false).map_err(|e| at!(e))?;
         let mut ly = reconstruct_latent_with(eng, hdr, 0, &set.common[0], &ent_y, stop)
             .map_err(|e| at!(e))?;
         post_process_latent(hdr, &headers.tools, 0, &ent_y, &mut ly).map_err(|e| at!(e))?;
-        // The LEF reads the luma scale map; everything else of the entropy stage can go.
+        ly.psi = crate::tensor::Tensor::zeros(0, 0, 0).map_err(|e| at!(e))?;
         let luma_scale_log = ent_y.scale_log;
+        drop((ent_y.z_hat, ent_y.residual, ent_y.likely));
         let mut luv = reconstruct_latent_with(eng, hdr, 1, &set.common[1], &ent_uv, stop)
             .map_err(|e| at!(e))?;
         post_process_latent(hdr, &headers.tools, 1, &ent_uv, &mut luv).map_err(|e| at!(e))?;
+        luv.psi = crate::tensor::Tensor::zeros(0, 0, 0).map_err(|e| at!(e))?;
         drop(ent_uv);
         let planes = synthesize_with(
             eng,
@@ -239,4 +288,15 @@ impl Decoder {
         stop.check().map_err(|r| at!(Error::from(r)))?;
         finish(hdr, &planes).map_err(|e| at!(e))
     }
+}
+
+/// Free the entropy-stage tensors nothing downstream reads.
+fn shed_entropy(e: &mut ComponentEntropy, keep_scale_log: bool) -> Result<(), Error> {
+    e.skip_scale_log = crate::tensor::Tensor::zeros(0, 0, 0)?;
+    e.mask = crate::tensor::Tensor::zeros(0, 0, 0)?;
+    e.residual_q = crate::tensor::Tensor::zeros(0, 0, 0)?;
+    if !keep_scale_log {
+        e.scale_log = crate::tensor::Tensor::zeros(0, 0, 0)?;
+    }
+    Ok(())
 }

@@ -59,9 +59,14 @@ impl ResAu {
     }
 
     pub(crate) fn forward(&self, eng: &Engine, x: BTensor) -> Result<BTensor> {
+        // Every intermediate is dropped as soon as the next layer has consumed it: these maps
+        // are the decoder's largest allocations.
         let mut act = x.clone();
         fast::relu6(&mut act);
-        let mask = self.conv2.forward(eng, &self.conv.forward(eng, &act)?)?;
+        let t = self.conv.forward(eng, &act)?;
+        drop(act);
+        let mask = self.conv2.forward(eng, &t)?;
+        drop(t);
         let mut y = x;
         // Two IEEE operations, like the reference's `x * (1 + mask)`; not an FMA.
         fast::gate(&mut y, &mask)?;
@@ -118,7 +123,10 @@ impl Upsample {
     fn forward(&self, eng: &Engine, x: &BTensor) -> Result<BTensor> {
         match self {
             Self::Transposed(c) => c.forward(eng, x),
-            Self::Conv2x2Shuffle(c) => fast::pixel_shuffle(eng, &c.forward(eng, x)?, 2),
+            Self::Conv2x2Shuffle(c) => {
+                let t = c.forward(eng, x)?;
+                fast::pixel_shuffle(eng, &t, 2)
+            }
         }
     }
 }
@@ -218,24 +226,30 @@ impl HopPrimary {
         w: usize,
         stop: &dyn Stop,
     ) -> Result<Tensor<f32>> {
-        let x = self.res.forward(eng, y_hat)?;
+        // `x = f(&x)` frees the previous map as soon as the next one exists (a shadowing `let`
+        // would keep every one of them alive until the function returns).
+        let mut x = self.res.forward(eng, y_hat)?;
         stop.check()?;
-        let x = self.act1.forward(eng, self.up1.forward(eng, &x)?)?;
-        let x = x.crop_par(eng, h.div_ceil(8), w.div_ceil(8))?;
+        x = self.up1.forward(eng, &x)?;
+        x = self.act1.forward(eng, x)?;
+        x = x.crop_par(eng, h.div_ceil(8), w.div_ceil(8))?;
         stop.check()?;
-        let x = self.cab.forward(eng, &self.up2.forward(eng, &x)?)?;
-        let x = x.crop_par(eng, h.div_ceil(4), w.div_ceil(4))?;
+        x = self.up2.forward(eng, &x)?;
+        x = self.cab.forward(eng, &x)?;
+        x = x.crop_par(eng, h.div_ceil(4), w.div_ceil(4))?;
         stop.check()?;
-        let x = self.act2.forward(eng, x)?;
+        x = self.act2.forward(eng, x)?;
         stop.check()?;
-        let x = fast::pixel_shuffle(eng, &self.conv3.forward(eng, &x)?, 2)?;
+        x = self.conv3.forward(eng, &x)?;
+        x = fast::pixel_shuffle(eng, &x, 2)?;
         stop.check()?;
-        let x = self.tam.forward(eng, x)?;
-        let x = x.crop_par(eng, h.div_ceil(2), w.div_ceil(2))?;
+        x = self.tam.forward(eng, x)?;
+        x = x.crop_par(eng, h.div_ceil(2), w.div_ceil(2))?;
         stop.check()?;
-        let x = self.act3.forward(eng, x)?;
+        x = self.act3.forward(eng, x)?;
         stop.check()?;
-        let mut x = self.up4.forward(eng, &x)?.to_planar()?;
+        x = self.up4.forward(eng, &x)?;
+        let mut x = x.to_planar()?;
         denormalize(&mut x);
         Ok(x)
     }
@@ -292,21 +306,21 @@ impl LightPrimary {
         fast::relu(&mut x);
         fast::add_assign(&mut x, y_hat)?;
         stop.check()?;
-        let x = self.act1.forward(eng, self.up1.forward(eng, &x)?)?;
-        let x = x.crop_par(eng, h.div_ceil(8), w.div_ceil(8))?;
+        x = self.up1.forward(eng, &x)?;
+        x = self.act1.forward(eng, x)?;
+        x = x.crop_par(eng, h.div_ceil(8), w.div_ceil(8))?;
         stop.check()?;
-        let x = self
-            .up2
-            .forward(eng, &x)?
-            .crop_par(eng, h.div_ceil(4), w.div_ceil(4))?;
+        x = self.up2.forward(eng, &x)?;
+        x = x.crop_par(eng, h.div_ceil(4), w.div_ceil(4))?;
         stop.check()?;
-        let x = self.act2.forward(eng, x)?;
+        x = self.act2.forward(eng, x)?;
         stop.check()?;
-        let x = self.conv3.forward(eng, &x)?;
+        x = self.conv3.forward(eng, &x)?;
         stop.check()?;
-        let x = self.act3.forward(eng, x)?;
+        x = self.act3.forward(eng, x)?;
         stop.check()?;
-        let mut x = fast::pixel_shuffle_to_planar(&self.conv4.forward(eng, &x)?, 4)?;
+        x = self.conv4.forward(eng, &x)?;
+        let mut x = fast::pixel_shuffle_to_planar(&x, 4)?;
         denormalize(&mut x);
         Ok(x)
     }
@@ -362,19 +376,22 @@ impl HopSecondary {
         w: usize,
         stop: &dyn Stop,
     ) -> Result<Tensor<f32>> {
-        let x = self.cab.forward(eng, &self.up2.forward(eng, x)?)?;
-        let x = x.crop_par(eng, h.div_ceil(8), w.div_ceil(8))?;
+        let mut x = self.up2.forward(eng, x)?;
+        x = self.cab.forward(eng, &x)?;
+        x = x.crop_par(eng, h.div_ceil(8), w.div_ceil(8))?;
         stop.check()?;
-        let x = self.act2.forward(eng, x)?;
+        x = self.act2.forward(eng, x)?;
         stop.check()?;
-        let x = fast::pixel_shuffle(eng, &self.conv3.forward(eng, &x)?, 2)?;
+        x = self.conv3.forward(eng, &x)?;
+        x = fast::pixel_shuffle(eng, &x, 2)?;
         stop.check()?;
-        let x = self.tam.forward(eng, x)?;
-        let x = x.crop_par(eng, h.div_ceil(4), w.div_ceil(4))?;
+        x = self.tam.forward(eng, x)?;
+        x = x.crop_par(eng, h.div_ceil(4), w.div_ceil(4))?;
         stop.check()?;
-        let x = self.act3.forward(eng, x)?;
+        x = self.act3.forward(eng, x)?;
         stop.check()?;
-        fast::pixel_shuffle_to_planar(&self.up4.forward(eng, &x)?, 2)
+        x = self.up4.forward(eng, &x)?;
+        fast::pixel_shuffle_to_planar(&x, 2)
     }
 }
 
@@ -414,18 +431,19 @@ impl LightSecondary {
         w: usize,
         stop: &dyn Stop,
     ) -> Result<Tensor<f32>> {
-        let x = self
+        let mut x = self
             .up
             .forward(eng, x)?
             .crop_par(eng, h.div_ceil(8), w.div_ceil(8))?;
         stop.check()?;
-        let x = self.act2.forward(eng, x)?;
+        x = self.act2.forward(eng, x)?;
         stop.check()?;
-        let x = self.conv3.forward(eng, &x)?;
+        x = self.conv3.forward(eng, &x)?;
         stop.check()?;
-        let x = self.act3.forward(eng, x)?;
+        x = self.act3.forward(eng, x)?;
         stop.check()?;
-        fast::pixel_shuffle_to_planar(&self.conv4.forward(eng, &x)?, 8)
+        x = self.conv4.forward(eng, &x)?;
+        fast::pixel_shuffle_to_planar(&x, 8)
     }
 }
 
@@ -480,10 +498,16 @@ impl SynthesisSecondary {
                 "chroma latent larger than the luma latent",
             ));
         }
-        let x = BTensor::cat(&[&y_hat_luma.crop(lh, lw)?, y_hat_chroma])?;
+        let x = if (y_hat_luma.h, y_hat_luma.w) == (lh, lw) {
+            BTensor::cat(&[y_hat_luma, y_hat_chroma])?
+        } else {
+            BTensor::cat(&[&y_hat_luma.crop(lh, lw)?, y_hat_chroma])?
+        };
         let info = self.combine.forward(eng, &x)?;
+        drop(x);
         stop.check()?;
         let x = BTensor::cat(&[&info, y_hat_chroma])?;
+        drop(info);
         let mut x = match &self.tail {
             SecondaryTail::Light(m) => m.forward(eng, &x, h, w, stop)?,
             SecondaryTail::Hop(m) => m.forward(eng, &x, h, w, stop)?,

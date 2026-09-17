@@ -27,6 +27,7 @@ USAGE:
     zenjpegai info <in.bits>
     zenjpegai pack-models --models <dir> --out <file.zjb> [--model <0..3>]... [--op <sop|bop|hop>]...
                           [--only <common|synthesis>]
+    zenjpegai preload <in.bits>      load the networks the stream needs, decode nothing
 
 OPTIONS:
     --models <path>    directory of upstream checkpoints (the reference software's models/), or a
@@ -37,6 +38,8 @@ OPTIONS:
     --scalar           no SIMD (for debugging; every tier produces identical pixels)
     --repeat <n>       decode n times and print per-run timing (models stay loaded)
     --time             print timing
+    --pool-mb <n>      cap the recycled-buffer pool at n MiB (default 1024; 0 = no recycling)
+    --discard          decode only, write no file (profiling; <out.png> is ignored)
 
 pack-models writes a ZJB1 bundle holding only the tensors the decoder reads for the given models
 (default: all four) and operating points (default: all three), byte for byte: pixels decoded
@@ -59,6 +62,8 @@ struct Args {
     scalar: bool,
     repeat: usize,
     time: bool,
+    discard: bool,
+    pool_mb: Option<usize>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -75,6 +80,8 @@ fn parse_args() -> Result<Args, String> {
         scalar: false,
         repeat: 1,
         time: false,
+        discard: false,
+        pool_mb: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -123,6 +130,14 @@ fn parse_args() -> Result<Args, String> {
                 a.time = true;
             }
             "--time" => a.time = true,
+            "--discard" => a.discard = true,
+            "--pool-mb" => {
+                a.pool_mb = Some(
+                    value("--pool-mb")?
+                        .parse()
+                        .map_err(|e| format!("--pool-mb: {e}"))?,
+                )
+            }
             "-h" | "--help" => return Err(String::new()),
             s if s.starts_with("--") => return Err(format!("unknown option `{s}`")),
             _ => a.positional.push(arg),
@@ -200,6 +215,19 @@ fn run() -> Result<(), String> {
             );
             Ok(())
         }
+        ["preload", input] => {
+            let models = args
+                .models
+                .ok_or("no checkpoint directory: pass --models or set ZENJPEGAI_MODELS")?;
+            let stream = std::fs::read(input).map_err(|e| format!("{input}: {e}"))?;
+            let t = Instant::now();
+            Decoder::new(models)
+                .operating_point(args.op)
+                .preload(&stream)
+                .map_err(|e| format!("{e:?}"))?;
+            eprintln!("models loaded: {:.1} ms", t.elapsed().as_secs_f64() * 1e3);
+            Ok(())
+        }
         ["decode", input, output] => {
             let models = args
                 .models
@@ -211,6 +239,9 @@ fn run() -> Result<(), String> {
             };
             let engine = Engine::with(tier, !args.single_thread && cfg!(feature = "parallel"));
             let stream = std::fs::read(input).map_err(|e| format!("{input}: {e}"))?;
+            if let Some(mb) = args.pool_mb {
+                zenjpegai::nn::fast::set_pool_limit(mb << 20);
+            }
             let decoder = if models.is_file() {
                 let bytes = std::fs::read(&models).map_err(|e| format!("{models:?}: {e}"))?;
                 let bundle = PackedBundle::parse(bytes).map_err(|e| format!("{e:?}"))?;
@@ -247,6 +278,11 @@ fn run() -> Result<(), String> {
                 image = Some(img);
             }
             let image = image.ok_or("nothing decoded")?;
+            // The PNG encoder needs memory of its own: hand the decoder's recycled buffers back.
+            decoder.release_buffers();
+            if args.discard {
+                return Ok(());
+            }
             let t = Instant::now();
             let bytes = match image {
                 // 8 bit: 8-bit PNG. 10 bit: 16-bit PNG, samples in the top bits with the low

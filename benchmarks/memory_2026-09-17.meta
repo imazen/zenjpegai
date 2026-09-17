@@ -1,0 +1,30 @@
+memory_2026-09-17.tsv — peak heap of one `zenjpegai decode` process, heaptrack 1.5 (peak heap memory consumption;
+peak_rss includes heaptrack's own overhead). Produced by scripts/bench/memory.sh.
+
+host:    AMD Ryzen 9 9950X3D, 32 threads, Linux 7.0, rustc 1.98.1, release profile, default features + cli
+streams: /mnt/v/output/zenjpegai/reference/vectors/<stream>/stream.bits
+         img30_* = 560x888 (SOP / BOP / HOP, untiled); img01_base = 2096x1400 BOP, 1024-sample synthesis tiles
+threads: 32 = rayon pool, 1 = --single-thread
+mode:    decode = --discard (library decode only), cli = decode + PNG write
+
+labels
+  before*        commit 3215de4 (= 663b86d for memory) plus the --discard flag and release_buffers() before the PNG write
+  after*         this commit: tensors dropped as soon as dead in the networks (no shadowed maps), synthesis tiles
+                 written straight into cropped / subsampled output planes, entropy-stage tensors shed after use,
+                 in-place YCbCr->RGB
+  after-pool256  --pool-mb 256 (nn::fast::set_pool_limit)
+  after-pool0    --pool-mb 0: no buffer recycling = the memory the decode itself holds; the Limits /
+                 estimate_memory model is calibrated on these rows
+
+  rebased-0df095c*  the same changes rebased onto main 0df095c (10-bit / YUV / subsampled output landed meanwhile and
+                 replaced the output stage: the in-place YCbCr->RGB of the 'after' rows is not in it). THIS is the
+                 state that was pushed; 'after' rows document the pre-rebase tree.
+
+Unmodified 663b86d, cli mode (the CLI kept the pool alive while writing the PNG): 85.08 / 146.35 / 1260 / 409.57 MB
+(SOP / BOP / HOP / 2096x1400, threaded).
+
+Resident packed networks after Decoder::preload (marker-allocation method, heaptrack): SOP 17.35 MB, BOP 18.54 MB,
+HOP 31.20 MB; transient peak while loading: 30.18 / 30.18 / 41.63 MB.
+
+Timing of the same two binaries: decode_before_after_2026-09-17.tsv (no slowdown; the box was shared, so differences
+below ~10 % are noise).

@@ -252,8 +252,17 @@ pub fn synthesize_with(
     )?;
 
     let v = eng.tier.block();
-    let mut rec_y = Tensor::<f32>::zeros(1, h, w)?;
-    let mut rec_uv = Tensor::<f32>::zeros(2, h, w)?;
+    // Tiles are written straight into the output planes: luma cropped to the displayed size,
+    // chroma subsampled (`rec_UV[:, :, :out_h:c_ver, :out_w:c_hor]`). Full-size staging planes
+    // would triple the memory held here.
+    let (sv, sh) = (hdr.c_ver as usize, hdr.c_hor as usize);
+    if sv == 0 || sh == 0 {
+        return Err(Error::InvalidData("chroma subsampling factor"));
+    }
+    let (ch, cw) = (out_h.div_ceil(sv), out_w.div_ceil(sh));
+    let mut rec_y = Tensor::<f32>::zeros(1, out_h, out_w)?;
+    let mut rec_u = Tensor::<f32>::zeros(1, ch, cw)?;
+    let mut rec_v = Tensor::<f32>::zeros(1, ch, cw)?;
     for tile in &tiles {
         stop.check()?;
         let (img, lat) = (tile.image, tile.latent);
@@ -270,35 +279,43 @@ pub fn synthesize_with(
                 BTensor::from_planar(&win(y_hat[1])?, v)?,
             )
         };
+        let (ox, oy) = tile.core_offset;
+        let core = tile.core;
+
         let ty = luma.forward_with(eng, &by, img.height, img.width, stop)?;
+        let cols = core.width.min(out_w.saturating_sub(core.x));
+        if ty.h < oy + core.height || ty.w < ox + core.width {
+            return Err(Error::InvalidData("synthesis tile smaller than its core"));
+        }
+        for y in 0..core.height.min(out_h.saturating_sub(core.y)) {
+            let s = &ty.data[(oy + y) * ty.w + ox..][..cols];
+            let d = (core.y + y) * out_w + core.x;
+            rec_y.data[d..d + cols].copy_from_slice(s);
+        }
+        drop(ty);
+
         let tuv = chroma.forward_with(eng, &by, &buv, img.height, img.width, stop)?;
-        for (dst, src) in [(&mut rec_y, &ty), (&mut rec_uv, &tuv)] {
-            let (ox, oy) = tile.core_offset;
-            for c in 0..dst.c {
-                for y in 0..tile.core.height {
-                    let s = &src.plane(c)[(oy + y) * src.w + ox..][..tile.core.width];
-                    let d = (tile.core.y + y) * dst.w + tile.core.x;
-                    dst.plane_mut(c)[d..d + tile.core.width].copy_from_slice(s);
+        drop((by, buv));
+        if tuv.c != 2 || tuv.h < oy + core.height || tuv.w < ox + core.width {
+            return Err(Error::InvalidData("synthesis tile smaller than its core"));
+        }
+        for (c, dst) in [&mut rec_u, &mut rec_v].into_iter().enumerate() {
+            let src = tuv.plane(c);
+            // Picture rows / columns of this tile's core that survive the subsampling.
+            for py in (core.y.next_multiple_of(sv)..(core.y + core.height).min(out_h)).step_by(sv) {
+                let srow = &src[(oy + py - core.y) * tuv.w..][..tuv.w];
+                let drow = &mut dst.data[(py / sv) * cw..][..cw];
+                for px in
+                    (core.x.next_multiple_of(sh)..(core.x + core.width).min(out_w)).step_by(sh)
+                {
+                    drow[px / sh] = srow[ox + px - core.x];
                 }
             }
         }
     }
-    let rec_y = rec_y.crop(out_h, out_w)?;
-
-    // rec_UV[:, :, :out_h:c_ver, :out_w:c_hor]
-    let (sv, sh) = (hdr.c_ver as usize, hdr.c_hor as usize);
-    let (ch, cw) = (out_h.div_ceil(sv), out_w.div_ceil(sh));
-    let mut planes = [
-        Tensor::<f32>::zeros(1, ch, cw)?,
-        Tensor::<f32>::zeros(1, ch, cw)?,
-    ];
-    for (c, plane) in planes.iter_mut().enumerate() {
-        for y in 0..ch {
-            for x in 0..cw {
-                plane.data[y * cw + x] = rec_uv.at(c, y * sv, x * sh);
-            }
-        }
-    }
-    let [u, v] = planes;
-    Ok(Planes { y: rec_y, u, v })
+    Ok(Planes {
+        y: rec_y,
+        u: rec_u,
+        v: rec_v,
+    })
 }

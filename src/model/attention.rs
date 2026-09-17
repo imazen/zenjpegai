@@ -36,6 +36,7 @@ impl ResidualBlock {
         let mut t = self.conv1.forward(eng, x)?;
         fast::relu(&mut t);
         let mut out = self.conv2.forward(eng, &t)?;
+        drop(t);
         fast::add_assign(&mut out, x)?;
         Ok(out)
     }
@@ -87,10 +88,13 @@ impl Cab {
 
     /// The reference's `gama` argument is always 1 in the decoder, so it is not a parameter.
     pub fn forward(&self, eng: &Engine, x: &BTensor) -> Result<BTensor> {
-        let mut trunk = self.trunk[1].forward(eng, &self.trunk[0].forward(eng, x)?)?;
-        let m = self.subscale.forward(eng, x)?;
-        let m = self.mask3.forward(eng, &self.mask2.forward(eng, &m)?)?;
-        let mut m = self.upscale.forward(eng, &m)?;
+        // `x = f(&x)` frees each map as soon as the next exists; see `synthesis.rs`.
+        let mut trunk = self.trunk[0].forward(eng, x)?;
+        trunk = self.trunk[1].forward(eng, &trunk)?;
+        let mut m = self.subscale.forward(eng, x)?;
+        m = self.mask2.forward(eng, &m)?;
+        m = self.mask3.forward(eng, &m)?;
+        m = self.upscale.forward(eng, &m)?;
         if (m.h, m.w) != (trunk.h, trunk.w) {
             // Odd input sizes: the reference would fail on the shape mismatch as well.
             return Err(Error::InvalidArgument("CAB: odd feature map size"));
@@ -181,20 +185,26 @@ impl TransformerBlock {
 
     fn forward(&self, eng: &Engine, mut x: BTensor) -> Result<BTensor> {
         // x = x + attn(prep(x))
-        let t = self.prep_norm.forward(eng, &x)?;
-        let t = self
-            .prep_conv2
-            .forward(eng, &self.prep_conv1.forward(eng, &t)?)?;
-        let a = math::channel_attention(eng, &t.to_planar()?, HEADS, &self.temperature)?;
-        let a = self
-            .attn_out
-            .forward(eng, &BTensor::from_planar(&a, x.v)?)?;
+        // Each map is freed as soon as the next exists: the 3x and 8x wide ones here are the
+        // largest allocations of a HOP decode.
+        let mut t = self.prep_norm.forward(eng, &x)?;
+        t = self.prep_conv1.forward(eng, &t)?;
+        t = self.prep_conv2.forward(eng, &t)?;
+        let planar = t.to_planar()?;
+        drop(t);
+        let a = math::channel_attention(eng, &planar, HEADS, &self.temperature)?;
+        drop(planar);
+        let blocked = BTensor::from_planar(&a, x.v)?;
+        drop(a);
+        let a = self.attn_out.forward(eng, &blocked)?;
+        drop(blocked);
         fast::add_assign(&mut x, &a)?;
+        drop(a);
 
         // x = x + ffn(x): elu(first half) * second half
-        let t = self.ffn_norm.forward(eng, &x)?;
-        let t = self.ffn_dw.forward(eng, &self.ffn_in.forward(eng, &t)?)?;
-        let mut t = t;
+        let mut t = self.ffn_norm.forward(eng, &x)?;
+        t = self.ffn_in.forward(eng, &t)?;
+        t = self.ffn_dw.forward(eng, &t)?;
         let f = if self.hidden.is_multiple_of(t.v) {
             // Channel blocks are the outermost axis, so the two halves are two slices.
             let n = self.hidden / t.v * t.h * t.w * t.v;
@@ -205,13 +215,15 @@ impl TransformerBlock {
             self.ffn_out.forward(eng, &t)?
         } else {
             let mut p = t.to_planar_par(eng)?;
+            drop(t);
             let n = self.hidden * p.h * p.w;
             let (x1, x2) = p.data.split_at_mut(n);
             math::elu_gate(eng, x1, x2)?;
             p.data.truncate(n);
             p.c = self.hidden;
-            self.ffn_out
-                .forward(eng, &BTensor::from_planar_par(eng, &p, x.v)?)?
+            let b = BTensor::from_planar_par(eng, &p, x.v)?;
+            drop(p);
+            self.ffn_out.forward(eng, &b)?
         };
         fast::add_assign(&mut x, &f)?;
         Ok(x)
@@ -251,7 +263,11 @@ impl Tam {
 
     pub fn forward(&self, eng: &Engine, x: BTensor) -> Result<BTensor> {
         let x = match &self.resample {
-            Some((ds, _)) => ds.forward(eng, &x)?,
+            Some((ds, _)) => {
+                let t = ds.forward(eng, &x)?;
+                drop(x);
+                t
+            }
             None => x,
         };
         let x = self.blocks[0].forward(eng, x)?;

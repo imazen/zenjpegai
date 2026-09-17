@@ -69,13 +69,17 @@ impl HyperDecoder {
             z_hat.w,
             z_hat.data.iter().map(|&v| v as f32).collect(),
         )?;
-        let x = BTensor::from_planar(&x, eng.tier.block())?;
-        let x = self.conv1.forward(eng, &x)?;
+        // `x = f(&x)` frees each map as soon as the next exists.
+        let mut x = BTensor::from_planar(&x, eng.tier.block())?;
+        x = self.conv1.forward(eng, &x)?;
         stop.check()?;
-        let mut x = self.conv2.forward(eng, &x)?.crop(out_h, out_w)?;
+        x = self.conv2.forward(eng, &x)?;
+        if (x.h, x.w) != (out_h, out_w) {
+            x = x.crop(out_h, out_w)?;
+        }
         fast::relu6(&mut x);
         stop.check()?;
-        let mut x = self.conv3.forward(eng, &x)?;
+        x = self.conv3.forward(eng, &x)?;
         fast::relu6(&mut x);
         stop.check()?;
         self.conv4.forward(eng, &x)

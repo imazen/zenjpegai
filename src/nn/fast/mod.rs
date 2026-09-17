@@ -21,7 +21,7 @@ pub use layers::{
     ConvLayer, ConvTransposeLayer, add_assign, gate, pixel_shuffle, pixel_shuffle_to_planar, relu,
     relu6,
 };
-pub use tensor::{BTensor, release_buffers};
+pub use tensor::{BTensor, pool_limit, release_buffers, set_pool_limit};
 
 /// SIMD tier, resolved once per engine.
 #[derive(Clone, Copy, Debug)]

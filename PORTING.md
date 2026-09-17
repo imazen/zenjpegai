@@ -392,3 +392,65 @@ encoder yet**: deliverable 1 of 7 landed (networks + Gate 1), nothing of 2..7.
      chroma; `z_hat` is also computed per tile and merged by core areas: see the tile log in
      `img01_base_off_bpp050/encoder.log`), `bitrate_matcher/`, tools, benchmarks.
   - `z`: clamp to `[-31, 31]`, round half to even, symbol = `z + 31` (checked exact).
+
+
+### Zen codec standards (state 2026-09-17, agent `standards`; missing first)
+
+User instruction: "apply all zen codec standards including whereat, enough, zencodec traits, bounded and
+minimized mem use, and fast build times." Seven deliverables were scoped; two landed, five are open.
+
+**Not started**
+
+- **zencodec traits** (feature `zencodec`, new `src/codec.rs`). Pattern to copy: `~/work/zen/zenextras/zenjp2/src/codec.rs`
+  (decode-only, `Unsupported<At<CodecError>>` for streaming / animation, `copy_decode_to_sink` for `push_decoder`)
+  and `zenextras/zensvg/src/format.rs` (custom format: `static ImageFormatDefinition::new(..)` +
+  `ImageFormat::Custom(&DEF)`; detect = bytes `FF 80` (SOC) followed by a PIH marker). Published API to target:
+  zencodec 0.1.26 (`cargo read zencodec`), zenpixels 0.2.16. Mapping: `DecoderConfig` = a `Clone + Send + Sync` struct
+  holding `Arc<dyn ModelSource + Send + Sync>` + `Engine` + operating point + `Limits` (`Decoder` itself is not
+  `Clone`: wrap it in an `Arc` so the model cache is shared by jobs); `DecodeJob::with_stop` -> `decode_picture_with`,
+  `with_limits(ResourceLimits)` -> `Limits` (max_pixels / max_width / max_height / max_input_bytes /
+  max_memory_bytes map one to one); `probe` / `output_info` = `Decoder::read_headers` (width, height, bit depth,
+  CICP / MDCV / CLLI from `RenderingInfo`); `estimate_decode_resources` = `estimate_memory` (needs the operating
+  point, which `ImageCharacteristics` does not carry: use the config's, else BOP); errors need
+  `impl zencodec::CategorizedError for Error` + `From<Error> for At<CodecError>`. Known mismatch to write down
+  when implementing: `DecoderConfig::formats()` / registry detection are static, while this codec cannot decode
+  without an external model source, so a default-constructed config can probe but not decode.
+- **Public API hygiene**: internal modules are still `pub` (`nn`, `model`, `tools`, `mans`, `bitio`, `container`,
+  `tensor`, `weights`, `filters`, most of `decoder`). Plan: `unstable-internals` feature; in `src/lib.rs` only,
+  `#[cfg(feature = "unstable-internals")] pub mod x; #[cfg(not(..))] pub(crate) mod x;` (paths stay stable);
+  `required-features = ["unstable-internals"]` on every `[[test]]` / `[[example]]` / bench that imports internals
+  (all of `tests/*.rs` except `api_ref.rs`), wired into the justfile and the agents' gate command; the CLI uses
+  `nn::fast::{Engine, Tier, set_pool_limit}`, `model::*`, `weights::packed::*`, so either `cli` implies the feature
+  or those get re-exported at the root; then `#![warn(missing_docs)]`. `Decoder`, `Limits`, `MemoryEstimate`,
+  `Error` already return `whereat::At<Error>` / are documented.
+- **no_std + alloc**: `cargo check --no-default-features` was not run by this agent. Known std-only float calls to
+  route through `libm`: `round_ties_even` and `clamp`/`floor`/`sqrt`/`mul_add` on f32/f64 in `decoder/output.rs`,
+  `nn/*`, `model/*`, `filters/*`; `decoder/limits.rs` and the `*_with` stop plumbing are core-only already
+  (`enough` is a no_std dependency). Add the check (and `--target wasm32-unknown-unknown`) to the justfile and CI.
+- **Build times**: only one data point exists: clean `cargo build --release --features cli -j 8 --timings` of
+  663b86d took 7.6 s wall on the 9950X3D (incremental release profile). `cargo llvm-lines` (installed) was not run;
+  the `nn/fast/conv.rs` tier x block x stride instantiation audit is open. Nothing was recorded under
+  `benchmarks/build_time_*`.
+- **CI**: no `.github/workflows/ci.yml` yet, no README badges. Required matrix: fmt, clippy `-D warnings`, tests on
+  ubuntu-latest / windows-11-arm / macos-15-intel / macos-latest, i686-unknown-linux-gnu via cross, the no_std
+  check, MSRV (manifest says 1.89: unverified; `is_multiple_of` and let-chains are in use). `reference-tests` must
+  stay out of CI. `Cargo.lock` is gitignored, which a CLI + MSRV job will want to revisit. Look up the current major
+  of every action before writing the workflow.
+
+**Landed (on origin/main)**
+
+- `enough::Stop`: `Decoder::decode_with` / `decode_picture_with`, `Error::Cancelled(StopReason)`; checks per
+  component / region / channel chunk (entropy), per region and layer (hyper-decoder, context model), per synthesis
+  tile and layer, between output stages. Not covered: inside the post-filters (`filters::apply` takes no stop
+  token; eICCI runs whole networks) and inside a single convolution. Test `tests/api_ref.rs` (reference-gated): a
+  2096x1400 decode performs >= 40 checks and aborts at exactly the tripping one.
+- `Limits` + `estimate_memory` + lower peak memory; numbers in `benchmarks/memory_2026-09-17.{tsv,meta}`.
+  Still open here: (1) the default 1 GiB buffer pool dominates HOP (1190 MB peak vs 442 MB held by the decode
+  itself at 560x888); `BTensor::zeros` / `pad_par` never reuse parked buffers, so padded maps park and are rarely
+  taken again: letting `zeros` take (and clear) a pooled buffer, or not parking buffers that came from `zeros`,
+  needs a timing study on a quiet machine before the default changes; (2) the output stage (`finish`) holds the
+  float planes and the result together, an in-place colour conversion (`output::to_rgb_planes_owned`, kept but
+  unused after the 10-bit / YUV rewrite) would save 12 B per sample; (3) `estimate_memory` is calibrated on four
+  8-bit 4:4:4 streams without post-filters (0.5 MP untiled SOP / BOP / HOP, 2.9 MP tiled BOP): post-filters,
+  10-bit and subsampled output are not modelled or measured; (4) under `max_memory_bytes` the decoder shrinks the
+  process-wide pool and never grows it back.

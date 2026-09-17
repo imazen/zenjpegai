@@ -25,5 +25,6 @@ pub mod weights;
 
 #[cfg(feature = "std")]
 pub use decoder::Decoder;
+pub use decoder::limits::{Limits, MemoryEstimate, estimate_memory};
 pub use decoder::output::{Picture, RgbImage, YuvImage};
 pub use error::Error;

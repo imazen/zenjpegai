@@ -15,15 +15,35 @@ use crate::tensor::Tensor;
 /// A synthesis pass allocates a few hundred feature maps of tens of megabytes; handing each back
 /// to the allocator means an `munmap` per tensor and a page fault per 4 KiB of the next one.
 /// Dropped [`BTensor`]s park their buffer here instead and [`BTensor::scratch`] reuses it without
-/// clearing. The pool is bounded (24 buffers, 1 GiB) and [`release_buffers`] empties it.
+/// clearing. The pool is bounded (24 buffers, 1 GiB unless [`set_pool_limit`] says otherwise) and
+/// [`release_buffers`] empties it.
 #[cfg(feature = "std")]
 mod pool {
     use alloc::vec::Vec;
+    use core::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
 
     const MAX_BUFFERS: usize = 24;
-    /// Most floats parked at once (1 GiB).
-    const MAX_FLOATS: usize = 1 << 28;
+    /// Most floats parked at once by default (1 GiB).
+    pub const DEFAULT_MAX_FLOATS: usize = 1 << 28;
+    /// Most floats parked at once.
+    static MAX_FLOATS: AtomicUsize = AtomicUsize::new(DEFAULT_MAX_FLOATS);
+
+    pub fn set_limit(floats: usize) {
+        MAX_FLOATS.store(floats, Ordering::Relaxed);
+        // Shrink to the new limit, smallest buffers first (the policy of `give`).
+        let Ok(mut pool) = POOL.lock() else { return };
+        while pool.iter().map(Vec::capacity).sum::<usize>() > floats {
+            let Some((i, _)) = pool.iter().enumerate().min_by_key(|(_, b)| b.capacity()) else {
+                break;
+            };
+            pool.swap_remove(i);
+        }
+    }
+
+    pub fn limit() -> usize {
+        MAX_FLOATS.load(Ordering::Relaxed)
+    }
     /// Below this many floats the allocator is cheaper than the lock.
     const MIN_LEN: usize = 1 << 14;
 
@@ -52,7 +72,8 @@ mod pool {
         if buf.capacity() < MIN_LEN {
             return;
         }
-        if buf.capacity() > MAX_FLOATS {
+        let max_floats = limit();
+        if buf.capacity() > max_floats {
             return;
         }
         let Ok(mut pool) = POOL.lock() else { return };
@@ -60,7 +81,7 @@ mod pool {
         // fault in again. Give up if the smallest is no smaller than the newcomer.
         loop {
             let held: usize = pool.iter().map(Vec::capacity).sum();
-            if pool.len() < MAX_BUFFERS && held + buf.capacity() <= MAX_FLOATS {
+            if pool.len() < MAX_BUFFERS && held + buf.capacity() <= max_floats {
                 break;
             }
             let Some((i, _)) = pool.iter().enumerate().min_by_key(|(_, b)| b.capacity()) else {
@@ -85,6 +106,23 @@ mod pool {
 pub fn release_buffers() {
     #[cfg(feature = "std")]
     pool::clear();
+}
+
+/// Most bytes the process-wide buffer pool may keep parked (default 1 GiB; 0 turns recycling
+/// off). Buffers beyond the new limit are freed at once. Without `std` there is no pool.
+pub fn set_pool_limit(bytes: usize) {
+    #[cfg(feature = "std")]
+    pool::set_limit(bytes / core::mem::size_of::<f32>());
+    #[cfg(not(feature = "std"))]
+    let _ = bytes;
+}
+
+/// Current limit of the buffer pool in bytes (see [`set_pool_limit`]); 0 without `std`.
+pub fn pool_limit() -> usize {
+    #[cfg(feature = "std")]
+    return pool::limit() * core::mem::size_of::<f32>();
+    #[cfg(not(feature = "std"))]
+    0
 }
 
 #[derive(Debug)]

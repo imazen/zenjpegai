@@ -55,7 +55,7 @@ impl FusionPredNet {
     fn forward(&self, eng: &Engine, x: &BTensor) -> Result<BTensor> {
         let mut x = self.conv1.forward(eng, x)?;
         fast::relu(&mut x);
-        let mut x = self.conv2.forward(eng, &x)?;
+        x = self.conv2.forward(eng, &x)?;
         fast::relu(&mut x);
         self.conv3.forward(eng, &x)
     }
@@ -147,11 +147,15 @@ impl ContextModel {
             let psi_s = psi.slice_channels(s * c, (s + 1) * c)?;
             let mean = match (&phase.context, &context) {
                 (Some((pointwise, grouped)), Some(ctx)) => {
-                    let t = grouped.forward(eng, &pointwise.forward(eng, ctx)?)?;
-                    phase.fusion.forward(eng, &BTensor::cat(&[&t, &psi_s])?)?
+                    let mut t = pointwise.forward(eng, ctx)?;
+                    t = grouped.forward(eng, &t)?;
+                    let joined = BTensor::cat(&[&t, &psi_s])?;
+                    drop(t);
+                    phase.fusion.forward(eng, &joined)?
                 }
                 _ => phase.fusion.forward(eng, &psi_s)?,
             };
+            drop(psi_s);
             // y_hat_s = residual_s + mean, on the half-resolution grid. Positions of the padded
             // (odd-size) border read a zero residual, like the reference's F.pad.
             let (py, px) = STAGE_POSITIONS[s];

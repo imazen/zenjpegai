@@ -156,6 +156,12 @@ pub fn to_source_format(hdr: &PictureHeader, planes: Planes) -> Result<Planes> {
 
 /// `colour_processing.post_processing` for `colour_transform_idx = 1` on 4:4:4 planes.
 pub fn to_rgb_planes(hdr: &PictureHeader, planes: &Planes) -> Result<RgbPlanes> {
+    to_rgb_planes_owned(hdr, planes.clone())
+}
+
+/// [`to_rgb_planes`] that converts in place: the three input planes become the output planes,
+/// so no second set of full-size planes exists at any point.
+pub fn to_rgb_planes_owned(hdr: &PictureHeader, planes: Planes) -> Result<RgbPlanes> {
     if hdr.colour_transform != ColourTransform::Bt709 {
         return Err(Error::Unsupported(
             "colour transforms other than BT.709 YCbCr to RGB",
@@ -169,23 +175,18 @@ pub fn to_rgb_planes(hdr: &PictureHeader, planes: &Planes) -> Result<RgbPlanes> 
     let kby = KBY as f32;
     let gu = (KB * KBY / KG) as f32;
     let gv = (KR * KRY / KG) as f32;
-    let n = h * w;
-    let (mut r, mut g, mut b) = (
-        Vec::with_capacity(n),
-        Vec::with_capacity(n),
-        Vec::with_capacity(n),
-    );
-    for i in 0..n {
+    let (mut r, mut g, mut b) = (planes.y.data, planes.u.data, planes.v.data);
+    for ((py, pu), pv) in r.iter_mut().zip(g.iter_mut()).zip(b.iter_mut()) {
         // to_RGB_: [0, 255] -> [0, 1], convert, back to [0, 255]; then clip_data_.
-        let y = convert_range(planes.y.data[i], 255.0, 1.0);
-        let u = convert_range(planes.u.data[i], 255.0, 1.0) - 0.5;
-        let v = convert_range(planes.v.data[i], 255.0, 1.0) - 0.5;
+        let y = convert_range(*py, 255.0, 1.0);
+        let u = convert_range(*pu, 255.0, 1.0) - 0.5;
+        let v = convert_range(*pv, 255.0, 1.0) - 0.5;
         let rv = y + kry * v;
         let gvv = y - gu * u - gv * v;
         let bv = y + kby * u;
-        r.push(convert_range(rv, 1.0, 255.0).clamp(0.0, 255.0));
-        g.push(convert_range(gvv, 1.0, 255.0).clamp(0.0, 255.0));
-        b.push(convert_range(bv, 1.0, 255.0).clamp(0.0, 255.0));
+        *py = convert_range(rv, 1.0, 255.0).clamp(0.0, 255.0);
+        *pu = convert_range(gvv, 1.0, 255.0).clamp(0.0, 255.0);
+        *pv = convert_range(bv, 1.0, 255.0).clamp(0.0, 255.0);
     }
     Ok(RgbPlanes {
         width: w,
