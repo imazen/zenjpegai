@@ -1,8 +1,8 @@
 //! Reconstruction stage of the decoder: entropy-stage output → picture.
 //!
 //! Ports `CcsGvaeSGMM.forward` / `decompress` (`ccs_sgmm_tool.py`) and the hyper-decode /
-//! context / synthesis steps of `common_modules.py`, for a picture that is one region and one
-//! synthesis tile. **Region and tile partitioning of this stage is not ported yet.**
+//! context / synthesis steps of `common_modules.py`, including region partitioning (dependent and
+//! independent) and synthesis tiling.
 
 use super::entropy::ComponentEntropy;
 use crate::error::{Error, Result};
@@ -12,35 +12,145 @@ use crate::model::mcm::upshuffle_psi;
 use crate::model::synthesis::{SynthesisPrimary, SynthesisSecondary};
 use crate::nn::fast::{BTensor, Engine};
 use crate::tensor::Tensor;
+use crate::tools::regions::{Area, Plane, region_grid};
 use crate::tools::tiles::synthesis_tiles;
 
 /// Latent-domain result for one component.
 #[derive(Clone, Debug)]
 pub struct Latent {
-    pub psi: BTensor,
+    pub psi: Tensor<f32>,
     pub y_hat: Tensor<f32>,
 }
 
-/// `hyper_decode_tile` + `decompress_ar_scale_tile` for a single tile covering the component.
+/// `numSamplesTileOverlap` of the reference's hyper-decoder and context-model tile managers.
+/// It is not signalled: both managers are built with the parameter's default, and with dependent
+/// regions it decides how much of each region's result is dropped before merging
+/// (`48 / 2 / 32 = 0` psi samples, `48 / 2 / 16 = 1` latent sample per interior side).
+const HD_MCM_TILE_OVERLAP: usize = 48;
+
+/// `tiling.get_data` + `tiling.assign_data`: copy `src[:, oy.., ox..]` into `dst` at `core`,
+/// clamped the way tensor slicing clamps.
+fn assign(dst: &mut Tensor<f32>, core: Area, src: &Tensor<f32>, (ox, oy): (usize, usize)) {
+    let h = core
+        .height
+        .min(src.h.saturating_sub(oy))
+        .min(dst.h.saturating_sub(core.y));
+    let w = core
+        .width
+        .min(src.w.saturating_sub(ox))
+        .min(dst.w.saturating_sub(core.x));
+    let (dw, sw) = (dst.w, src.w);
+    for c in 0..dst.c.min(src.c) {
+        for y in 0..h {
+            let s = &src.plane(c)[(oy + y) * sw + ox..][..w];
+            let d = (core.y + y) * dw + core.x;
+            dst.plane_mut(c)[d..d + w].copy_from_slice(s);
+        }
+    }
+}
+
+/// Rows/columns the hyper-decoder crops after its transposed convolution
+/// (`cropping_layer(.., depth = 5)`, `parse_size_diff`); `divider` is 32 for luma and 16 for
+/// chroma (`skip_depth_step`).
+fn hyper_crop(len: usize, divider: usize) -> usize {
+    2 * len.div_ceil(2 * divider) - len.div_ceil(divider)
+}
+
+/// Hyper-decoder and context model of one component, region by region
+/// (`hyper_decode_tile`, `merge_psi_overlaps_of_tiles`, `extract_psi_for_mcm`,
+/// `decompress_ar_scale_tile`, `merge_y_hat_overlaps_of_tiles`). Regions are processed in raster
+/// order and merged by plain assignment, so where extended regions overlap the later one wins,
+/// as in the reference.
 pub fn reconstruct_latent(
     eng: &Engine,
+    hdr: &PictureHeader,
+    ccs: usize,
     model: &CommonModel,
     e: &ComponentEntropy,
 ) -> Result<Latent> {
     let (h, w) = (e.residual.h, e.residual.w);
-    let psi = model
-        .hyper_decoder
-        .forward(eng, &e.z_hat, h.div_ceil(2), w.div_ceil(2))?;
-    let y_hat = match &model.context {
-        Some(ctx) => ctx.decompress(eng, &e.residual, &psi)?,
-        None => {
-            let mut y = upshuffle_psi(&psi, h, w)?;
-            for (v, &r) in y.data.iter_mut().zip(&e.residual.data) {
-                *v += r;
-            }
-            y
+    let chs = e.residual.c;
+    let independent = hdr.regions.is_some_and(|r| r.independent);
+    let img = region_grid(hdr, ccs, Plane::Image);
+    let zg = region_grid(hdr, ccs, Plane::HyperLatent);
+    let pg = region_grid(hdr, ccs, Plane::Psi);
+    let lg = region_grid(hdr, ccs, Plane::Latent);
+    let n = img.extended.len();
+    let v = eng.tier.block();
+    let (pic_h, pic_w) = (hdr.height as usize, hdr.width as usize);
+
+    // 1. psi per region, merged.
+    let mut psi = Tensor::<f32>::zeros(4 * chs, h.div_ceil(2), w.div_ceil(2))?;
+    let mut psi_single = None;
+    for r in 0..n {
+        let (it, zt) = (img.extended[r], zg.extended[r]);
+        // The chroma hyper-decoder is told the half-size plane.
+        let (th, tw, divider) = if ccs == 0 {
+            (it.height, it.width, 32)
+        } else {
+            (it.height.div_ceil(2), it.width.div_ceil(2), 16)
+        };
+        let out_h = (2 * zt.height)
+            .checked_sub(hyper_crop(th, divider))
+            .ok_or(Error::InvalidData("region geometry"))?;
+        let out_w = (2 * zt.width)
+            .checked_sub(hyper_crop(tw, divider))
+            .ok_or(Error::InvalidData("region geometry"))?;
+        let z_tile;
+        let z = if n == 1 {
+            &e.z_hat
+        } else {
+            z_tile = e.z_hat.window(zt.x, zt.y, zt.width, zt.height)?;
+            &z_tile
+        };
+        let t = model.hyper_decoder.forward(eng, z, out_h, out_w)?;
+        assign(&mut psi, pg.extended[r], &t.to_planar()?, (0, 0));
+        if n == 1 && t.h == psi.h && t.w == psi.w {
+            psi_single = Some(t);
         }
-    };
+    }
+
+    // 2. y_hat per region, merged.
+    let mut y_hat = Tensor::<f32>::zeros(chs, h, w)?;
+    for r in 0..n {
+        let (lt, pt, it) = (lg.extended[r], pg.extended[r], img.extended[r]);
+        let (res_tile, psi_tile);
+        let (res, psi_b) = match psi_single.take() {
+            Some(p) => (&e.residual, p),
+            None => {
+                res_tile = e.residual.window(lt.x, lt.y, lt.width, lt.height)?;
+                psi_tile = psi.window(pt.x, pt.y, pt.width, pt.height)?;
+                (&res_tile, BTensor::from_planar(&psi_tile, v)?)
+            }
+        };
+        let y = match &model.context {
+            Some(ctx) => ctx.decompress(eng, res, &psi_b)?,
+            None => {
+                let mut y = upshuffle_psi(&psi_b, res.h, res.w)?;
+                for (o, &r) in y.data.iter_mut().zip(&res.data) {
+                    *o += r;
+                }
+                y
+            }
+        };
+        let (core, offset) = if independent {
+            (lt, (0, 0))
+        } else {
+            // Picture-border branch of `_get_core_of_overlapping_tile`.
+            let cut = HD_MCM_TILE_OVERLAP / 2 / 16;
+            let left = if it.x == 0 { 0 } else { cut };
+            let top = if it.y == 0 { 0 } else { cut };
+            let right = if it.x + it.width >= pic_w { 0 } else { cut };
+            let bottom = if it.y + it.height >= pic_h { 0 } else { cut };
+            let cw = lt.width.checked_sub(left + right);
+            let ch = lt.height.checked_sub(top + bottom);
+            let (Some(cw), Some(ch)) = (cw, ch) else {
+                return Err(Error::InvalidData("region smaller than its overlap"));
+            };
+            (Area::new(lt.x + left, lt.y + top, cw, ch), (left, top))
+        };
+        assign(&mut y_hat, core, &y, offset);
+    }
     Ok(Latent { psi, y_hat })
 }
 
@@ -62,11 +172,6 @@ pub fn synthesize(
     chroma: &SynthesisSecondary,
     y_hat: [&Tensor<f32>; 2],
 ) -> Result<Planes> {
-    if hdr.regions.is_some() {
-        return Err(Error::Unsupported(
-            "region partitioning in the reconstruction stage",
-        ));
-    }
     let (h, w) = (hdr.height as usize, hdr.width as usize);
     let out_h = h - hdr.diff_display_height as usize;
     let out_w = w - hdr.diff_display_width as usize;
@@ -81,12 +186,18 @@ pub fn synthesize(
     if y_hat[0].h != y_hat[1].h || y_hat[0].w != y_hat[1].w {
         return Err(Error::InvalidArgument("luma / chroma latent size mismatch"));
     }
+    // Tiles only respect region borders when regions are independently decodable.
+    let independent_regions = hdr
+        .regions
+        .filter(|r| r.independent)
+        .map(|_| region_grid(hdr, 0, Plane::Image));
     let tiles = synthesis_tiles(
         h,
         w,
         y_hat[0].h,
         y_hat[0].w,
         hdr.components[0].synthesis_tiling,
+        independent_regions.as_ref(),
     )?;
 
     let v = eng.tier.block();

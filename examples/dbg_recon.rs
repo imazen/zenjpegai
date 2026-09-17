@@ -67,8 +67,8 @@ fn main() {
         let ent = decode_entropy_stage(&AnsTables::new(), &cs, hdr, [&ym, &uvm]).unwrap();
         let t_ent = t1.elapsed();
         let t2 = Instant::now();
-        let ly = reconstruct_latent(&eng, &ym, &ent[0]).unwrap();
-        let luv = reconstruct_latent(&eng, &uvm, &ent[1]).unwrap();
+        let ly = reconstruct_latent(&eng, hdr, 0, &ym, &ent[0]).unwrap();
+        let luv = reconstruct_latent(&eng, hdr, 1, &uvm, &ent[1]).unwrap();
         let t_lat = t2.elapsed();
         let t3 = Instant::now();
         let planes = synthesize(&eng, hdr, &syn_y, &syn_uv, [&ly.y_hat, &luv.y_hat]).unwrap();
@@ -84,7 +84,7 @@ fn main() {
             t1.elapsed()
         );
         if run == 2 {
-            stats("y.psi", &get("y.psi "), &ly.psi.to_planar().unwrap().data);
+            stats("y.psi", &get("y.psi "), &ly.psi.data);
             stats("y.y_hat", &get("y.y_hat "), &ly.y_hat.data);
             stats("uv.y_hat", &get("uv.y_hat "), &luv.y_hat.data);
             stats("rec.a", &get("rec.a "), &planes.y.data);

@@ -29,6 +29,10 @@ one() { # name image bpp cfg...
       --set_target_bpp "$bpp" --cfg "$@" -target_device cpu > "$dir/encoder.log" 2>&1
   echo "== $name: decoding + dumping"
   nice -n 19 python "$HERE/dump_decode.py" "$dir/stream.bits" "$dir" > "$dir/dump.log" 2>&1
+  # Same decode with the skip mask made contiguous (what the reference encoder does): the
+  # oracle for everything behind the entropy stage (tests/decode_ref.rs).
+  nice -n 19 python "$HERE/dump_decode.py" "$dir/stream.bits" "$dir/fixed_decoder" --contiguous-masks \
+      > "$dir/dump_fixed.log" 2>&1
   grep -h "^MD5" "$dir/encoder.log" "$dir/stdout.log" | sort | uniq -c | sed 's/^/   /'
   ls -la "$dir/stream.bits" | awk '{print "   stream bytes:", $5}'
 }

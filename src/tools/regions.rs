@@ -104,6 +104,9 @@ pub enum Plane {
     Psi,
     /// Hyper-latent `z` (1/64).
     HyperLatent,
+    /// The picture, in luma samples (for chroma too: the reference builds the grid on the
+    /// half-size plane and scales it back up by 2).
+    Image,
 }
 
 /// Region grid for component `ccs` (0 luma, 1 chroma).
@@ -133,6 +136,7 @@ pub fn region_grid(hdr: &PictureHeader, ccs: usize, plane: Plane) -> RegionGrid 
         Plane::Latent => (4, mcm_overlap >> 1),
         Plane::Psi => (5, mcm_overlap >> 2),
         Plane::HyperLatent => (6, hd_overlap),
+        Plane::Image => (0, 64 * hd_overlap),
     };
     let extend = if regions.independent { 0 } else { extend };
     let ver = axis_coords(h, rows, depth, partitioned);

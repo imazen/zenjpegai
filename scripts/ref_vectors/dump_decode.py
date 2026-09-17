@@ -65,8 +65,25 @@ def main():
     ap.add_argument("bits")
     ap.add_argument("out_dir")
     ap.add_argument("--threads", type=int, default=1, help="torch CPU threads (the reference forces 1)")
+    ap.add_argument(
+        "--contiguous-masks",
+        action="store_true",
+        help="hand the C++ ANS decoder a contiguous skip mask, as the reference encoder does. "
+        "Without it the reference decoder mis-decodes region streams (see PORTING.md).",
+    )
     args = ap.parse_args()
     os.makedirs(args.out_dir, exist_ok=True)
+    if args.contiguous_masks:
+        from src.codec.entropy_coding.lib_wrappers.mans import sgt_prob_wrapper as spw
+
+        def decode(self, sigma, masks, name=None, entropy_model=None):
+            model = self.get_model(entropy_model)
+            indexes = model.build_indexes(sigma).to(dtype=torch.uint8).cpu().numpy()
+            x = np.zeros(indexes.shape, dtype=np.int16)
+            self.backend.decode_sgm(indexes, x, np.ascontiguousarray(masks.cpu().numpy()))
+            return torch.from_numpy(x.astype(np.float32))
+
+        spw.SgtProbWrapper.decode = decode
     dump = Dumper(args.out_dir)
 
     base_parser = def_base_parser()

@@ -49,10 +49,10 @@ fn decode(stream: &[u8], eng: &Engine) -> (zenjpegai::header::PictureHeader, Dec
     let syn_y = models.load_synthesis_primary(id, op, eng).unwrap();
     let syn_uv = models.load_synthesis_secondary(id, op, eng).unwrap();
     let ent = decode_entropy_stage(&AnsTables::new(), &cs, &hdr, [&ym, &uvm]).unwrap();
-    let ly = reconstruct_latent(eng, &ym, &ent[0]).unwrap();
-    let luv = reconstruct_latent(eng, &uvm, &ent[1]).unwrap();
+    let ly = reconstruct_latent(eng, &hdr, 0, &ym, &ent[0]).unwrap();
+    let luv = reconstruct_latent(eng, &hdr, 1, &uvm, &ent[1]).unwrap();
     let planes = synthesize(eng, &hdr, &syn_y, &syn_uv, [&ly.y_hat, &luv.y_hat]).unwrap();
-    let psi = [ly.psi.to_planar().unwrap(), luv.psi.to_planar().unwrap()];
+    let psi = [ly.psi, luv.psi];
     (
         hdr,
         Decoded {
@@ -66,7 +66,19 @@ fn decode(stream: &[u8], eng: &Engine) -> (zenjpegai::header::PictureHeader, Dec
 fn check(name: &str) {
     let dir = vector_dir(name);
     let stream = std::fs::read(dir.join("stream.bits")).unwrap();
-    let dump = load_dump(&dir);
+    // Region streams: the stock reference decoder mis-decodes their residuals (PORTING.md), so
+    // the oracle is the dump taken with `dump_decode.py --contiguous-masks`.
+    let fixed = dir.join("fixed_decoder");
+    let dump = if name.contains("regions") {
+        assert!(
+            fixed.join("manifest.txt").is_file(),
+            "{} is missing: run scripts/ref_vectors/make_reference_streams.sh",
+            fixed.display()
+        );
+        load_dump(&fixed)
+    } else {
+        load_dump(&dir)
+    };
     let (hdr, d) = decode(&stream, &Engine::new());
 
     for (key, got) in [
@@ -136,6 +148,9 @@ vectors! {
     // 2096x1400: six overlapping synthesis tiles.
     img01_base_off_bpp050 => "img01_base_off_bpp050",
     img01_base_off_threads8_bpp050 => "img01_base_off_threads8_bpp050",
+    img01_base_off_depregions_m1 => "img01_base_off_depregions_m1",
+    img01_base_off_indregions_m1 => "img01_base_off_indregions_m1",
+    img01_base_off_indregions_threads8_m2 => "img01_base_off_indregions_threads8_m2",
 }
 
 /// Every SIMD tier, threaded or not, must decode a real stream to identical bits.
