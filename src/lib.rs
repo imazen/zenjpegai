@@ -13,6 +13,7 @@ whereat::define_at_crate_info!();
 pub mod bitio;
 pub mod container;
 mod error;
+pub mod header;
 pub mod mans;
 pub mod weights;
 
