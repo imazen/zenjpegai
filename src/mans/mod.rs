@@ -17,7 +17,6 @@ mod tables;
 pub use decoder::AnsDecoder;
 pub use encoder::AnsEncoder;
 pub use tables::MAX_Z;
-#[allow(unused_imports)] // used by the z-substream decoder
 pub(crate) use tables::normalize_z_cdf;
 
 use alloc::boxed::Box;

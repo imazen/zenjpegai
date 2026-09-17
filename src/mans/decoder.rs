@@ -160,8 +160,7 @@ impl<'t> AnsDecoder<'t> {
 
     /// Decode residual symbols (`decode_sgm`).
     ///
-    /// `sigma_idx[i]` selects the distribution of symbol `i` (values above 31 are clamped, see
-    /// `PORTING.md`), `mask[i] == false` means symbol `i` is skipped (not in the stream) and
+    /// `sigma_idx[i]` selects the distribution of symbol `i` (0..=31; higher bits are ignored), `mask[i] == false` means symbol `i` is skipped (not in the stream) and
     /// `out[i]` is left untouched. All three slices have the same length, and that length is part
     /// of the format: split calls exactly like the reference.
     pub fn decode_residual(

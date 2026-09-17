@@ -157,7 +157,6 @@ pub(crate) fn z_encode_delta_bits() -> [u16; 256] {
 /// (`CustomProbWrapper.normalize_z`): `cdf[i] = (cumsum[i] * 255 + total / 2) / total`.
 ///
 /// The last entry is always 255; state 255 is reserved for the escape symbol.
-#[allow(dead_code)] // wired in by the z-substream decoder
 pub(crate) fn normalize_z_cdf(freqs: &[i32; MAX_Z]) -> [u8; MAX_Z] {
     let total: i64 = freqs.iter().map(|&f| f as i64).sum();
     let mut out = [0u8; MAX_Z];

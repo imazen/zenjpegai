@@ -16,18 +16,44 @@ against reference-produced data passes. "stub" and "partial" mean what they say.
 | `mans::encoder` | `cpp_exts/mans/compressor.{h,cpp}` | ported: residual + z, 1..16 threads | `tests/mans_vectors.rs`: output bytes and thread sizes equal the reference's |
 | `weights` | `torch.load` of `models/**/*.pth` (no upstream source: replaces PyTorch's unpickler) | ported: stored-ZIP reader (zip64 aware), data-only pickle interpreter, lazy strided tensor materialisation | `tests/weights_ref.rs` (`reference-tests` feature): tensor hashes equal `torch.load`'s for int8/int32/int64/bool/f32 tensors; all 68 upstream checkpoints parse |
 | `header` | `coding_engine.py`, `colour_transformation.py`, `multitools/engine.py`, `ccs_sgmm_tool.py`, `quantization.py`, `sep_chan_tool.py`, `skip_mode.py`, `res_var_scale.py`, `tiling.py`, `quality_map.py`, `rdi.py` (header functions only) | partial: PIH complete (parse + write + profile/level conformance); RDI complete; TON: LSBS flags only, **a stream enabling any of the 4 post-filters is rejected as `Unsupported`** (their parameter syntax is not ported); UDI not ported | `header::tests`: two reference-encoder PIH payloads parse to the values `scripts/bitstream_probe.py` prints and re-serialise byte-identically |
+| `tensor` | (PyTorch tensors) | minimal `[C,H,W]` container | - |
+| `model::hsd` | `components/autoencoder_hyper/decoder_scale/basic.py`, `base_layers/conv_quant_layers.py` | ported, scalar integer convolution (no SIMD yet) | `tests/entropy_ref.rs` (sigma maps equal the reference's) |
+| `model::common` | `core_models/CCS_SGMM/common_modules.py::build_model`, `gain_unit.py::get_gain_vector_log`, `custom_prob_wrapper.py::normalize_z` | ported: z CDFs, HSD weights, gain vector. Hyper-decoder / MCM weights not loaded yet | `tests/entropy_ref.rs` |
+| `tools::gain` | `quantization/gain_unit/gain_unit.py` | ported (decoder side) | `tests/entropy_ref.rs` (dequantised residual floats bit-identical). `scaler_from_log` uses libm `expf` where the reference uses `torch.exp`; not yet checked exhaustively over the whole input range |
+| `tools::skip` | `skip_ls/skip_mode.py` (mask + cube-flag expansion) | ported (decoder side); cube flags exercised only by header round trips so far, no reference stream with `use_cube_flags = 1` yet | `tests/entropy_ref.rs` (threshold mask) |
+| `tools::regions` | `tiling/tiling.py::TileManagerHyper` | ported: region grids for y / psi / z, with and without overlap extension | unit tests + `tests/entropy_ref.rs` region streams (latent grid only) |
+| `decoder::entropy` | `common_modules.py::decode/decode_z/decode_y/_ac_decode_y/_cal_step_size`, `gm.py::build_indexes` | ported for: all 4 models, 1..16 threads, no regions / dependent / independent regions. **Missing: RVS + GRFS sigma adjustment, quality map, `num_decode_chs` (progressive decode)** — such streams are rejected as `Unsupported` | `tests/entropy_ref.rs`: 12 reference streams; z_hat, sigma, quantised residual exact, dequantised residual bit-identical |
 
 Not started: z/residual substream decode, hyper-scale decoder, quantizer
 tools (gain unit, RVS, quality map), skip mode, tiling/regions, hyper decoder, MCM context model,
 synthesis transforms (SOP/BOP/HOP), post-filters (EFE linear/nonlinear, eICCI, LEF), colour
 processing, image IO, the whole encoder side above the entropy coder, CLI, benchmarks.
 
+## Reference behaviour that differs from its own configuration
+
+- **`sigma_quant_level` is 32, not 35.** `cfg/pipeline.json` sets `sigma_quant_level: 35`,
+  `sigma_quant_max: 100` on `tools_common`, a node that owns no such parameter, so the values
+  never reach `CommonEncDecModules`. The reference runs with the defaults (32 levels,
+  `sigma_quant_max = 54.82`, `log_k = 0.20036548400207613`); so does this port. Checked at
+  runtime (`hyper_scale_decoder.sigma_idx_max_value == 3967`) and by the entropy-stage parity
+  tests, which fail with 35.
+
+## Reference decoder bug: region streams
+
+With `region_partitioning_flag = 1` the reference **decoder** mis-decodes residuals (its own
+encoder and decoder print different reconstruction MD5s for such streams). Cause:
+`SgtProbWrapper.decode` passes `masks.cpu().numpy()` to the C++ coder; for a region that is a
+sub-rectangle of the latent this is a non-contiguous view, and the C++ side reads it linearly,
+ignoring strides. The encoder side calls `.copy()` first and is correct. (When cube flags are
+present the mask goes through `torch.logical_or`, which happens to make it contiguous.)
+
+This port decodes region streams the way the encoder wrote them. `tests/entropy_ref.rs` therefore
+checks region streams against tensors dumped from the reference *encoder*
+(`scripts/ref_vectors/dump_encode.py`): z_hat, sigma and residual match exactly for dependent
+regions, independent regions, and independent regions with 8 ANS threads.
+
 ## Deliberate divergences from the reference
 
-- **Sigma index above 31.** The reference clamps the sigma index to `[0, 34]`
-  (`sigma_quant_level = 35`) but its C++ coder only has 32 distributions and indexes past the end
-  of its tables for 32..34 (undefined behaviour). `mans` clamps to 31 instead. Whether real streams
-  ever reach 32 is not yet measured.
 - **Container strictness.** The reference reader skips unknown two-byte words and spins forever on
   a truncated file. `container::Codestream::parse` requires SOC, known markers, PIH first, and EOC.
 - **`log2_num_threads_q_minus1` width.** The reference encoder writes it with 2 bits, its decoder

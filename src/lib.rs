@@ -12,9 +12,13 @@ whereat::define_at_crate_info!();
 
 pub mod bitio;
 pub mod container;
+pub mod decoder;
 mod error;
 pub mod header;
 pub mod mans;
+pub mod model;
+pub mod tensor;
+pub mod tools;
 pub mod weights;
 
 pub use error::Error;

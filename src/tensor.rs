@@ -1,0 +1,78 @@
+//! Minimal dense tensor: one image's worth of planes, `[channels, height, width]`, row-major.
+//!
+//! The reference works on `[1, C, H, W]` PyTorch tensors; batch is always 1, so it is dropped.
+
+use alloc::vec::Vec;
+
+use crate::error::{Error, Result};
+
+/// `[c, h, w]` tensor with contiguous row-major storage.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Tensor<T> {
+    pub c: usize,
+    pub h: usize,
+    pub w: usize,
+    pub data: Vec<T>,
+}
+
+impl<T: Copy + Default> Tensor<T> {
+    /// Zero-initialised tensor. Fails instead of aborting when the allocation is refused.
+    pub fn zeros(c: usize, h: usize, w: usize) -> Result<Self> {
+        let n = c
+            .checked_mul(h)
+            .and_then(|v| v.checked_mul(w))
+            .ok_or(Error::LimitExceeded("tensor size overflow"))?;
+        let mut data = Vec::new();
+        data.try_reserve_exact(n)
+            .map_err(|_| Error::LimitExceeded("out of memory"))?;
+        data.resize(n, T::default());
+        Ok(Self { c, h, w, data })
+    }
+
+    pub fn from_vec(c: usize, h: usize, w: usize, data: Vec<T>) -> Result<Self> {
+        if Some(data.len()) != c.checked_mul(h).and_then(|v| v.checked_mul(w)) {
+            return Err(Error::InvalidArgument(
+                "tensor data length does not match its shape",
+            ));
+        }
+        Ok(Self { c, h, w, data })
+    }
+
+    #[inline]
+    pub fn plane_len(&self) -> usize {
+        self.h * self.w
+    }
+
+    #[inline]
+    pub fn plane(&self, ch: usize) -> &[T] {
+        let n = self.plane_len();
+        &self.data[ch * n..(ch + 1) * n]
+    }
+
+    #[inline]
+    pub fn plane_mut(&mut self, ch: usize) -> &mut [T] {
+        let n = self.plane_len();
+        &mut self.data[ch * n..(ch + 1) * n]
+    }
+
+    #[inline]
+    pub fn at(&self, ch: usize, y: usize, x: usize) -> T {
+        self.data[(ch * self.h + y) * self.w + x]
+    }
+
+    /// Copy of the top-left `[c, h, w]` corner (`x[:, :h, :w]`).
+    pub fn crop(&self, h: usize, w: usize) -> Result<Self> {
+        if h > self.h || w > self.w {
+            return Err(Error::InvalidArgument("crop larger than tensor"));
+        }
+        let mut out = Self::zeros(self.c, h, w)?;
+        for ch in 0..self.c {
+            for y in 0..h {
+                let src = (ch * self.h + y) * self.w;
+                let dst = (ch * h + y) * w;
+                out.data[dst..dst + w].copy_from_slice(&self.data[src..src + w]);
+            }
+        }
+        Ok(out)
+    }
+}
