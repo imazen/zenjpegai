@@ -22,4 +22,7 @@ pub mod tensor;
 pub mod tools;
 pub mod weights;
 
+#[cfg(feature = "std")]
+pub use decoder::Decoder;
+pub use decoder::output::RgbImage;
 pub use error::Error;

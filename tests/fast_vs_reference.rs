@@ -60,12 +60,28 @@ fn conv_case(
     h: usize,
     w: usize,
 ) {
+    strided_conv_case(rng, in_ch, out_ch, k, pad, groups, bias, h, w, 1);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn strided_conv_case(
+    rng: &mut Rng,
+    in_ch: usize,
+    out_ch: usize,
+    k: (usize, usize),
+    pad: (usize, usize),
+    groups: usize,
+    bias: bool,
+    h: usize,
+    w: usize,
+    stride: usize,
+) {
     let weight = rng.vec(out_ch * (in_ch / groups) * k.0 * k.1);
     let b = bias.then(|| rng.vec(out_ch));
-    let conv = Conv2d::new(in_ch, out_ch, k, 1, pad, groups, weight, b).unwrap();
+    let conv = Conv2d::new(in_ch, out_ch, k, stride, pad, groups, weight, b).unwrap();
     let x = Tensor::from_vec(in_ch, h, w, rng.vec(in_ch * h * w)).unwrap();
     let want = reference::conv2d(&conv, &x).unwrap();
-    let what = format!("conv {in_ch}->{out_ch} k{k:?} pad{pad:?} g{groups} {h}x{w}");
+    let what = format!("conv {in_ch}->{out_ch} k{k:?} pad{pad:?} g{groups} s{stride} {h}x{w}");
     for eng in engines() {
         let v = eng.tier.block();
         let packed = PackedConv::new(&conv, v, [0; 4]).unwrap();
@@ -97,6 +113,11 @@ fn conv2d_bit_identical() {
     conv_case(&mut rng, 16, 16, (1, 3), (0, 1), 1, true, 5, 9);
     conv_case(&mut rng, 16, 16, (3, 1), (1, 0), 1, true, 5, 9);
     conv_case(&mut rng, 16, 32, (2, 2), (0, 0), 1, false, 6, 7);
+    // stride 2 (HOP attention blocks), odd and even sizes, all position-block tails
+    for &(h, w) in &[(1, 1), (2, 2), (5, 9), (8, 58), (7, 129), (4, 24)] {
+        strided_conv_case(&mut rng, 32, 32, (3, 3), (1, 1), 1, true, h, w, 2);
+    }
+    strided_conv_case(&mut rng, 7, 5, (3, 3), (1, 1), 1, false, 9, 11, 2);
 }
 
 #[test]

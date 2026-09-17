@@ -41,6 +41,8 @@ pub(crate) struct RowJob<'a> {
     pub icb0: usize,
     pub icb1: usize,
     pub in_ch: usize,
+    /// Input column step per output position (the convolution stride; 1 or 2).
+    pub is: usize,
     /// Per tap, in accumulation order: padded input row, and the input column of output `j = 0`.
     pub taps: &'a [(usize, usize)],
     /// Weights of this output block: `[icb1 - icb0][V][taps][V]`.
@@ -52,7 +54,7 @@ pub(crate) struct RowJob<'a> {
 /// `B` output positions of one input block: load accumulators, add every (channel, tap), store.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
-fn block<F: SimdF32<V>, const V: usize, const B: usize>(
+fn block<F: SimdF32<V>, const V: usize, const B: usize, const S: usize>(
     t: F::Token,
     out: &mut [[f32; V]],
     os: usize,
@@ -68,12 +70,12 @@ fn block<F: SimdF32<V>, const V: usize, const B: usize>(
     let mut wi = 0;
     for v in 0..vin {
         for r in rows {
-            let r = &r[j..j + B];
+            let r = &r[j * S..][..(B - 1) * S + 1];
             let wv = F::load(t, &w[wi]);
             wi += 1;
             for b in 0..B {
                 // `v < V` always; the mask lets the compiler see it.
-                acc[b] = wv.mul_add(F::splat(t, r[b][v & (V - 1)]), acc[b]);
+                acc[b] = wv.mul_add(F::splat(t, r[b * S][v & (V - 1)]), acc[b]);
             }
         }
     }
@@ -84,6 +86,18 @@ fn block<F: SimdF32<V>, const V: usize, const B: usize>(
 
 #[inline(always)]
 fn conv_row<F: SimdF32<V>, const V: usize, const B: usize>(t: F::Token, job: &mut RowJob<'_>) {
+    if job.is == 2 {
+        conv_row_s::<F, V, B, 2>(t, job)
+    } else {
+        conv_row_s::<F, V, B, 1>(t, job)
+    }
+}
+
+#[inline(always)]
+fn conv_row_s<F: SimdF32<V>, const V: usize, const B: usize, const S: usize>(
+    t: F::Token,
+    job: &mut RowJob<'_>,
+) {
     let (out, _) = job.out.as_chunks_mut::<V>();
     let (xp, _) = job.xp.as_chunks::<V>();
     let (w, _) = job.w.as_chunks::<V>();
@@ -91,6 +105,9 @@ fn conv_row<F: SimdF32<V>, const V: usize, const B: usize>(t: F::Token, job: &mu
     bias.copy_from_slice(&job.bias[..V]);
     let ntaps = job.taps.len();
     let (o0, os, n) = (job.o0, job.os, job.n);
+    if n == 0 {
+        return;
+    }
     for j in 0..n {
         out[o0 + j * os] = bias;
     }
@@ -99,24 +116,24 @@ fn conv_row<F: SimdF32<V>, const V: usize, const B: usize>(t: F::Token, job: &mu
         let wblk = &w[(icb - job.icb0) * V * ntaps..][..V * ntaps];
         let mut rows: [&[[f32; V]]; MAX_TAPS] = [&[]; MAX_TAPS];
         for (r, &(y, dx)) in rows.iter_mut().zip(job.taps) {
-            *r = &xp[(icb * job.ph + y) * job.pw + dx..][..n];
+            *r = &xp[(icb * job.ph + y) * job.pw + dx..][..(n - 1) * S + 1];
         }
         let rows = &rows[..ntaps];
         let mut j = 0;
         while j + B <= n {
-            block::<F, V, B>(t, &mut out[o0 + j * os..], os, rows, j, wblk, vin);
+            block::<F, V, B, S>(t, &mut out[o0 + j * os..], os, rows, j, wblk, vin);
             j += B;
         }
         while j + 8 <= n {
-            block::<F, V, 8>(t, &mut out[o0 + j * os..], os, rows, j, wblk, vin);
+            block::<F, V, 8, S>(t, &mut out[o0 + j * os..], os, rows, j, wblk, vin);
             j += 8;
         }
         while j + 4 <= n {
-            block::<F, V, 4>(t, &mut out[o0 + j * os..], os, rows, j, wblk, vin);
+            block::<F, V, 4, S>(t, &mut out[o0 + j * os..], os, rows, j, wblk, vin);
             j += 4;
         }
         while j < n {
-            block::<F, V, 1>(t, &mut out[o0 + j * os..], os, rows, j, wblk, vin);
+            block::<F, V, 1, S>(t, &mut out[o0 + j * os..], os, rows, j, wblk, vin);
             j += 1;
         }
     }
@@ -220,7 +237,7 @@ fn pack_bias(v: usize, out_ch: usize, bias: Option<&[f32]>) -> Vec<f32> {
     b
 }
 
-/// A stride-1 convolution packed for one block size.
+/// A convolution (stride 1 or 2) packed for one block size.
 #[derive(Clone, Debug)]
 pub struct PackedConv {
     in_ch: usize,
@@ -230,6 +247,7 @@ pub struct PackedConv {
     /// Zero padding: top, left, bottom, right.
     pad: [usize; 4],
     groups: usize,
+    stride: usize,
     v: usize,
     weight: Vec<f32>,
     bias: Vec<f32>,
@@ -240,8 +258,8 @@ impl PackedConv {
     /// layer's own symmetric padding (the SOP upsampler pads right/bottom by one).
     pub fn new(conv: &Conv2d, v: usize, extra_pad: [usize; 4]) -> Result<Self> {
         let (icg, ocg) = (conv.in_ch / conv.groups, conv.out_ch / conv.groups);
-        if conv.stride != 1 {
-            return Err(Error::Unsupported("fast path: strided convolution"));
+        if conv.stride != 1 && conv.stride != 2 {
+            return Err(Error::Unsupported("fast path: stride above 2"));
         }
         if conv.kh * conv.kw > MAX_TAPS {
             return Err(Error::Unsupported(
@@ -280,6 +298,7 @@ impl PackedConv {
                 conv.pad_w + extra_pad[3],
             ],
             groups: conv.groups,
+            stride: conv.stride,
             v,
             weight,
             bias: pack_bias(v, conv.out_ch, conv.bias.as_deref()),
@@ -306,7 +325,8 @@ impl PackedConv {
             padded = x.pad(pt, pl, pb, pr)?;
             &padded
         };
-        let (oh, ow) = (xp.h - self.kh + 1, xp.w - self.kw + 1);
+        let st = self.stride;
+        let (oh, ow) = ((xp.h - self.kh) / st + 1, (xp.w - self.kw) / st + 1);
         let mut out = BTensor::zeros(self.out_ch, oh, ow, v)?;
         let ocb_total = self.out_ch.div_ceil(v);
         let (icb_group, ocb_group) = if self.groups == 1 {
@@ -323,7 +343,7 @@ impl PackedConv {
             let mut taps = [(0usize, 0usize); MAX_TAPS];
             for ky in 0..self.kh {
                 for kx in 0..self.kw {
-                    taps[ky * self.kw + kx] = (oy + ky, kx);
+                    taps[ky * self.kw + kx] = (oy * st + ky, kx);
                 }
             }
             let mut job = RowJob {
@@ -337,6 +357,7 @@ impl PackedConv {
                 icb0: group * icb_group,
                 icb1: (group + 1) * icb_group,
                 in_ch: self.in_ch,
+                is: st,
                 taps: &taps[..ntaps],
                 w: &self.weight[ocb * wlen..][..wlen],
                 bias: &self.bias[ocb * v..][..v],
@@ -456,6 +477,7 @@ impl PackedConvTranspose {
                     icb0: 0,
                     icb1: icb,
                     in_ch: self.in_ch,
+                    is: 1,
                     taps: &taps[..ntaps],
                     w: if ntaps == 0 {
                         &[]

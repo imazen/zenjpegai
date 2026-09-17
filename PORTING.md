@@ -53,7 +53,7 @@ Not started (decoder): RVS / GRFS, quality map, LSBS, HOP synthesis, the four po
 chroma-subsampled and 10-bit output, custom colour transform, UDI, progressive (`num_decode_chs`)
 decode. Not started (everything else): the whole encoder
 above the entropy coder (analysis transforms, hyper-encoder, quantisation/RDO tools, bitrate
-matching, header/stream assembly), CLI, end-to-end benchmarks against the reference, CI.
+matching, header/stream assembly), CI.
 
 ## Reference behaviour that differs from its own configuration
 
