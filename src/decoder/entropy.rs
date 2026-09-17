@@ -20,6 +20,7 @@ use crate::model::common::{SIGMA_IDX_MAX, SIGMA_LEVELS, SIGMA_PRECISION, Z_OFFSE
 use crate::tensor::Tensor;
 use crate::tools::gain::GainUnit;
 use crate::tools::regions::{Plane, region_grid};
+use crate::tools::rvs::{self, Rvs};
 use crate::tools::skip::skip_mask;
 
 /// Entropy-stage output of one component.
@@ -31,6 +32,9 @@ pub struct ComponentEntropy {
     pub skip_scale_log: Tensor<i32>,
     /// Sigma indices driving the entropy coder (`skip_scale_log` plus RVS when enabled).
     pub scale_log: Tensor<i32>,
+    /// Block-wise mean of `skip_scale_log` as a [`crate::tools::log2lin`] index: selects the RVS
+    /// and LSBS table segments.
+    pub likely: Tensor<u16>,
     /// `true` where a residual symbol is present in the stream.
     pub mask: Tensor<bool>,
     /// Quantised residual, `[C, H, W]`.
@@ -84,9 +88,6 @@ pub fn decode_component(
         return Err(Error::Unsupported("quality map"));
     }
     let comp = &hdr.components[ccs];
-    if comp.rvs_enabled || comp.grfs_channel_flags.is_some() {
-        return Err(Error::Unsupported("residual variance scaling"));
-    }
     let chs = model.chs;
     let (lh, lw) = hdr.latent_size(ccs);
     let (lh, lw) = (lh as usize, lw as usize);
@@ -105,7 +106,19 @@ pub fn decode_component(
             *v += add;
         }
     }
-    let scale_log = skip_scale_log.clone();
+    // quantizer.analyze + quantize_scale(incl rvs): the block-wise "likely" map is always built
+    // (LSBS reads it too); RVS / GRFS shift the scales the residual was coded with.
+    let likely = rvs::likely(&skip_scale_log)?;
+    let rvs = Rvs::new(
+        hdr.model_id as usize,
+        chs,
+        comp.rvs_enabled,
+        comp.grfs_channel_flags.as_deref(),
+    )?;
+    let mut scale_log = skip_scale_log.clone();
+    if let Some(r) = &rvs {
+        r.adjust_scale(&mut scale_log, &likely);
+    }
     let mask = skip_mask(&skip_scale_log, comp.cube_flags.as_deref())?;
 
     // decode_y: region by region, channel chunk by channel chunk.
@@ -168,10 +181,16 @@ pub fn decode_component(
     }
 
     let mut residual = Tensor::<f32>::zeros(chs, lh, lw)?;
+    // dequantize_resi runs the tools in reverse: RVS first, then the gain unit.
     for ch in 0..chs {
         let src = residual_q.plane(ch);
-        for (d, &q) in residual.plane_mut(ch).iter_mut().zip(src) {
-            *d = gain.dequantize(ch, q as f32);
+        let lk = likely.plane(ch);
+        for ((d, &q), &l) in residual.plane_mut(ch).iter_mut().zip(src).zip(lk) {
+            let x = match &rvs {
+                Some(r) => r.dequantize(ch, l, q as f32),
+                None => q as f32,
+            };
+            *d = gain.dequantize(ch, x);
         }
     }
 
@@ -179,6 +198,7 @@ pub fn decode_component(
         z_hat,
         skip_scale_log,
         scale_log,
+        likely,
         mask,
         residual_q,
         residual,

@@ -14,7 +14,9 @@ mod common;
 use common::{load_dump, ref_root, vector_dir};
 use zenjpegai::container::Codestream;
 use zenjpegai::decoder::output::{RgbPlanes, quantize, to_rgb_planes};
-use zenjpegai::decoder::reconstruct::{Planes, reconstruct_latent, synthesize};
+use zenjpegai::decoder::reconstruct::{
+    Planes, post_process_latent, reconstruct_latent, synthesize,
+};
 use zenjpegai::decoder::{decode_entropy_stage, read_headers};
 use zenjpegai::mans::AnsTables;
 use zenjpegai::model::ModelDir;
@@ -49,8 +51,10 @@ fn decode(stream: &[u8], eng: &Engine) -> (zenjpegai::header::PictureHeader, Dec
     let syn_y = models.load_synthesis_primary(id, op, eng).unwrap();
     let syn_uv = models.load_synthesis_secondary(id, op, eng).unwrap();
     let ent = decode_entropy_stage(&AnsTables::new(), &cs, &hdr, [&ym, &uvm]).unwrap();
-    let ly = reconstruct_latent(eng, &hdr, 0, &ym, &ent[0]).unwrap();
-    let luv = reconstruct_latent(eng, &hdr, 1, &uvm, &ent[1]).unwrap();
+    let mut ly = reconstruct_latent(eng, &hdr, 0, &ym, &ent[0]).unwrap();
+    let mut luv = reconstruct_latent(eng, &hdr, 1, &uvm, &ent[1]).unwrap();
+    post_process_latent(&hdr, &headers.tools, 0, &ent[0], &mut ly).unwrap();
+    post_process_latent(&hdr, &headers.tools, 1, &ent[1], &mut luv).unwrap();
     let planes = synthesize(eng, &hdr, &syn_y, &syn_uv, [&ly.y_hat, &luv.y_hat]).unwrap();
     let psi = [ly.psi, luv.psi];
     (
@@ -145,6 +149,13 @@ vectors! {
     img30_base_off_bpp050 => "img30_base_off_bpp050",
     img30_base_off_bpp100 => "img30_base_off_bpp100",
     img30_simple_off_bpp050 => "img30_simple_off_bpp050",
+    // Coding tools: latent scaling before synthesis, residual variance scaling + gain flags.
+    img30_base_lsbs_bpp050 => "img30_base_lsbs_bpp050",
+    img30_base_rvs_bpp050 => "img30_base_rvs_bpp050",
+    img30_base_rvsonly_bpp050 => "img30_base_rvsonly_bpp050",
+    img30_base_grfsonly_bpp075 => "img30_base_grfsonly_bpp075",
+    img30_base_lsbs_rvs_bpp025 => "img30_base_lsbs_rvs_bpp025",
+    img30_simple_lsbs_rvs_bpp100 => "img30_simple_lsbs_rvs_bpp100",
     // High profile: HOP synthesis (CAB + TAM attention).
     img30_high_off_bpp050 => "img30_high_off_bpp050",
     // 2096x1400: six overlapping synthesis tiles.

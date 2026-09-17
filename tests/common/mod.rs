@@ -75,6 +75,16 @@ impl RefTensor {
                 .map(|b| i16::from_le_bytes(*b) as i32)
                 .collect(),
             "i8" => self.bytes.iter().map(|&b| b as i8 as i32).collect(),
+            // The reference's scale map turns float once RVS adds its (float-typed) table to it.
+            // The values are still integers; anything else is a failure, not a rounding matter.
+            "f32" => self
+                .f32()
+                .into_iter()
+                .map(|v| {
+                    assert!(v.fract() == 0.0 && v.abs() < 1e9, "non-integer value {v}");
+                    v as i32
+                })
+                .collect(),
             t => panic!("not an integer tensor: {t}"),
         }
     }

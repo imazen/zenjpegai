@@ -6,12 +6,13 @@
 
 use super::entropy::ComponentEntropy;
 use crate::error::{Error, Result};
-use crate::header::PictureHeader;
+use crate::header::{PictureHeader, ToolHeader};
 use crate::model::CommonModel;
 use crate::model::mcm::upshuffle_psi;
 use crate::model::synthesis::{SynthesisPrimary, SynthesisSecondary};
 use crate::nn::fast::{BTensor, Engine};
 use crate::tensor::Tensor;
+use crate::tools::lsbs;
 use crate::tools::regions::{Area, Plane, region_grid};
 use crate::tools::tiles::synthesis_tiles;
 
@@ -152,6 +153,26 @@ pub fn reconstruct_latent(
         assign(&mut y_hat, core, &y, offset);
     }
     Ok(Latent { psi, y_hat })
+}
+
+/// Latent-space post-processing (`ls_processing.post_processing`): LSBS, when the tool header
+/// enables it for component `ccs`. Runs on the merged `y_hat`, before synthesis.
+pub fn post_process_latent(
+    hdr: &PictureHeader,
+    tools: &ToolHeader,
+    ccs: usize,
+    e: &ComponentEntropy,
+    latent: &mut Latent,
+) -> Result<()> {
+    if tools.lsbs_enabled[ccs] {
+        lsbs::apply(
+            hdr.model_id as usize,
+            &mut latent.y_hat,
+            &e.residual,
+            &e.likely,
+        )?;
+    }
+    Ok(())
 }
 
 /// Reconstructed planes in the codec's internal range `[0, 255]`: luma at coded size minus the

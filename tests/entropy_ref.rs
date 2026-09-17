@@ -116,6 +116,12 @@ vectors! { check:
     img30_base_off_bpp100 => "img30_base_off_bpp100",
     img30_simple_off_bpp050 => "img30_simple_off_bpp050",
     img30_high_off_bpp050 => "img30_high_off_bpp050",
+    img30_base_lsbs_bpp050 => "img30_base_lsbs_bpp050",
+    img30_base_rvs_bpp050 => "img30_base_rvs_bpp050",
+    img30_base_rvsonly_bpp050 => "img30_base_rvsonly_bpp050",
+    img30_base_grfsonly_bpp075 => "img30_base_grfsonly_bpp075",
+    img30_base_lsbs_rvs_bpp025 => "img30_base_lsbs_rvs_bpp025",
+    img30_simple_lsbs_rvs_bpp100 => "img30_simple_lsbs_rvs_bpp100",
     img01_base_off_bpp050 => "img01_base_off_bpp050",
     img01_base_off_threads8_bpp050 => "img01_base_off_threads8_bpp050",
 }

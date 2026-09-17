@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use whereat::{At, at};
 
 use super::output::{RgbImage, quantize, to_rgb_planes};
-use super::reconstruct::{reconstruct_latent, synthesize};
+use super::reconstruct::{post_process_latent, reconstruct_latent, synthesize};
 use super::{Headers, decode_entropy_stage, read_headers};
 use crate::container::Codestream;
 use crate::error::Error;
@@ -147,9 +147,12 @@ impl Decoder {
         let ent = decode_entropy_stage(&self.tables, &cs, hdr, [&set.common[0], &set.common[1]])
             .map_err(|e| at!(e))?;
         let [ent_y, ent_uv] = ent;
-        let ly = reconstruct_latent(eng, hdr, 0, &set.common[0], &ent_y).map_err(|e| at!(e))?;
+        let mut ly = reconstruct_latent(eng, hdr, 0, &set.common[0], &ent_y).map_err(|e| at!(e))?;
+        post_process_latent(hdr, &headers.tools, 0, &ent_y, &mut ly).map_err(|e| at!(e))?;
         drop(ent_y);
-        let luv = reconstruct_latent(eng, hdr, 1, &set.common[1], &ent_uv).map_err(|e| at!(e))?;
+        let mut luv =
+            reconstruct_latent(eng, hdr, 1, &set.common[1], &ent_uv).map_err(|e| at!(e))?;
+        post_process_latent(hdr, &headers.tools, 1, &ent_uv, &mut luv).map_err(|e| at!(e))?;
         drop(ent_uv);
         let planes = synthesize(eng, hdr, &set.luma, &set.chroma, [&ly.y_hat, &luv.y_hat])
             .map_err(|e| at!(e))?;

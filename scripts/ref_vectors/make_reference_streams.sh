@@ -2,7 +2,7 @@
 # Encode + decode a matrix of configurations with the reference software and dump the decoder's
 # intermediate tensors for the parity tests.
 #
-#   scripts/ref_vectors/make_reference_streams.sh [SET]      SET: smoke (default) | regions | all
+#   scripts/ref_vectors/make_reference_streams.sh [SET]      SET: smoke (default) | regions | tools | all
 #
 # Output: $OUT/<name>/{stream.bits,encoder.log,tensors.bin,manifest.txt,decoded.png,stdout.log}
 # with OUT=/mnt/v/output/zenjpegai/reference/vectors. Existing streams are kept (delete the
@@ -56,6 +56,8 @@ one_fixed() { # name image model_id beta_disp_log cfg...
   cat "$dir/enc_stdout.log" >> "$dir/encoder.log"
   echo "== $name: decoding + dumping"
   nice -n 19 python "$HERE/dump_decode.py" "$dir/stream.bits" "$dir" > "$dir/dump.log" 2>&1
+  nice -n 19 python "$HERE/dump_decode.py" "$dir/stream.bits" "$dir/fixed_decoder" --contiguous-masks \
+      > "$dir/dump_fixed.log" 2>&1
   grep -h "^MD5" "$dir/encoder.log" "$dir/stdout.log" | sort | uniq -c | sed 's/^/   /'
   ls -la "$dir/stream.bits" | awk '{print "   stream bytes:", $5}'
 }
@@ -77,5 +79,15 @@ if [ "$SET" = regions ] || [ "$SET" = all ]; then
   one_fixed img01_base_off_depregions_m1 $IMG01 1 150 cfg/tools_off.json cfg/tools/DependentRegions.json cfg/profiles/base.json
   one_fixed img01_base_off_indregions_m1 $IMG01 1 150 cfg/tools_off.json cfg/tools/IndependentRegions.json cfg/profiles/base.json
   one_fixed img01_base_off_indregions_threads8_m2 $IMG01 2 -100 cfg/tools_off.json cfg/tools/IndependentRegions.json cfg/tools/ECThread8.json cfg/profiles/base.json
+fi
+if [ "$SET" = tools ] || [ "$SET" = all ]; then
+  # One coding tool at a time on top of tools_off, then the pairs that interact.
+  one img30_base_lsbs_bpp050 $IMG30 50 cfg/tools_off.json cfg/tools/LSBS.json cfg/profiles/base.json
+  one img30_base_rvs_bpp050 $IMG30 50 cfg/tools_off.json cfg/tools/ResVarScale.json cfg/profiles/base.json
+  one img30_base_lsbs_rvs_bpp025 $IMG30 25 cfg/tools_off.json cfg/tools/LSBS.json cfg/tools/ResVarScale.json cfg/profiles/base.json
+  # RVS without gain flags and gain flags without RVS (configs of ours: upstream only ships both).
+  one img30_base_rvsonly_bpp050 $IMG30 50 cfg/tools_off.json "$HERE/cfg/rvs_only.json" cfg/profiles/base.json
+  one img30_base_grfsonly_bpp075 $IMG30 75 cfg/tools_off.json "$HERE/cfg/grfs_only.json" cfg/profiles/base.json
+  one img30_simple_lsbs_rvs_bpp100 $IMG30 100 cfg/tools_off.json cfg/tools/LSBS.json cfg/tools/ResVarScale.json cfg/profiles/simple.json
 fi
 echo "== done ($(date -u +%H:%M:%S))"
