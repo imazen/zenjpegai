@@ -13,7 +13,7 @@
 mod common;
 use common::{load_dump, load_fixed_decoder_dump, ref_root, vector_dir};
 use zenjpegai::container::Codestream;
-use zenjpegai::decoder::output::{RgbPlanes, quantize, to_rgb_planes};
+use zenjpegai::decoder::output::{Picture, finish, quantize_plane, to_source_format};
 use zenjpegai::decoder::reconstruct::{
     Planes, post_process_latent, reconstruct_latent, synthesize,
 };
@@ -59,6 +59,8 @@ fn decode(stream: &[u8], eng: &Engine) -> (zenjpegai::header::PictureHeader, Dec
     post_process_latent(&hdr, &headers.tools, 0, &ent[0], &mut ly).unwrap();
     post_process_latent(&hdr, &headers.tools, 1, &ent[1], &mut luv).unwrap();
     let planes = synthesize(eng, &hdr, &syn_y, &syn_uv, [&ly.y_hat, &luv.y_hat]).unwrap();
+    // `model.decompress` hands the planes over in the source's chroma format.
+    let planes = to_source_format(&hdr, planes).unwrap();
     let ctx = FilterContext {
         eng,
         hdr: &hdr,
@@ -107,44 +109,65 @@ fn check(name: &str) {
         ("rec.b", &d.planes.u),
         ("rec.c", &d.planes.v),
     ] {
-        let diff = max_abs_diff(&dump[key].f32(), &got.data);
+        let want = &dump[key];
+        assert_eq!(want.shape[2..], [got.h, got.w], "{name} {key}: plane size");
+        let diff = max_abs_diff(&want.f32(), &got.data);
         assert!(
             diff < 3e-3,
             "{name} {key}: max abs diff {diff:e} (range 0..255)"
         );
     }
 
-    let rgb = to_rgb_planes(&hdr, &d.filtered).unwrap();
-    let theirs = RgbPlanes {
-        width: rgb.width,
-        height: rgb.height,
-        r: dump["out.a"].f32(),
-        g: dump["out.b"].f32(),
-        b: dump["out.c"].f32(),
+    // Final samples at the stream's bit depth: RGB interleaved, or the YUV planes one after
+    // another. The reference's `out.*` planes are quantised exactly like its file writers do.
+    let depth = hdr.bit_depth;
+    let theirs: Vec<Vec<u16>> = ["out.a", "out.b", "out.c"]
+        .iter()
+        .map(|k| quantize_plane(&dump[*k].f32(), depth))
+        .collect();
+    let (ours, theirs): (Vec<u16>, Vec<u16>) = match finish(&hdr, &d.filtered).unwrap() {
+        Picture::Rgb(img) => {
+            let t = theirs[0]
+                .iter()
+                .zip(&theirs[1])
+                .zip(&theirs[2])
+                .flat_map(|((&r, &g), &b)| [r, g, b])
+                .collect();
+            (img.data, t)
+        }
+        Picture::Yuv(img) => ([img.y, img.u, img.v].concat(), theirs.concat()),
     };
-    let (ours, theirs) = (quantize(&rgb, 8).unwrap(), quantize(&theirs, 8).unwrap());
-    let differing = ours
-        .data
-        .iter()
-        .zip(&theirs.data)
-        .filter(|(a, b)| a != b)
-        .count();
+    assert_eq!(ours.len(), theirs.len(), "{name}: sample count");
+    let differing = ours.iter().zip(&theirs).filter(|(a, b)| a != b).count();
     let worst = ours
-        .data
         .iter()
-        .zip(&theirs.data)
+        .zip(&theirs)
         .map(|(a, b)| (*a as i32 - *b as i32).abs())
         .max()
         .unwrap();
-    assert!(worst <= 1, "{name}: an 8-bit sample differs by {worst}");
-    assert!(
-        differing * 5000 < ours.data.len(),
-        "{name}: {differing} of {} 8-bit samples differ",
-        ours.data.len()
-    );
     println!(
-        "{name}: {differing} of {} 8-bit samples differ by 1",
-        ours.data.len()
+        "{name}: {differing} of {} {depth}-bit samples differ, worst by {worst}",
+        ours.len()
+    );
+    assert!(
+        worst <= 1,
+        "{name}: a {depth}-bit sample differs by {worst}"
+    );
+    assert!(
+        differing * 5000 < ours.len(),
+        "{name}: {differing} of {} {depth}-bit samples differ",
+        ours.len()
+    );
+
+    // The one-call API must produce exactly the same samples.
+    let decoder = zenjpegai::Decoder::new(ref_root().join("models"));
+    let api: Vec<u16> = match decoder.decode_picture(&stream).unwrap() {
+        Picture::Rgb(img) => img.data,
+        Picture::Yuv(img) => [img.y, img.u, img.v].concat(),
+    };
+    assert!(
+        api == ours,
+        "{name}: Decoder::decode_picture differs from the staged decode"
     );
 }
 
@@ -157,6 +180,17 @@ vectors! {
     img30_base_off_bpp050 => "img30_base_off_bpp050",
     img30_base_off_bpp100 => "img30_base_off_bpp100",
     img30_simple_off_bpp050 => "img30_simple_off_bpp050",
+    // YUV sources (4:2:0, 4:2:2, 4:4:4; 8 and 10 bit; odd size), RGB coded with subsampled
+    // chroma (bicubic up-sampling), non-displayed border.
+    img30yuv420_base_off_bpp050 => "img30yuv420_base_off_bpp050",
+    img30yuv422_base_off_bpp050 => "img30yuv422_base_off_bpp050",
+    img30yuv444_base_off_bpp050 => "img30yuv444_base_off_bpp050",
+    img30yuv420b10_base_off_bpp050 => "img30yuv420b10_base_off_bpp050",
+    img30yuv444b10_base_off_bpp050 => "img30yuv444b10_base_off_bpp050",
+    img30cropyuv420_base_off_bpp075 => "img30cropyuv420_base_off_bpp075",
+    img30_base_off_c420_bpp050 => "img30_base_off_c420_bpp050",
+    img30_base_off_c422_bpp050 => "img30_base_off_c422_bpp050",
+    img30_base_off_display_m1 => "img30_base_off_display_m1",
     // Coding tools: latent scaling before synthesis, residual variance scaling + gain flags.
     img30_base_lsbs_bpp050 => "img30_base_lsbs_bpp050",
     img30_base_rvs_bpp050 => "img30_base_rvs_bpp050",

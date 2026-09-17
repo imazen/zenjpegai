@@ -128,3 +128,30 @@ fn pixel_shuffle_order() {
         );
     }
 }
+
+/// `Image.to_444_`'s resampler. The port repeats PyTorch's compiled kernel operation for
+/// operation (including where its build fuses multiply-adds), so this one agrees to the bit.
+#[test]
+fn bicubic_align_corners_matches_torch() {
+    let t = load("bicubic_align_corners");
+    for i in 0..6 {
+        let (x, want) = (tensor(&t[&format!("x{i}")]), tensor(&t[&format!("y{i}")]));
+        let got = zenjpegai::decoder::output::resize_bicubic(&x, want.h, want.w).unwrap();
+        let worst = got
+            .data
+            .iter()
+            .zip(&want.data)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        let exact = got
+            .data
+            .iter()
+            .zip(&want.data)
+            .all(|(a, b)| a.to_bits() == b.to_bits());
+        println!(
+            "case {i}: {}x{} -> {}x{} max abs diff {worst:e} exact={exact}",
+            x.h, x.w, want.h, want.w
+        );
+        assert!(exact, "case {i}: max abs diff {worst:e}");
+    }
+}

@@ -2,7 +2,7 @@
 # Encode + decode a matrix of configurations with the reference software and dump the decoder's
 # intermediate tensors for the parity tests.
 #
-#   scripts/ref_vectors/make_reference_streams.sh [SET]      SET: smoke (default) | regions | tools | filters | efe | filtertiles | qmap | all
+#   scripts/ref_vectors/make_reference_streams.sh [SET]      SET: smoke (default) | regions | tools | filters | efe | filtertiles | qmap | formats | all
 #
 # Output: $OUT/<name>/{stream.bits,encoder.log,tensors.bin,manifest.txt,decoded.png,stdout.log}
 # with OUT=/mnt/v/output/zenjpegai/reference/vectors. Existing streams are kept (delete the
@@ -25,7 +25,8 @@ one() { # name image bpp cfg...
   if [ -f "$dir/manifest.txt" ] || [ -f "$dir/fixed_decoder/manifest.txt" ]; then echo "== $name: exists"; return; fi
   mkdir -p "$dir"
   echo "== $name: encoding ($(date -u +%H:%M:%S))"
-  nice -n 19 python -m src.reco.coders.encoder "data/test/$image" "$dir/stream.bits" \
+  local input="data/test/$image"; case "$image" in /*) input="$image";; esac
+  nice -n 19 python -m src.reco.coders.encoder "$input" "$dir/stream.bits" \
       --set_target_bpp "$bpp" --cfg "$@" -target_device cpu > "$dir/encoder.log" 2>&1
   echo "== $name: decoding + dumping"
   # The stock reference decoder cannot decode every stream its encoder writes (quality maps
@@ -194,5 +195,23 @@ if [ "$SET" = filtertiles ] || [ "$SET" = all ]; then
     [ -f "$OUT/$v/filters_lef_icci/manifest.txt" ] || nice -n 19 python "$HERE/dump_filters_lef_icci.py" \
         "$OUT/$v/stream.bits" "$OUT/$v/filters_lef_icci" > "$OUT/$v/dump_filters_lef_icci.log" 2>&1
   done
+fi
+if [ "$SET" = formats ] || [ "$SET" = all ]; then
+  # Chroma-subsampled and 10-bit sources: raw YUV written by the reference's own Image class
+  # from test image 00030 (scripts/ref_vectors/make_yuv_inputs.py).
+  IN=$OUT/../inputs
+  [ -f "$IN/img30_560x888_8bit_420.yuv" ] || PYTHONPATH=. python "$HERE/make_yuv_inputs.py" "$IN"
+  one img30yuv420_base_off_bpp050 "$IN/img30_560x888_8bit_420.yuv" 50 cfg/tools_off.json cfg/profiles/base.json
+  one img30yuv422_base_off_bpp050 "$IN/img30_560x888_8bit_422.yuv" 50 cfg/tools_off.json cfg/profiles/base.json
+  one img30yuv444_base_off_bpp050 "$IN/img30_560x888_8bit_444.yuv" 50 cfg/tools_off.json cfg/profiles/base.json
+  one img30yuv420b10_base_off_bpp050 "$IN/img30_560x888_10bit_420.yuv" 50 cfg/tools_off.json cfg/profiles/base.json
+  one img30yuv444b10_base_off_bpp050 "$IN/img30_560x888_10bit_444.yuv" 50 cfg/tools_off.json cfg/profiles/base.json
+  one img30cropyuv420_base_off_bpp075 "$IN/img30crop_203x301_8bit_420.yuv" 75 cfg/tools_off.json cfg/profiles/base.json
+  # RGB source coded with subsampled chroma: the decoder upsamples (bicubic) before RGB.
+  one img30_base_off_c420_bpp050 $IMG30 50 cfg/tools_off.json cfg/profiles/base.json -c_ver_value 2 -c_hor_value 2
+  one img30_base_off_c422_bpp050 $IMG30 50 cfg/tools_off.json cfg/profiles/base.json -c_hor_value 2
+  # Non-displayed right/bottom border. The bitrate matcher cannot handle it (its loss compares
+  # the cropped reconstruction with the uncropped source), hence the fixed model.
+  one_fixed img30_base_off_display_m1 $IMG30 1 100 cfg/tools_off.json cfg/profiles/base.json -diff_display_img_width 37 -diff_display_img_height 5
 fi
 echo "== done ($(date -u +%H:%M:%S))"

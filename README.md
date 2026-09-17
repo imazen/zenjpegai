@@ -5,12 +5,12 @@ the [JPEG AI reference software](https://gitlab.com/wg1/jpeg-ai/jpeg-ai-referenc
 with `#![forbid(unsafe_code)]`, SIMD through [archmage](https://lib.rs/crates/archmage) and
 [magetypes](https://lib.rs/crates/magetypes), and no Python or PyTorch at runtime.
 
-**Status: work in progress — a partial decoder, no encoder.** Missing first: all four post-filters,
-chroma-subsampled and 10-bit pictures, custom colour transforms, progressive decode, and the
+**Status: work in progress — a partial decoder, no encoder.** Missing first: two of the four post-filters (eICCI, LEF),
+custom colour transforms, progressive decode, and the
 entire encoder above the entropy coder. Streams that need any of these are rejected with
 `Error::Unsupported`; nothing is silently approximated.
 
-What works: 4:4:4, 8-bit, BT.709 streams at the simple, base and high operating points, at any
+What works: RGB (BT.709) and YUV streams, 4:4:4 / 4:2:2 / 4:2:0, 8 and 10 bit, at the simple, base and high operating points, at any
 picture size, with or without region partitioning, multiple ANS threads, residual variance
 scaling (RVS), channel gain flags (GRFS), latent scaling (LSBS) and quality maps. The entropy stage is bit-exact; the reconstructed 8-bit picture differs from the
 reference decoder's in about 0.005 % of samples, each by one step (convolution summation order).

@@ -6,7 +6,6 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Instant;
 
-use zenjpegai::Decoder;
 use zenjpegai::header::OperatingPoint;
 use zenjpegai::model::{self, ModelDir};
 use zenjpegai::nn::fast::{Engine, Tier};
@@ -18,12 +17,13 @@ const UPSTREAM_NOTICE: &str = concat!(
     "repacked without modification by zenjpegai.\n\n",
     include_str!("../../upstream-notices/LICENSE")
 );
+use zenjpegai::{Decoder, Picture};
 
 const USAGE: &str = "\
 zenjpegai - JPEG AI (ISO/IEC 6048) codec
 
 USAGE:
-    zenjpegai decode <in.bits> <out.png> [options]
+    zenjpegai decode <in.bits> <out.png | out.yuv> [options]
     zenjpegai info <in.bits>
     zenjpegai pack-models --models <dir> --out <file.zjb> [--model <0..3>]... [--op <sop|bop|hop>]...
                           [--only <common|synthesis>]
@@ -213,13 +213,19 @@ fn run() -> Result<(), String> {
             let mut image = None;
             for run in 0..args.repeat.max(1) {
                 let t = Instant::now();
-                let img = decoder.decode(&stream).map_err(|e| format!("{e:?}"))?;
+                let img = decoder
+                    .decode_picture(&stream)
+                    .map_err(|e| format!("{e:?}"))?;
                 if args.time {
+                    let (width, height) = match &img {
+                        Picture::Rgb(i) => (i.width, i.height),
+                        Picture::Yuv(i) => (i.width, i.height),
+                    };
                     eprintln!(
                         "decode {run}: {:.1} ms ({}x{}, {:?}{})",
                         t.elapsed().as_secs_f64() * 1e3,
-                        img.width,
-                        img.height,
+                        width,
+                        height,
                         engine.tier,
                         if run == 0 {
                             ", includes model load"
@@ -232,28 +238,84 @@ fn run() -> Result<(), String> {
             }
             let image = image.ok_or("nothing decoded")?;
             let t = Instant::now();
-            let pixels: Vec<rgb::Rgb<u8>> = image
-                .data
-                .as_chunks::<3>()
-                .0
-                .iter()
-                .map(|p| rgb::Rgb {
-                    r: p[0] as u8,
-                    g: p[1] as u8,
-                    b: p[2] as u8,
-                })
-                .collect();
-            let png = zenpng::encode_rgb8(
-                imgref::ImgRef::new(&pixels, image.width, image.height),
-                None,
-                &zenpng::EncodeConfig::default().with_compression(zenpng::Compression::Fast),
-                &enough::Unstoppable,
-                &enough::Unstoppable,
-            )
-            .map_err(|e| format!("png: {e:?}"))?;
-            std::fs::write(output, png).map_err(|e| format!("{output}: {e}"))?;
+            let bytes = match image {
+                // 8 bit: 8-bit PNG. 10 bit: 16-bit PNG, samples in the top bits with the low
+                // bits set, like the reference's `write_file`.
+                Picture::Rgb(image) if image.bit_depth == 8 => {
+                    let pixels: Vec<rgb::Rgb<u8>> = image
+                        .data
+                        .as_chunks::<3>()
+                        .0
+                        .iter()
+                        .map(|p| rgb::Rgb {
+                            r: p[0] as u8,
+                            g: p[1] as u8,
+                            b: p[2] as u8,
+                        })
+                        .collect();
+                    zenpng::encode_rgb8(
+                        imgref::ImgRef::new(&pixels, image.width, image.height),
+                        None,
+                        &zenpng::EncodeConfig::default()
+                            .with_compression(zenpng::Compression::Fast),
+                        &enough::Unstoppable,
+                        &enough::Unstoppable,
+                    )
+                    .map_err(|e| format!("png: {e:?}"))?
+                }
+                Picture::Rgb(image) => {
+                    let shift = 16 - image.bit_depth as u32;
+                    let up = |v: u16| (v << shift) | ((1u16 << shift) - 1);
+                    let pixels: Vec<rgb::Rgb<u16>> = image
+                        .data
+                        .as_chunks::<3>()
+                        .0
+                        .iter()
+                        .map(|p| rgb::Rgb {
+                            r: up(p[0]),
+                            g: up(p[1]),
+                            b: up(p[2]),
+                        })
+                        .collect();
+                    zenpng::encode_rgb16(
+                        imgref::ImgRef::new(&pixels, image.width, image.height),
+                        None,
+                        &zenpng::EncodeConfig::default()
+                            .with_compression(zenpng::Compression::Fast),
+                        &enough::Unstoppable,
+                        &enough::Unstoppable,
+                    )
+                    .map_err(|e| format!("png: {e:?}"))?
+                }
+                // A YUV source stays YUV: raw planar Y, U, V (one byte per sample at 8 bit, two
+                // little-endian bytes at 10 bit), chroma in the source's subsampling.
+                Picture::Yuv(image) => {
+                    if !output.to_ascii_lowercase().ends_with(".yuv") {
+                        return Err(format!(
+                            "{input} decodes to YUV {}x{} (chroma {}x{}, {} bit): give an output name ending in .yuv",
+                            image.width,
+                            image.height,
+                            image.chroma_width,
+                            image.chroma_height,
+                            image.bit_depth
+                        ));
+                    }
+                    let mut raw = Vec::new();
+                    for plane in [&image.y, &image.u, &image.v] {
+                        for &v in plane {
+                            if image.bit_depth == 8 {
+                                raw.push(v as u8);
+                            } else {
+                                raw.extend_from_slice(&v.to_le_bytes());
+                            }
+                        }
+                    }
+                    raw
+                }
+            };
+            std::fs::write(output, bytes).map_err(|e| format!("{output}: {e}"))?;
             if args.time {
-                eprintln!("png write: {:.1} ms", t.elapsed().as_secs_f64() * 1e3);
+                eprintln!("output write: {:.1} ms", t.elapsed().as_secs_f64() * 1e3);
             }
             Ok(())
         }

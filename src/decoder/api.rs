@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use whereat::{At, at};
 
-use super::output::{RgbImage, quantize, to_rgb_planes};
+use super::output::{Picture, RgbImage, finish, to_source_format};
 use super::reconstruct::{post_process_latent, reconstruct_latent_with, synthesize_with};
 use super::{Headers, decode_entropy_stage_with, read_headers};
 use crate::container::Codestream;
@@ -109,8 +109,26 @@ impl Decoder {
     }
 
     /// Decode a codestream to interleaved RGB at the stream's bit depth.
+    ///
+    /// Streams coded from a YUV source decode to YUV planes, not RGB: for those this returns
+    /// `Error::Unsupported`; use [`Decoder::decode_picture`].
     pub fn decode(&self, stream: &[u8]) -> Result<RgbImage, At<Error>> {
+        self.decode_with(stream, &enough::Unstoppable)
+    }
+
+    /// Decode a codestream to whatever it holds: RGB, or YUV planes in the source's chroma
+    /// subsampling (4:4:4, 4:2:2 or 4:2:0), 8 or 10 bits per sample.
+    pub fn decode_picture(&self, stream: &[u8]) -> Result<Picture, At<Error>> {
         self.decode_inner(stream, &enough::Unstoppable)
+    }
+
+    /// [`Decoder::decode_picture`] with cooperative cancellation (see [`Decoder::decode_with`]).
+    pub fn decode_picture_with(
+        &self,
+        stream: &[u8],
+        stop: &dyn enough::Stop,
+    ) -> Result<Picture, At<Error>> {
+        self.decode_inner(stream, stop)
     }
 
     /// [`Decoder::decode`] with cooperative cancellation.
@@ -123,7 +141,12 @@ impl Decoder {
         stream: &[u8],
         stop: &dyn enough::Stop,
     ) -> Result<RgbImage, At<Error>> {
-        self.decode_inner(stream, stop)
+        match self.decode_inner(stream, stop)? {
+            Picture::Rgb(image) => Ok(image),
+            Picture::Yuv(_) => Err(at!(Error::Unsupported(
+                "the stream decodes to YUV planes: use decode_picture"
+            ))),
+        }
     }
 
     /// Free the feature-map buffers kept for reuse between decodes.
@@ -135,19 +158,11 @@ impl Decoder {
         crate::nn::fast::release_buffers();
     }
 
-    fn decode_inner(&self, stream: &[u8], stop: &dyn enough::Stop) -> Result<RgbImage, At<Error>> {
+    fn decode_inner(&self, stream: &[u8], stop: &dyn enough::Stop) -> Result<Picture, At<Error>> {
         stop.check().map_err(|r| at!(Error::from(r)))?;
         let cs = Codestream::parse(stream).map_err(|e| at!(e))?;
         let headers = read_headers(&cs).map_err(|e| at!(e))?;
         let hdr = &headers.picture;
-        if headers.tools.lsbs_enabled.iter().any(|&e| e) {
-            return Err(at!(Error::Unsupported(
-                "latent scaling before synthesis (LSBS)"
-            )));
-        }
-        if hdr.bit_depth != 8 {
-            return Err(at!(Error::Unsupported("10-bit pictures")));
-        }
         let default_op = *hdr
             .synthesis_transforms
             .first()
@@ -194,6 +209,8 @@ impl Decoder {
         )
         .map_err(|e| at!(e))?;
         drop((ly, luv));
+        // Coded chroma format -> source chroma format, then the post-filters, then colour.
+        let planes = to_source_format(hdr, planes).map_err(|e| at!(e))?;
         let planes = if headers.tools.any_post_filter() {
             let ctx = FilterContext {
                 eng,
@@ -209,8 +226,6 @@ impl Decoder {
             planes
         };
         stop.check().map_err(|r| at!(Error::from(r)))?;
-        let rgb = to_rgb_planes(hdr, &planes).map_err(|e| at!(e))?;
-        drop(planes);
-        quantize(&rgb, hdr.bit_depth).map_err(|e| at!(e))
+        finish(hdr, &planes).map_err(|e| at!(e))
     }
 }
