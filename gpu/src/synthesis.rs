@@ -258,6 +258,36 @@ impl Cab {
 
 const HEADS: usize = 4;
 const FFN_GAMMA: usize = 4;
+const FFN_SPLIT: usize = 2;
+
+/// Output channels `first .. first + n` of an ungrouped convolution.
+fn out_slice(c: &Conv2d, first: usize, n: usize) -> Result<Conv2d> {
+    let per = c.in_ch * c.kh * c.kw;
+    Ok(Conv2d::new(
+        c.in_ch,
+        n,
+        (c.kh, c.kw),
+        c.stride,
+        (c.pad_h, c.pad_w),
+        1,
+        c.weight[first * per..(first + n) * per].to_vec(),
+        c.bias.as_ref().map(|b| b[first..first + n].to_vec()),
+    )?)
+}
+
+/// Channels `first .. first + n` of a bias-free depthwise 3x3 convolution.
+fn depthwise_slice(c: &Conv2d, first: usize, n: usize) -> Result<Conv2d> {
+    Ok(Conv2d::new(
+        n,
+        n,
+        (3, 3),
+        1,
+        (1, 1),
+        n,
+        c.weight[first * 9..(first + n) * 9].to_vec(),
+        None,
+    )?)
+}
 
 struct TransformerBlock {
     prep_norm: GpuLayerNorm,
@@ -266,9 +296,13 @@ struct TransformerBlock {
     temperature: wgpu::Buffer,
     attn_out: GpuConv,
     ffn_norm: GpuLayerNorm,
-    ffn_in: GpuConv,
-    ffn_dw: GpuDepthwise,
+    /// The feed-forward's expansion (`project_in` 1x1 + depthwise 3x3 to `2 * hidden` channels),
+    /// split by output channel into `FFN_SPLIT` (value, gate) pairs: every channel is computed
+    /// exactly as in the unsplit layer, but the largest feature map is `1 / (2 * FFN_SPLIT)` of it
+    /// (128 MiB instead of 256 MiB for a 1024-px luma tile: WebGPU's default binding limit).
+    ffn_expand: Vec<[(GpuConv, GpuDepthwise); 2]>,
     ffn_out: GpuConv,
+    hidden: usize,
 }
 
 impl TransformerBlock {
@@ -286,8 +320,31 @@ impl TransformerBlock {
             temperature: f32_buffer(l.ctx, &temperature.data),
             attn_out: l.conv1x1(&p("attn.project_out"), dim, dim, false)?,
             ffn_norm: l.layer_norm(&p("ffn.norm1"), dim)?,
-            ffn_in: l.conv1x1(&p("ffn.project_in"), dim, 2 * hidden, false)?,
-            ffn_dw: l.depthwise(&p("ffn.dwconv"), 2 * hidden)?,
+            ffn_expand: (0..FFN_SPLIT)
+                .map(|q| -> Result<_> {
+                    let n = hidden / FFN_SPLIT;
+                    let part = |first: usize| -> Result<(GpuConv, GpuDepthwise)> {
+                        let pw =
+                            l.conv2d(&p("ffn.project_in"), dim, 2 * hidden, 1, 1, 0, 1, false)?;
+                        let dw = l.conv2d(
+                            &p("ffn.dwconv"),
+                            2 * hidden,
+                            2 * hidden,
+                            3,
+                            1,
+                            1,
+                            2 * hidden,
+                            false,
+                        )?;
+                        Ok((
+                            GpuConv::new(l.ctx, &out_slice(&pw, first, n)?)?,
+                            GpuDepthwise::new(l.ctx, &depthwise_slice(&dw, first, n)?)?,
+                        ))
+                    };
+                    Ok([part(q * n)?, part(hidden + q * n)?])
+                })
+                .collect::<Result<_>>()?,
+            hidden,
             ffn_out: l.conv1x1(&p("ffn.project_out"), hidden, dim, false)?,
         })
     }
@@ -302,9 +359,14 @@ impl TransformerBlock {
         g.pointwise(Pointwise::Add, x, &[a])?;
 
         let t = g.layer_norm(x, &self.ffn_norm)?;
-        let t = g.conv(t, &self.ffn_in)?;
-        let t = g.depthwise(t, &self.ffn_dw)?;
-        let f = g.elu_gate(t)?;
+        let f = g.alloc(self.hidden, t.h, t.w)?;
+        for (q, [(pw_a, dw_a), (pw_b, dw_b)]) in self.ffn_expand.iter().enumerate() {
+            let a = g.conv(t, pw_a)?;
+            let a = g.depthwise(a, dw_a)?;
+            let b = g.conv(t, pw_b)?;
+            let b = g.depthwise(b, dw_b)?;
+            g.elu_gate_into(a, b, f, q * (self.hidden / FFN_SPLIT) / 4)?;
+        }
         let f = g.conv(f, &self.ffn_out)?;
         g.pointwise(Pointwise::Add, x, &[f])?;
         Ok(x)
@@ -638,6 +700,8 @@ pub struct Timing {
     pub dispatches: usize,
     /// Plans built (pipelines compiled, bind groups created) during this run; 0 when warm.
     pub plans_built: usize,
+    /// Largest feature map bound by any tile's plan, in bytes.
+    pub largest_binding_bytes: u64,
     /// Host time packing and queueing the latent upload.
     pub upload_host_ns: u64,
     /// Host time building plans (cold only).
@@ -798,15 +862,23 @@ impl GpuSynthesis {
         model_id: usize,
         op: OperatingPoint,
     ) -> Result<Self> {
+        // Same steps as `zenjpegai::model::with_checkpoint` (`.pth` or packed `ZJM1`; the source
+        // is told which tensors were read so `pack-models` keeps them).
         let luma = {
-            let file = source.read(&synthesis_path(model_id, 0, op)?)?;
+            let rel = synthesis_path(model_id, 0, op)?;
+            let file = source.read(&rel)?;
             let ck = Checkpoint::parse(&file)?;
-            Primary::load(&Loader { ctx: &ctx, ck: &ck }, op)?
+            let net = Primary::load(&Loader { ctx: &ctx, ck: &ck }, op)?;
+            source.accessed(&rel, &ck.touched_names());
+            net
         };
         let chroma = {
-            let file = source.read(&synthesis_path(model_id, 1, op)?)?;
+            let rel = synthesis_path(model_id, 1, op)?;
+            let file = source.read(&rel)?;
             let ck = Checkpoint::parse(&file)?;
-            Secondary::load(&Loader { ctx: &ctx, ck: &ck }, op)?
+            let net = Secondary::load(&Loader { ctx: &ctx, ck: &ck }, op)?;
+            source.accessed(&rel, &ck.touched_names());
+            net
         };
         Ok(Self {
             ctx,
@@ -997,6 +1069,8 @@ impl GpuSynthesis {
             }
             ctx.queue().submit([enc.finish()]);
             timing.dispatches += plan.dispatches();
+            timing.largest_binding_bytes =
+                timing.largest_binding_bytes.max(plan.largest_binding_bytes);
             timing.submit_host_ns += since(t);
         }
 

@@ -11,9 +11,11 @@ mod error;
 pub mod kernels;
 pub mod layers;
 pub mod plan;
+mod present;
 mod synthesis;
 
 pub use context::{ContextOptions, GpuContext};
 pub use decoder::{GpuDecoded, GpuDecoder};
 pub use error::GpuError;
+pub use present::{Blitter, read_rgba8};
 pub use synthesis::{GpuPicture, GpuSynthesis, Timing, Workspace};

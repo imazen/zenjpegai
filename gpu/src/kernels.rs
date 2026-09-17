@@ -292,25 +292,29 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{
     )
 }
 
-/// `dst[:hc] = elu(src[:hc]) * src[hc:]` per pixel (the gated feed-forward of the transformer
-/// block). Params: `n row src_c4 hc4` with `n` pixels.
+/// `dst[dst_off ..][..n4] = elu(a[a_off ..]) * b[b_off ..]` per pixel, in blocks (the gated
+/// feed-forward of the transformer block; `a` and `b` may be the same map).
+/// Params: `n row n4 a_c4 a_off b_c4 b_off dst_c4 dst_off` with `n` pixels.
 pub fn elu_gate() -> String {
     format!(
         "{params}
-@group(0) @binding(1) var<storage, read> src: array<vec4<f32>>;
-@group(0) @binding(2) var<storage, read_write> dst: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read> a: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read> b: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read_write> dst: array<vec4<f32>>;
 @compute @workgroup_size({WG1}, 1, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{
   let i = gid.y * p.row + gid.x;
   if (gid.x >= p.row || i >= p.n) {{ return; }}
-  for (var c = 0u; c < p.hc4; c++) {{
-    let x = src[i * p.src_c4 + c];
+  for (var c = 0u; c < p.n4; c++) {{
+    let x = a[i * p.a_c4 + p.a_off + c];
     let e = select(exp(min(x, vec4<f32>(0.0))) - vec4<f32>(1.0), x, x > vec4<f32>(0.0));
-    dst[i * p.hc4 + c] = e * src[i * p.src_c4 + p.hc4 + c];
+    dst[i * p.dst_c4 + p.dst_off + c] = e * b[i * p.b_c4 + p.b_off + c];
   }}
 }}
 ",
-        params = params(&["n", "row", "src_c4", "hc4"]),
+        params = params(&[
+            "n", "row", "n4", "a_c4", "a_off", "b_c4", "b_off", "dst_c4", "dst_off"
+        ]),
     )
 }
 

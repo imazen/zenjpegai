@@ -9,9 +9,11 @@ repository = "https://github.com/imazen/zenjpegai"
 publish = false
 
 [features]
-default = ["parallel"]
+default = ["parallel", "avx512"]
 # Threaded CPU stages (entropy threads, hyper-decoder, context model) through zenjpegai/parallel.
 parallel = ["zenjpegai/parallel"]
+# AVX-512 kernels for the CPU stages (and the CPU side of the benchmarks).
+avx512 = ["zenjpegai/avx512"]
 # Tests that need a GPU adapter, the upstream checkpoints and the reference vectors. With this
 # feature on, a missing adapter or missing data is a hard failure. Run through `just gpu-test`.
 gpu-tests = []

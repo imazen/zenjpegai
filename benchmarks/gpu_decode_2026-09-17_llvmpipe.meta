@@ -1,0 +1,13 @@
+gpu_decode_2026-09-17_llvmpipe.tsv
+
+NOT A HARDWARE GPU. Adapter: llvmpipe (LLVM 21.1.8, 256 bits), Mesa 26.0.8-1ubuntu0.3, Vulkan, device
+type Cpu, run with LP_NUM_THREADS=8. The hardware adapters of the box were not accessible (render
+nodes need the `render` group). The file shows that the harness runs and what it reports; it
+does not measure GPU speed and gives no CPU / GPU crossover.
+
+host: dev (Ryzen 9 9950X3D), shared with other jobs while this ran (timings are noisy)
+wgpu: 30.0.1
+command: LP_NUM_THREADS=8 RAYON_NUM_THREADS=8 nice -n 19 target/release/examples/gpu_bench --allow-software --max-size 1024 --rounds 3 --out benchmarks/gpu_decode_2026-09-17_llvmpipe.tsv
+commit: the commit that adds this file (gpu/examples/gpu_bench.rs of that commit)
+columns: see the header comment of gpu/examples/gpu_bench.rs. cpu_mt_ms ran with 8 rayon threads.
+sizes above 1024 (tiled) were not run in the sweep; the 2096x1400 decode row covers 6 tiles.

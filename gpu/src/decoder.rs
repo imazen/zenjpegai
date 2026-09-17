@@ -3,9 +3,8 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use zenjpegai::RgbImage;
 use zenjpegai::container::Codestream;
-use zenjpegai::decoder::output::{quantize, to_rgb_planes};
+use zenjpegai::decoder::output;
 use zenjpegai::decoder::reconstruct::{Planes, post_process_latent, reconstruct_latent};
 use zenjpegai::decoder::{Headers, decode_entropy_stage, read_headers};
 use zenjpegai::filters::{self, FilterContext};
@@ -14,6 +13,7 @@ use zenjpegai::mans::AnsTables;
 use zenjpegai::model::{self, CommonModel, ModelSource};
 use zenjpegai::nn::fast::Engine;
 use zenjpegai::tensor::Tensor;
+use zenjpegai::{Picture, RgbImage};
 
 use crate::context::GpuContext;
 use crate::error::{GpuError, Result};
@@ -226,15 +226,14 @@ impl GpuDecoder {
     }
 
     /// Read the planes back: post-filters, colour conversion and rounding on the CPU, exactly as
-    /// the CPU decoder does them. Returns the planes before the post-filters too (for parity
-    /// measurements) and the timing with `gpu_ns` filled in.
-    pub async fn finish(&self, mut decoded: GpuDecoded) -> Result<(RgbImage, Planes, Timing)> {
+    /// the CPU decoder does them (RGB, or YUV planes for streams coded that way; 8 or 10 bit).
+    /// Also returns the synthesised planes before the post-filters (for parity measurements) and
+    /// the timing with `gpu_ns` filled in.
+    pub async fn finish(&self, mut decoded: GpuDecoded) -> Result<(Picture, Planes, Timing)> {
         let hdr = &decoded.headers.picture;
-        if hdr.bit_depth != 8 {
-            return Err(zenjpegai::Error::Unsupported("10-bit pictures").into());
-        }
         let rec = decoded.picture.read_planes().await?;
         let synthesized = to_planes(hdr, &rec)?;
+        drop(rec);
         let planes = if decoded.headers.tools.any_post_filter() {
             let fctx = FilterContext {
                 eng: &self.engine,
@@ -249,14 +248,27 @@ impl GpuDecoder {
         } else {
             synthesized.clone()
         };
-        let rgb = quantize(&to_rgb_planes(hdr, &planes)?, hdr.bit_depth)?;
-        Ok((rgb, synthesized, decoded.picture.timing))
+        Ok((
+            output::finish(hdr, &planes)?,
+            synthesized,
+            decoded.picture.timing,
+        ))
+    }
+
+    /// Codestream to whatever it holds (RGB or YUV planes), like `Decoder::decode_picture`.
+    pub async fn decode_picture_async(&self, stream: &[u8]) -> Result<Picture> {
+        let decoded = self.decode_to_gpu(stream)?;
+        Ok(self.finish(decoded).await?.0)
     }
 
     /// Codestream to interleaved RGB.
     pub async fn decode_async(&self, stream: &[u8]) -> Result<RgbImage> {
-        let decoded = self.decode_to_gpu(stream)?;
-        Ok(self.finish(decoded).await?.0)
+        match self.decode_picture_async(stream).await? {
+            Picture::Rgb(image) => Ok(image),
+            Picture::Yuv(_) => Err(GpuError::Unsupported(
+                "the stream decodes to YUV planes: use decode_picture_async",
+            )),
+        }
     }
 
     /// Blocking [`decode_async`](Self::decode_async).

@@ -374,21 +374,63 @@ impl<'a> Graph<'a> {
         Ok(())
     }
 
+    /// An uninitialised map for operations that fill it piecewise.
+    pub fn alloc(&mut self, c: usize, h: usize, w: usize) -> Result<T> {
+        self.tensor(c, h, w)
+    }
+
+    /// `dst[dst_c4off ..][.. a.c4] = elu(a) * b` (whole maps `a`, `b` of equal shape).
+    pub fn elu_gate_into(&mut self, a: T, b: T, dst: T, dst_c4off: usize) -> Result<()> {
+        if (a.c, a.h, a.w) != (b.c, b.h, b.w)
+            || (a.h, a.w) != (dst.h, dst.w)
+            || !a.c.is_multiple_of(4)
+            || dst_c4off + a.c4() > dst.c4()
+        {
+            return Err(GpuError::Shape("elu gate: operand shapes".into()));
+        }
+        self.elu_gate_raw(a, 0, b, 0, a.c4(), dst, dst_c4off);
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn elu_gate_raw(
+        &mut self,
+        a: T,
+        a_off: usize,
+        b: T,
+        b_off: usize,
+        n4: usize,
+        dst: T,
+        off: usize,
+    ) {
+        let n = a.h * a.w;
+        let (row, dispatch) = grid1(n, 1);
+        self.push(
+            "elu_gate",
+            kernels::elu_gate,
+            &[
+                n as u32,
+                row,
+                n4 as u32,
+                a.c4() as u32,
+                a_off as u32,
+                b.c4() as u32,
+                b_off as u32,
+                dst.c4() as u32,
+                off as u32,
+            ],
+            vec![Bind::Tensor(a.id), Bind::Tensor(b.id), Bind::Tensor(dst.id)],
+            dispatch,
+        );
+    }
+
     /// `elu(x[:c/2]) * x[c/2:]`.
     pub fn elu_gate(&mut self, x: T) -> Result<T> {
         if !x.c.is_multiple_of(8) {
             return Err(GpuError::Shape("elu gate: channel count".into()));
         }
         let y = self.tensor(x.c / 2, x.h, x.w)?;
-        let n = x.h * x.w;
-        let (row, dispatch) = grid1(n, 1);
-        self.push(
-            "elu_gate",
-            kernels::elu_gate,
-            &[n as u32, row, x.c4() as u32, y.c4() as u32],
-            vec![Bind::Tensor(x.id), Bind::Tensor(y.id)],
-            dispatch,
-        );
+        self.elu_gate_raw(x, 0, x, y.c4(), y.c4(), y, 0);
         Ok(y)
     }
 
@@ -738,6 +780,7 @@ impl<'a> Graph<'a> {
             steps,
             tensor_buffers,
             activation_bytes: slot_bytes.iter().sum(),
+            largest_binding_bytes: self.tensors.iter().map(|t| t.bytes).max().unwrap_or(0),
         })
     }
 }
@@ -748,6 +791,8 @@ pub struct Plan {
     tensor_buffers: Vec<Option<wgpu::Buffer>>,
     /// Sum of the activation slot sizes this plan needs.
     pub activation_bytes: u64,
+    /// Largest single feature map (what the device's storage binding limit has to cover).
+    pub largest_binding_bytes: u64,
 }
 
 impl Plan {
