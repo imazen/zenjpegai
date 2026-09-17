@@ -6,6 +6,7 @@
 <!-- Breaking changes that will ship together in the next major (or minor for 0.x) release. -->
 
 ### Added
+- Packed model bundles: `weights::packed` (`ZJM1` checkpoints, `ZJB1` bundles, `PackedBundle` model source, `Recorder`), `zenjpegai pack-models`, and `--models <bundle file>`; a (model, operating point) pair shrinks to 15-29 MB with pixels bit-identical to the `.pth` path. `ModelSource::accessed` + `model::with_checkpoint` (additive).
 - Quality map (spatially varying quantisation), bit-exact on three reference streams.
 - WebAssembly: `Wasm128` SIMD tier and the wasm32 numeric policy (unfused multiply-add on every wasm tier: bit-identical across wasm engines, within 1 of native in under 1/48000 samples); the whole test suite runs on `wasm32-wasip1` under node (`just test-wasi`, `scripts/wasm/`).
 - EFE linear and EFE non-linear post-filters (decoder side) for every chroma format the reference software can produce; checked filter-by-filter against 17 reference streams (non-linear filter bit-identical, linear within 9.2e-5 on a 0..255 scale) and through the whole decoder on 7.

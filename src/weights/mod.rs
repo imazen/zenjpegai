@@ -6,23 +6,39 @@
 //! (no code execution) and exposes the top-level tensors by name; tensor bytes are only touched
 //! when a tensor is requested, so the optimizer state some upstream files carry costs nothing.
 
+pub mod packed;
 mod pickle;
 mod zip;
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use pickle::Value;
 pub use pickle::{DType, TensorRef};
 
 use crate::error::{Error, Result};
 
-/// A parsed checkpoint borrowing the file bytes.
+/// Where tensor bytes live.
+enum Backing<'a> {
+    /// A PyTorch ZIP: storages are archive members `<prefix>data/<key>`.
+    Torch {
+        archive: zip::Archive<'a>,
+        prefix: String,
+    },
+    /// A packed `ZJM1` checkpoint ([`packed`]): one storage, the file itself; every tensor is
+    /// contiguous and its `storage_offset` (in elements) points into the file.
+    Packed(&'a [u8]),
+}
+
+/// A parsed checkpoint borrowing the file bytes: an upstream PyTorch `.pth` file or a packed
+/// `ZJM1` file, behind the same accessors.
 pub struct Checkpoint<'a> {
-    archive: zip::Archive<'a>,
-    prefix: String,
+    backing: Backing<'a>,
     /// Top-level tensors in file order.
     tensors: Vec<(String, TensorRef)>,
+    /// Per tensor: looked up by name (`contains`, `info` or a data accessor) since parsing.
+    touched: Vec<AtomicBool>,
     /// Top-level integer entries (`epoch`, ...).
     ints: Vec<(String, i64)>,
 }
@@ -45,7 +61,17 @@ fn model_err(msg: impl Into<String>) -> Error {
 }
 
 impl<'a> Checkpoint<'a> {
+    /// Parse a PyTorch `.pth` file or a packed `ZJM1` file (told apart by the magic).
     pub fn parse(file: &'a [u8]) -> Result<Self> {
+        if file.starts_with(packed::ZJM_MAGIC) {
+            let (tensors, ints) = packed::parse_zjm(file)?;
+            return Ok(Self {
+                backing: Backing::Packed(file),
+                touched: tensors.iter().map(|_| AtomicBool::new(false)).collect(),
+                tensors,
+                ints,
+            });
+        }
         let archive = zip::Archive::parse(file)?;
         let pkl = archive
             .entries
@@ -69,8 +95,8 @@ impl<'a> Checkpoint<'a> {
             }
         }
         Ok(Self {
-            archive,
-            prefix,
+            backing: Backing::Torch { archive, prefix },
+            touched: tensors.iter().map(|_| AtomicBool::new(false)).collect(),
             tensors,
             ints,
         })
@@ -82,12 +108,30 @@ impl<'a> Checkpoint<'a> {
     }
 
     pub fn contains(&self, name: &str) -> bool {
-        self.tensors.iter().any(|(n, _)| n == name)
+        self.info(name).is_some()
     }
 
     /// Shape and dtype of a tensor without touching its data.
     pub fn info(&self, name: &str) -> Option<&TensorRef> {
-        self.tensors.iter().find(|(n, _)| n == name).map(|(_, t)| t)
+        let i = self.tensors.iter().position(|(n, _)| n == name)?;
+        self.touched[i].store(true, Ordering::Relaxed);
+        Some(&self.tensors[i].1)
+    }
+
+    /// Names of the tensors looked up by name since parsing, in file order: what a loader
+    /// actually needs from this file (the input of [`packed::write_zjm`]).
+    pub fn touched_names(&self) -> Vec<String> {
+        self.tensors
+            .iter()
+            .zip(&self.touched)
+            .filter(|(_, t)| t.load(Ordering::Relaxed))
+            .map(|((n, _), _)| n.clone())
+            .collect()
+    }
+
+    /// All top-level integer entries.
+    pub fn ints(&self) -> &[(String, i64)] {
+        &self.ints
     }
 
     /// A top-level integer entry such as `epoch`.
@@ -111,15 +155,17 @@ impl<'a> Checkpoint<'a> {
                 "tensor `{name}`: shape/stride rank mismatch"
             )));
         }
-        let storage = self
-            .archive
-            .get(&alloc::format!("{}data/{}", self.prefix, t.storage_key))
-            .ok_or_else(|| {
-                model_err(alloc::format!(
-                    "tensor `{name}`: storage `{}` missing",
-                    t.storage_key
-                ))
-            })?;
+        let storage = match &self.backing {
+            Backing::Torch { archive, prefix } => archive
+                .get(&alloc::format!("{prefix}data/{}", t.storage_key))
+                .ok_or_else(|| {
+                    model_err(alloc::format!(
+                        "tensor `{name}`: storage `{}` missing",
+                        t.storage_key
+                    ))
+                })?,
+            Backing::Packed(file) => file,
+        };
         let es = t.dtype.size();
         let numel = t
             .shape
@@ -183,6 +229,16 @@ impl<'a> Checkpoint<'a> {
             }
         }
         Ok((t.shape.clone(), out))
+    }
+
+    /// Contiguous little-endian bytes of a tensor of any dtype, with its dtype and shape.
+    pub fn raw(&self, name: &str) -> Result<(DType, Vec<usize>, Vec<u8>)> {
+        let dtype = self
+            .info(name)
+            .ok_or_else(|| model_err(alloc::format!("tensor `{name}` not found")))?
+            .dtype;
+        let (shape, bytes) = self.bytes(name, dtype)?;
+        Ok((dtype, shape, bytes))
     }
 
     pub fn f32(&self, name: &str) -> Result<Tensor<f32>> {

@@ -8,7 +8,16 @@ use std::time::Instant;
 
 use zenjpegai::Decoder;
 use zenjpegai::header::OperatingPoint;
+use zenjpegai::model::{self, ModelDir};
 use zenjpegai::nn::fast::{Engine, Tier};
+use zenjpegai::weights::packed::{PackedBundle, Recorder};
+
+/// The upstream licence travels inside every bundle: the weights are upstream's.
+const UPSTREAM_NOTICE: &str = concat!(
+    "Model weights: JPEG AI reference software (https://gitlab.com/wg1/jpeg-ai/jpeg-ai-reference-software), ",
+    "repacked without modification by zenjpegai.\n\n",
+    include_str!("../../upstream-notices/LICENSE")
+);
 
 const USAGE: &str = "\
 zenjpegai - JPEG AI (ISO/IEC 6048) codec
@@ -16,21 +25,34 @@ zenjpegai - JPEG AI (ISO/IEC 6048) codec
 USAGE:
     zenjpegai decode <in.bits> <out.png> [options]
     zenjpegai info <in.bits>
+    zenjpegai pack-models --models <dir> --out <file.zjb> [--model <0..3>]... [--op <sop|bop|hop>]...
+                          [--only <common|synthesis>]
 
 OPTIONS:
-    --models <dir>     directory of upstream checkpoints (the reference software's models/);
-                       default: $ZENJPEGAI_MODELS
+    --models <path>    directory of upstream checkpoints (the reference software's models/), or a
+                       packed bundle written by `pack-models`; default: $ZENJPEGAI_MODELS
     --op <sop|bop|hop> synthesis transform (default: the stream's first listed one)
     --single-thread    do not use the thread pool
     --scalar           no SIMD (for debugging; every tier produces identical pixels)
     --repeat <n>       decode n times and print per-run timing (models stay loaded)
     --time             print timing
+
+pack-models writes a ZJB1 bundle holding only the tensors the decoder reads for the given models
+(default: all four) and operating points (default: all three), byte for byte: pixels decoded
+from a bundle are identical to pixels decoded from the .pth files. `--only common` keeps the
+per-model entropy / latent networks, `--only synthesis` the per-(model, operating point) synthesis
+transforms: a client that has the common part of a model fetches only the other for a new
+operating point (`PackedBundle::add` merges them).
 ";
 
 struct Args {
     positional: Vec<String>,
     models: Option<PathBuf>,
     op: Option<OperatingPoint>,
+    ops: Vec<OperatingPoint>,
+    model_ids: Vec<usize>,
+    out: Option<PathBuf>,
+    only: Option<String>,
     single_thread: bool,
     scalar: bool,
     repeat: usize,
@@ -42,6 +64,10 @@ fn parse_args() -> Result<Args, String> {
         positional: Vec::new(),
         models: std::env::var_os("ZENJPEGAI_MODELS").map(PathBuf::from),
         op: None,
+        ops: Vec::new(),
+        model_ids: Vec::new(),
+        out: None,
+        only: None,
         single_thread: false,
         scalar: false,
         repeat: 1,
@@ -53,13 +79,32 @@ fn parse_args() -> Result<Args, String> {
         match arg.as_str() {
             "--models" => a.models = Some(PathBuf::from(value("--models")?)),
             "--op" => {
-                a.op = Some(match value("--op")?.as_str() {
+                let op = match value("--op")?.as_str() {
                     "sop" => OperatingPoint::Sop,
                     "bop" => OperatingPoint::Bop,
                     "hop" => OperatingPoint::Hop,
                     other => return Err(format!("unknown operating point `{other}`")),
-                })
+                };
+                a.op = Some(op);
+                a.ops.push(op);
             }
+            "--model" => {
+                let id: usize = value("--model")?
+                    .parse()
+                    .map_err(|e| format!("--model: {e}"))?;
+                if id >= zenjpegai::model::MODEL_BETAS.len() {
+                    return Err(format!("--model: {id} is not one of 0..=3"));
+                }
+                a.model_ids.push(id);
+            }
+            "--only" => {
+                let v = value("--only")?;
+                if v != "common" && v != "synthesis" {
+                    return Err(format!("--only: `{v}` is not `common` or `synthesis`"));
+                }
+                a.only = Some(v);
+            }
+            "--out" => a.out = Some(PathBuf::from(value("--out")?)),
             "--single-thread" => a.single_thread = true,
             "--scalar" => a.scalar = true,
             "--repeat" => {
@@ -90,6 +135,62 @@ fn run() -> Result<(), String> {
             println!("{headers:#?}");
             Ok(())
         }
+        ["pack-models"] => {
+            let models = args
+                .models
+                .ok_or("no checkpoint directory: pass --models or set ZENJPEGAI_MODELS")?;
+            let out = args.out.ok_or("pack-models needs --out <file>")?;
+            let ids = if args.model_ids.is_empty() {
+                (0..zenjpegai::model::MODEL_BETAS.len()).collect()
+            } else {
+                args.model_ids
+            };
+            let ops = if args.ops.is_empty() {
+                vec![
+                    OperatingPoint::Sop,
+                    OperatingPoint::Bop,
+                    OperatingPoint::Hop,
+                ]
+            } else {
+                args.ops
+            };
+            // Loading is where the decoder reads tensors; the tier does not change which.
+            let eng = Engine::with(Tier::Scalar, false);
+            let rec = Recorder::new(ModelDir::new(&models));
+            let (common, synthesis) = match args.only.as_deref() {
+                Some("common") => (true, false),
+                Some(_) => (false, true),
+                None => (true, true),
+            };
+            for &id in &ids {
+                for ccs in 0..2 {
+                    if common {
+                        model::load_common(&rec, id, ccs, &eng).map_err(|e| format!("{e:?}"))?;
+                    }
+                }
+                for &op in ops.iter().filter(|_| synthesis) {
+                    model::load_synthesis_primary(&rec, id, op, &eng)
+                        .map_err(|e| format!("{e:?}"))?;
+                    model::load_synthesis_secondary(&rec, id, op, &eng)
+                        .map_err(|e| format!("{e:?}"))?;
+                }
+            }
+            let bundle = rec.pack(UPSTREAM_NOTICE).map_err(|e| format!("{e:?}"))?;
+            let packed = PackedBundle::parse(bundle.clone()).map_err(|e| format!("{e:?}"))?;
+            let mut source_bytes = 0u64;
+            for rel in packed.paths() {
+                source_bytes += std::fs::metadata(models.join(rel)).map_or(0, |m| m.len());
+            }
+            std::fs::write(&out, &bundle).map_err(|e| format!("{out:?}: {e}"))?;
+            eprintln!(
+                "{}: {} files, {} bytes (from {} bytes of .pth)",
+                out.display(),
+                packed.paths().count(),
+                bundle.len(),
+                source_bytes
+            );
+            Ok(())
+        }
         ["decode", input, output] => {
             let models = args
                 .models
@@ -101,7 +202,14 @@ fn run() -> Result<(), String> {
             };
             let engine = Engine::with(tier, !args.single_thread && cfg!(feature = "parallel"));
             let stream = std::fs::read(input).map_err(|e| format!("{input}: {e}"))?;
-            let decoder = Decoder::with_engine(models, engine).operating_point(args.op);
+            let decoder = if models.is_file() {
+                let bytes = std::fs::read(&models).map_err(|e| format!("{models:?}: {e}"))?;
+                let bundle = PackedBundle::parse(bytes).map_err(|e| format!("{e:?}"))?;
+                Decoder::with_source(Box::new(bundle), engine)
+            } else {
+                Decoder::with_engine(models, engine)
+            }
+            .operating_point(args.op);
             let mut image = None;
             for run in 0..args.repeat.max(1) {
                 let t = Instant::now();

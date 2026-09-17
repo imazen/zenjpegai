@@ -25,6 +25,25 @@ pub const COMPONENT_NAMES: [&str; 2] = ["Y", "UV"];
 /// the reference repository (`VM_common_int/Y_0.012.pth`, `VM_bop/decoder_UV_0.5.pth`, ...).
 pub trait ModelSource {
     fn read(&self, rel: &str) -> crate::error::Result<alloc::borrow::Cow<'_, [u8]>>;
+
+    /// Told by the loaders which tensors of `rel` they looked up (see [`with_checkpoint`]).
+    /// Sources ignore it, except the model packer's [`crate::weights::packed::Recorder`].
+    fn accessed(&self, _rel: &str, _tensors: &[alloc::string::String]) {}
+}
+
+/// Read and parse the checkpoint at `rel` (a `.pth` or a packed `ZJM1` file), run `load` on it,
+/// and report the tensors it looked up to the source. Every loader should go through this so
+/// that `zenjpegai pack-models` sees what it needs.
+pub fn with_checkpoint<T>(
+    src: &dyn ModelSource,
+    rel: &str,
+    load: impl FnOnce(&crate::weights::Checkpoint<'_>) -> crate::error::Result<T>,
+) -> crate::error::Result<T> {
+    let file = src.read(rel)?;
+    let ck = crate::weights::Checkpoint::parse(&file)?;
+    let out = load(&ck)?;
+    src.accessed(rel, &ck.touched_names());
+    Ok(out)
 }
 
 /// Checkpoints held in memory (for targets without a file system, such as the browser).
@@ -99,9 +118,9 @@ pub fn load_common(
     ccs: usize,
     eng: &crate::nn::fast::Engine,
 ) -> crate::error::Result<CommonModel> {
-    let file = src.read(&common_path(model_id, ccs)?)?;
-    let ck = crate::weights::Checkpoint::parse(&file)?;
-    CommonModel::load(&ck, crate::header::LATENT_CHANNELS[ccs], eng)
+    with_checkpoint(src, &common_path(model_id, ccs)?, |ck| {
+        CommonModel::load(ck, crate::header::LATENT_CHANNELS[ccs], eng)
+    })
 }
 
 /// Luma synthesis transform of model `model_id` at operating point `op`.
@@ -111,8 +130,9 @@ pub fn load_synthesis_primary(
     op: crate::header::OperatingPoint,
     eng: &crate::nn::fast::Engine,
 ) -> crate::error::Result<synthesis::SynthesisPrimary> {
-    let file = src.read(&synthesis_path(model_id, 0, op)?)?;
-    synthesis::SynthesisPrimary::load(&crate::weights::Checkpoint::parse(&file)?, op, eng)
+    with_checkpoint(src, &synthesis_path(model_id, 0, op)?, |ck| {
+        synthesis::SynthesisPrimary::load(ck, op, eng)
+    })
 }
 
 /// Chroma synthesis transform of model `model_id` at operating point `op`.
@@ -122,8 +142,9 @@ pub fn load_synthesis_secondary(
     op: crate::header::OperatingPoint,
     eng: &crate::nn::fast::Engine,
 ) -> crate::error::Result<synthesis::SynthesisSecondary> {
-    let file = src.read(&synthesis_path(model_id, 1, op)?)?;
-    synthesis::SynthesisSecondary::load(&crate::weights::Checkpoint::parse(&file)?, op, eng)
+    with_checkpoint(src, &synthesis_path(model_id, 1, op)?, |ck| {
+        synthesis::SynthesisSecondary::load(ck, op, eng)
+    })
 }
 
 /// Checkpoints in a directory on disk.
