@@ -10,7 +10,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 BIN=$HERE/../../target/release/zenjpegai
 TMP=${TMPDIR:-$HOME/tmp}/zenjpegai-bench; mkdir -p "$TMP"
 RUNS=${RUNS:-3}
-STREAMS=${STREAMS:-"img30_simple_off_bpp050 img30_base_off_bpp012 img30_base_off_bpp050 img30_base_off_bpp100 img01_base_off_bpp050"}
+STREAMS=${STREAMS:-"img30_simple_off_bpp050 img30_base_off_bpp012 img30_base_off_bpp050 img30_base_off_bpp100 img30_high_off_bpp050 img01_base_off_bpp050"}
 NPROC=$(nproc)
 
 echo "# commit $(git -C "$HERE" rev-parse --short HEAD 2>/dev/null) host-cpu $(lscpu | sed -n 's/^Model name: *//p') threads $NPROC date $(date -u +%FT%TZ)"

@@ -5,13 +5,12 @@ the [JPEG AI reference software](https://gitlab.com/wg1/jpeg-ai/jpeg-ai-referenc
 with `#![forbid(unsafe_code)]`, SIMD through [archmage](https://lib.rs/crates/archmage) and
 [magetypes](https://lib.rs/crates/magetypes), and no Python or PyTorch at runtime.
 
-**Status: work in progress — a partial decoder, no encoder.** Missing first: the high operating
-point (HOP synthesis), all four post-filters, latent scaling (LSBS), RVS/GRFS, quality maps,
+**Status: work in progress — a partial decoder, no encoder.** Missing first: all four post-filters, latent scaling (LSBS), RVS/GRFS, quality maps,
 chroma-subsampled and 10-bit pictures, custom colour transforms, progressive decode, and the
 entire encoder above the entropy coder. Streams that need any of these are rejected with
 `Error::Unsupported`; nothing is silently approximated.
 
-What works: streams at the simple and base operating points with the tools above switched off
+What works: streams at the simple, base and high operating points with the tools above switched off
 (4:4:4, 8-bit, BT.709), at any picture size, with or without region partitioning and multiple
 ANS threads. The entropy stage is bit-exact; the reconstructed 8-bit picture differs from the
 reference decoder's in about 0.005 % of samples, each by one step (convolution summation order).
@@ -32,21 +31,23 @@ ZENJPEGAI_MODELS=path/to/models target/release/zenjpegai decode picture.bits pic
 ## Speed
 
 Decode time on a Ryzen 9 9950X3D, same streams, same machine, no `-C target-cpu=native`
-(`scripts/bench/decode_end_to_end.sh`, raw data in `benchmarks/decode_end_to_end_2026-09-17.tsv`).
+(`scripts/bench/decode_end_to_end.sh`, raw data in `benchmarks/decode_end_to_end_2026-09-17b.tsv`).
 Reference = upstream `b9e573f` on PyTorch 1.10.2 CPU as shipped, which pins PyTorch to one thread;
 its number is its own `TOTAL` (model load excluded). zenjpegai numbers are steady state with models
 loaded; "process" is one whole command-line run including start-up, model load and PNG output.
 
 | stream | reference | zenjpegai, 1 thread | zenjpegai, threaded | reference process | zenjpegai process |
 | --- | --- | --- | --- | --- | --- |
-| 560x888, simple profile, 0.50 bpp | 127 ms | 58 ms | 29 ms | 947 ms | 118 ms |
-| 560x888, base profile, 0.12 bpp | 210 ms | 109 ms | 51 ms | 1027 ms | 136 ms |
-| 560x888, base profile, 0.50 bpp | 236 ms | 97 ms | 42 ms | 1208 ms | 133 ms |
-| 560x888, base profile, 1.00 bpp | 212 ms | 99 ms | 46 ms | 1035 ms | 171 ms |
-| 2096x1400, base profile, 0.50 bpp | 1178 ms | 570 ms | 263 ms | 2119 ms | 673 ms |
+| 560x888, simple profile (SOP), 0.50 bpp | 132 ms | 56 ms | 21 ms | 950 ms | 109 ms |
+| 560x888, base profile (BOP), 0.12 bpp | 212 ms | 93 ms | 25 ms | 1023 ms | 117 ms |
+| 560x888, base profile (BOP), 0.50 bpp | 211 ms | 93 ms | 27 ms | 1034 ms | 121 ms |
+| 560x888, base profile (BOP), 1.00 bpp | 214 ms | 95 ms | 27 ms | 1037 ms | 156 ms |
+| 560x888, high profile (HOP), 0.50 bpp | 2279 ms | 1231 ms | 308 ms | 3118 ms | 437 ms |
+| 2096x1400, base profile (BOP), 0.50 bpp | 1227 ms | 533 ms | 151 ms | 2172 ms | 600 ms |
 
-Letting the reference use all 32 hardware threads did not help it on this box (281–2590 ms on the
-small picture, 849 ms on the large one, with large run-to-run spread); those rows are in the TSV.
+So: 1.9x to 2.4x faster on one thread, 6x to 8x with threads. Letting the reference use all 32
+hardware threads did not help it on this box (its best single run was never better than 0.9x of
+its one-thread time, and the median was 2x to 6x worse); those rows are in the TSV.
 Two picture sizes is a thin sample: no tiny pictures, nothing above 3 MP yet.
 
 ## What JPEG AI is

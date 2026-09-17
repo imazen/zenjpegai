@@ -33,18 +33,23 @@ pub(crate) struct RowJob<'a> {
     pub o0: usize,
     pub os: usize,
     pub n: usize,
-    /// Padded input, blocked: `[icb][ph][pw][V]`.
+    /// Input, blocked: `[icb - icb_base][ph][pw][V]`.
     pub xp: &'a [f32],
     pub ph: usize,
     pub pw: usize,
+    /// Block index of the first block stored in `xp`.
+    pub icb_base: usize,
+    /// A row of zeros at least as long as any tap row: stands in for rows of the zero padding.
+    pub zero: &'a [f32],
     /// Input blocks to accumulate, and the total number of real input channels.
     pub icb0: usize,
     pub icb1: usize,
     pub in_ch: usize,
     /// Input column step per output position (the convolution stride; 1 or 2).
     pub is: usize,
-    /// Per tap, in accumulation order: padded input row, and the input column of output `j = 0`.
-    pub taps: &'a [(usize, usize)],
+    /// Per tap, in accumulation order: input row (`None`: a row of the zero padding), and the
+    /// input column of output `j = 0`.
+    pub taps: &'a [(Option<usize>, usize)],
     /// Weights of this output block: `[icb1 - icb0][V][taps][V]`.
     pub w: &'a [f32],
     /// Bias of this output block: `V` floats.
@@ -100,6 +105,7 @@ fn conv_row_s<F: SimdF32<V>, const V: usize, const B: usize, const S: usize>(
 ) {
     let (out, _) = job.out.as_chunks_mut::<V>();
     let (xp, _) = job.xp.as_chunks::<V>();
+    let (zero, _) = job.zero.as_chunks::<V>();
     let (w, _) = job.w.as_chunks::<V>();
     let mut bias = [0.0f32; V];
     bias.copy_from_slice(&job.bias[..V]);
@@ -115,8 +121,12 @@ fn conv_row_s<F: SimdF32<V>, const V: usize, const B: usize, const S: usize>(
         let vin = (job.in_ch - icb * V).min(V);
         let wblk = &w[(icb - job.icb0) * V * ntaps..][..V * ntaps];
         let mut rows: [&[[f32; V]]; MAX_TAPS] = [&[]; MAX_TAPS];
+        let len = (n - 1) * S + 1;
         for (r, &(y, dx)) in rows.iter_mut().zip(job.taps) {
-            *r = &xp[(icb * job.ph + y) * job.pw + dx..][..(n - 1) * S + 1];
+            *r = match y {
+                Some(y) => &xp[((icb - job.icb_base) * job.ph + y) * job.pw + dx..][..len],
+                None => &zero[..len],
+            };
         }
         let rows = &rows[..ntaps];
         let mut j = 0;
@@ -318,16 +328,13 @@ impl PackedConv {
                 "conv: input smaller than the kernel",
             ));
         }
-        let padded;
-        let xp = if self.pad == [0; 4] {
-            x
-        } else {
-            padded = x.pad(pt, pl, pb, pr)?;
-            &padded
-        };
         let st = self.stride;
-        let (oh, ow) = ((xp.h - self.kh) / st + 1, (xp.w - self.kw) / st + 1);
-        let mut out = BTensor::zeros(self.out_ch, oh, ow, v)?;
+        let (h, w) = (x.h, x.w);
+        let (oh, ow) = (
+            (h + pt + pb - self.kh) / st + 1,
+            (w + pl + pr - self.kw) / st + 1,
+        );
+        let mut out = BTensor::scratch(self.out_ch, oh, ow, v)?;
         let ocb_total = self.out_ch.div_ceil(v);
         let (icb_group, ocb_group) = if self.groups == 1 {
             (self.in_ch.div_ceil(v), ocb_total)
@@ -337,32 +344,100 @@ impl PackedConv {
         let ntaps = self.kh * self.kw;
         let wlen = icb_group * v * ntaps * v;
         let tier = eng.tier;
+        // Output columns whose whole kernel window lies inside the input read `x` in place; the
+        // zero padding is never materialised for them. `j0..j1` is that range.
+        let j0 = pl.div_ceil(st).min(ow);
+        let j1 = if w + pl >= self.kw {
+            ((w + pl - self.kw) / st + 1).clamp(j0, ow)
+        } else {
+            j0
+        };
+        let zero = alloc::vec![0.0f32; (w.max(1) + self.kw) * v];
         for_each_row(eng, &mut out.data, ow * v, |idx, row| {
             let (ocb, oy) = (idx / oh, idx % oh);
             let group = ocb / ocb_group;
-            let mut taps = [(0usize, 0usize); MAX_TAPS];
-            for ky in 0..self.kh {
-                for kx in 0..self.kw {
-                    taps[ky * self.kw + kx] = (oy * st + ky, kx);
+            let (icb0, icb1) = (group * icb_group, (group + 1) * icb_group);
+            let wts = &self.weight[ocb * wlen..][..wlen];
+            let bias = &self.bias[ocb * v..][..v];
+            // Input row of kernel row `ky`, if it is not padding.
+            let in_row = |ky: usize| (oy * st + ky).checked_sub(pt).filter(|&iy| iy < h);
+
+            if j1 > j0 {
+                let mut taps = [(None, 0usize); MAX_TAPS];
+                for ky in 0..self.kh {
+                    for kx in 0..self.kw {
+                        taps[ky * self.kw + kx] = (in_row(ky), j0 * st + kx - pl);
+                    }
                 }
+                run_row(
+                    tier,
+                    &mut RowJob {
+                        out: &mut *row,
+                        o0: j0,
+                        os: 1,
+                        n: j1 - j0,
+                        xp: &x.data,
+                        ph: h,
+                        pw: w,
+                        icb_base: 0,
+                        zero: &zero,
+                        icb0,
+                        icb1,
+                        in_ch: self.in_ch,
+                        is: st,
+                        taps: &taps[..ntaps],
+                        w: wts,
+                        bias,
+                    },
+                );
             }
-            let mut job = RowJob {
-                out: row,
-                o0: 0,
-                os: 1,
-                n: ow,
-                xp: &xp.data,
-                ph: xp.h,
-                pw: xp.w,
-                icb0: group * icb_group,
-                icb1: (group + 1) * icb_group,
-                in_ch: self.in_ch,
-                is: st,
-                taps: &taps[..ntaps],
-                w: &self.weight[ocb * wlen..][..wlen],
-                bias: &self.bias[ocb * v..][..v],
-            };
-            run_row(tier, &mut job);
+            // Border columns: copy their (few) input windows into a small padded buffer.
+            for (ja, jb) in [(0, j0), (j1, ow)] {
+                if jb <= ja {
+                    continue;
+                }
+                let bw = (jb - ja - 1) * st + self.kw;
+                let mut buf = alloc::vec![0.0f32; (icb1 - icb0) * self.kh * bw * v];
+                for icb in icb0..icb1 {
+                    for ky in 0..self.kh {
+                        let Some(iy) = in_row(ky) else { continue };
+                        let src = &x.data[(icb * h + iy) * w * v..][..w * v];
+                        let dst = &mut buf[((icb - icb0) * self.kh + ky) * bw * v..][..bw * v];
+                        for c in 0..bw {
+                            if let Some(ix) = (ja * st + c).checked_sub(pl).filter(|&ix| ix < w) {
+                                dst[c * v..][..v].copy_from_slice(&src[ix * v..][..v]);
+                            }
+                        }
+                    }
+                }
+                let mut taps = [(None, 0usize); MAX_TAPS];
+                for ky in 0..self.kh {
+                    for kx in 0..self.kw {
+                        taps[ky * self.kw + kx] = (Some(ky), kx);
+                    }
+                }
+                run_row(
+                    tier,
+                    &mut RowJob {
+                        out: &mut *row,
+                        o0: ja,
+                        os: 1,
+                        n: jb - ja,
+                        xp: &buf,
+                        ph: self.kh,
+                        pw: bw,
+                        icb_base: icb0,
+                        zero: &zero,
+                        icb0,
+                        icb1,
+                        in_ch: self.in_ch,
+                        is: st,
+                        taps: &taps[..ntaps],
+                        w: wts,
+                        bias,
+                    },
+                );
+            }
         });
         Ok(out)
     }
@@ -442,8 +517,8 @@ impl PackedConvTranspose {
         }
         let oh = (x.h - 1) * 2 + self.k + self.out_pad - 2 * self.pad;
         let ow = (x.w - 1) * 2 + self.k + self.out_pad - 2 * self.pad;
-        let xp = x.pad(EXT, EXT, EXT, EXT)?;
-        let mut out = BTensor::zeros(self.out_ch, oh, ow, v)?;
+        let xp = x.pad_par(eng, EXT, EXT, EXT, EXT)?;
+        let mut out = BTensor::scratch(self.out_ch, oh, ow, v)?;
         let icb = self.in_ch.div_ceil(v);
         let tier = eng.tier;
         let pad = self.pad as isize;
@@ -458,12 +533,12 @@ impl PackedConvTranspose {
                 let ntaps = phase.ky.len() * phase.kx.len();
                 let n = (ow - q).div_ceil(2);
                 let wlen = icb * v * ntaps * v;
-                let mut taps = [(0usize, 0usize); MAX_TAPS];
+                let mut taps = [(None, 0usize); MAX_TAPS];
                 for (a, &ky) in phase.ky.iter().enumerate() {
                     let iy = (oy as isize + pad - ky as isize).div_euclid(2) + EXT as isize;
                     for (b, &kx) in phase.kx.iter().enumerate() {
                         let ix = (q as isize + pad - kx as isize).div_euclid(2) + EXT as isize;
-                        taps[a * phase.kx.len() + b] = (iy as usize, ix as usize);
+                        taps[a * phase.kx.len() + b] = (Some(iy as usize), ix as usize);
                     }
                 }
                 let mut job = RowJob {
@@ -474,6 +549,8 @@ impl PackedConvTranspose {
                     xp: &xp.data,
                     ph: xp.h,
                     pw: xp.w,
+                    icb_base: 0,
+                    zero: &[],
                     icb0: 0,
                     icb1: icb,
                     in_ch: self.in_ch,

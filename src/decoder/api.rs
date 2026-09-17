@@ -26,13 +26,20 @@ struct ModelSet {
 /// A JPEG AI decoder bound to a directory of upstream checkpoints.
 ///
 /// Checkpoints are parsed and packed on first use and kept, so decoding many streams pays the
-/// model load once per (model, operating point). `Decoder` is `Sync`; share it between threads.
+/// model load once per (model, operating point). Large intermediate buffers are kept between
+/// decodes too; see [`Decoder::release_buffers`]. `Decoder` is `Sync`; share it between threads.
 pub struct Decoder {
     models: ModelDir,
     engine: Engine,
     tables: AnsTables,
     operating_point: Option<OperatingPoint>,
     cache: Mutex<HashMap<(usize, OperatingPoint), Arc<ModelSet>>>,
+}
+
+impl Drop for Decoder {
+    fn drop(&mut self) {
+        crate::nn::fast::release_buffers();
+    }
 }
 
 impl Decoder {
@@ -95,6 +102,19 @@ impl Decoder {
 
     /// Decode a codestream to interleaved RGB at the stream's bit depth.
     pub fn decode(&self, stream: &[u8]) -> Result<RgbImage, At<Error>> {
+        self.decode_inner(stream)
+    }
+
+    /// Free the feature-map buffers kept for reuse between decodes.
+    ///
+    /// Decoding recycles its large intermediate buffers through a process-wide pool (at most
+    /// 24 buffers and 1 GiB) because faulting fresh memory in for every picture costs 10-25 % of
+    /// the decode time. The pool is also emptied when a `Decoder` is dropped.
+    pub fn release_buffers(&self) {
+        crate::nn::fast::release_buffers();
+    }
+
+    fn decode_inner(&self, stream: &[u8]) -> Result<RgbImage, At<Error>> {
         let cs = Codestream::parse(stream).map_err(|e| at!(e))?;
         let headers = read_headers(&cs).map_err(|e| at!(e))?;
         let hdr = &headers.picture;

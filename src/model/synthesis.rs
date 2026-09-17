@@ -1,26 +1,25 @@
 //! Synthesis transforms: latent `y_hat` → reconstructed samples.
 //!
-//! Ports `ref/src/codec/components/autoencoder_data/decoder/{sop,bop}_{prim,sec}.py`,
-//! `activations/resau.py` and the residual blocks of `base_layers/conv_layers.py`.
+//! Ports `ref/src/codec/components/autoencoder_data/decoder/{sop,bop,hop}_{prim,sec}.py`,
+//! `activations/resau.py` and the residual blocks of `base_layers/conv_layers.py`; the HOP
+//! attention blocks live in [`super::attention`].
 //!
 //! The primary (luma) transform maps `[160, H, W]` to one plane at 16x the resolution. The
 //! secondary (chroma) transform takes the luma latent as side information (`cat(y_hat_luma,
 //! y_hat_chroma)`) and produces both chroma planes at *luma* resolution; subsampling to the
 //! coded chroma format happens afterwards.
-//!
-//! Not ported yet: the HOP transforms (`hop_prim.py`, `hop_sec.py`: CAB + TAM attention).
 
 use alloc::format;
 
 use crate::error::{Error, Result};
 use crate::header::OperatingPoint;
+use crate::model::attention::{Cab, ResidualBlock, Tam, conv3x3_t};
 use crate::model::load;
 use crate::nn::fast::{self, BTensor, ConvLayer, ConvTransposeLayer, Engine};
 use crate::tensor::Tensor;
 use crate::weights::Checkpoint;
 
-/// `ResAU`: `y = x * (1 + conv1x1(conv3x3_grouped(relu6(x))))`, both convolutions bias-free,
-/// 16 channels per group.
+/// `ResAU`: `y = x * (1 + conv1x1(conv3x3_grouped(relu6(x))))`, both convolutions bias-free.
 #[derive(Clone, Debug)]
 struct ResAu {
     conv: ConvLayer,
@@ -29,12 +28,22 @@ struct ResAu {
 
 impl ResAu {
     fn load(ck: &Checkpoint<'_>, prefix: &str, chs: usize, eng: &Engine) -> Result<Self> {
-        if !chs.is_multiple_of(16) {
-            return Err(Error::Model(format!(
-                "{prefix}: ResAU needs a multiple of 16 channels"
-            )));
-        }
-        let conv = load::conv3x3(ck, &format!("{prefix}.conv"), chs, chs, chs / 16, false)?;
+        // The group count differs between transforms (16 channels per group in SOP / BOP, 4
+        // groups in HOP); the checkpoint's weight shape `[chs, chs / groups, 3, 3]` decides.
+        let name = format!("{prefix}.conv.weight");
+        let per_group = ck
+            .info(&name)
+            .and_then(|t| t.shape.get(1).copied())
+            .filter(|&g| g != 0 && chs.is_multiple_of(g))
+            .ok_or_else(|| Error::Model(format!("{name}: missing or malformed")))?;
+        let conv = load::conv3x3(
+            ck,
+            &format!("{prefix}.conv"),
+            chs,
+            chs,
+            chs / per_group,
+            false,
+        )?;
         let conv2 = load::conv1x1(ck, &format!("{prefix}.conv2"), chs, chs, false)?;
         Ok(Self {
             conv: ConvLayer::new(conv, eng)?,
@@ -95,14 +104,14 @@ impl Upsample {
                     [0, 0, 1, 1],
                 )?))
             }
-            OperatingPoint::Hop => Err(Error::Unsupported("HOP synthesis transform")),
+            OperatingPoint::Hop => Err(Error::InvalidArgument("HOP is not a light transform")),
         }
     }
 
     fn forward(&self, eng: &Engine, x: &BTensor) -> Result<BTensor> {
         match self {
             Self::Transposed(c) => c.forward(eng, x),
-            Self::Conv2x2Shuffle(c) => fast::pixel_shuffle(&c.forward(eng, x)?, 2),
+            Self::Conv2x2Shuffle(c) => fast::pixel_shuffle(eng, &c.forward(eng, x)?, 2),
         }
     }
 }
@@ -114,9 +123,94 @@ fn denormalize(x: &mut Tensor<f32>) {
     }
 }
 
-/// Primary (luma) synthesis transform, SOP or BOP.
+/// Primary (luma) synthesis transform.
 #[derive(Clone, Debug)]
-pub struct SynthesisPrimary {
+pub struct SynthesisPrimary(Primary);
+
+#[derive(Clone, Debug)]
+enum Primary {
+    Light(alloc::boxed::Box<LightPrimary>),
+    Hop(alloc::boxed::Box<HopPrimary>),
+}
+
+impl SynthesisPrimary {
+    pub fn load(ck: &Checkpoint<'_>, op: OperatingPoint, eng: &Engine) -> Result<Self> {
+        Ok(Self(match op {
+            OperatingPoint::Hop => Primary::Hop(alloc::boxed::Box::new(HopPrimary::load(ck, eng)?)),
+            _ => Primary::Light(alloc::boxed::Box::new(LightPrimary::load(ck, op, eng)?)),
+        }))
+    }
+
+    /// `y_hat` `[160, H, W]` → luma `[1, >= h, >= w]` in `[0, 255]`, where the intermediate maps
+    /// are cropped for a target picture (tile) of `h x w` samples. The caller crops to `h x w`.
+    pub fn forward(
+        &self,
+        eng: &Engine,
+        y_hat: &BTensor,
+        h: usize,
+        w: usize,
+    ) -> Result<Tensor<f32>> {
+        match &self.0 {
+            Primary::Light(m) => m.forward(eng, y_hat, h, w),
+            Primary::Hop(m) => m.forward(eng, y_hat, h, w),
+        }
+    }
+}
+
+/// `DecoderHOPPrim`.
+#[derive(Clone, Debug)]
+struct HopPrimary {
+    res: ResidualBlock,
+    up1: ConvTransposeLayer,
+    act1: ResAu,
+    up2: ConvTransposeLayer,
+    cab: Cab,
+    act2: ResAu,
+    conv3: ConvLayer,
+    tam: Tam,
+    act3: ResAu,
+    up4: ConvTransposeLayer,
+}
+
+impl HopPrimary {
+    const C: usize = 128;
+
+    fn load(ck: &Checkpoint<'_>, eng: &Engine) -> Result<Self> {
+        let c = Self::C;
+        Ok(Self {
+            res: ResidualBlock::load(ck, "first_stage.0.0", 160, eng)?,
+            up1: conv3x3_t(ck, "first_stage.1", 160, c, eng)?,
+            act1: ResAu::load(ck, "first_stage.2", c, eng)?,
+            up2: conv3x3_t(ck, "conv2_t", c, c, eng)?,
+            cab: Cab::load(ck, "CAB", c, eng)?,
+            act2: ResAu::load(ck, "iact2", c, eng)?,
+            conv3: ConvLayer::new(load::conv1x1(ck, "conv3_t", c, 4 * c, true)?, eng)?,
+            tam: Tam::load(ck, "TAM", c, true, eng)?,
+            act3: ResAu::load(ck, "iact3", c, eng)?,
+            up4: conv3x3_t(ck, "conv4_t", c, 1, eng)?,
+        })
+    }
+
+    fn forward(&self, eng: &Engine, y_hat: &BTensor, h: usize, w: usize) -> Result<Tensor<f32>> {
+        let x = self.res.forward(eng, y_hat)?;
+        let x = self.act1.forward(eng, self.up1.forward(eng, &x)?)?;
+        let x = x.crop_par(eng, h.div_ceil(8), w.div_ceil(8))?;
+        let x = self.cab.forward(eng, &self.up2.forward(eng, &x)?)?;
+        let x = x.crop_par(eng, h.div_ceil(4), w.div_ceil(4))?;
+        let x = self.act2.forward(eng, x)?;
+        let x = fast::pixel_shuffle(eng, &self.conv3.forward(eng, &x)?, 2)?;
+        let x = self.tam.forward(eng, x)?;
+        let x = x.crop_par(eng, h.div_ceil(2), w.div_ceil(2))?;
+        let x = self.act3.forward(eng, x)?;
+        let mut x = self.up4.forward(eng, &x)?.to_planar()?;
+        denormalize(&mut x);
+        Ok(x)
+    }
+}
+
+/// `DecoderSOPPrim` / `DecoderBOPPrim`.
+#[derive(Clone, Debug)]
+struct LightPrimary {
     res_conv: ConvLayer,
     up1: Upsample,
     act1: ResAu,
@@ -127,13 +221,15 @@ pub struct SynthesisPrimary {
     conv4: ConvLayer,
 }
 
-impl SynthesisPrimary {
-    pub fn load(ck: &Checkpoint<'_>, op: OperatingPoint, eng: &Engine) -> Result<Self> {
+impl LightPrimary {
+    fn load(ck: &Checkpoint<'_>, op: OperatingPoint, eng: &Engine) -> Result<Self> {
         // hidden channel counts: (after up1, after up2, after conv3)
         let (c1, c2, c3) = match op {
             OperatingPoint::Sop => (64, 32, 32),
             OperatingPoint::Bop => (64, 64, 96),
-            OperatingPoint::Hop => return Err(Error::Unsupported("HOP synthesis transform")),
+            OperatingPoint::Hop => {
+                return Err(Error::InvalidArgument("HOP is not a light transform"));
+            }
         };
         Ok(Self {
             res_conv: ConvLayer::new(
@@ -150,25 +246,17 @@ impl SynthesisPrimary {
         })
     }
 
-    /// `y_hat` `[160, H, W]` → luma `[1, 16H', 16W']` in `[0, 255]`, where the intermediate maps
-    /// are cropped for a target picture (tile) of `h x w` samples. The caller crops to `h x w`.
-    pub fn forward(
-        &self,
-        eng: &Engine,
-        y_hat: &BTensor,
-        h: usize,
-        w: usize,
-    ) -> Result<Tensor<f32>> {
+    fn forward(&self, eng: &Engine, y_hat: &BTensor, h: usize, w: usize) -> Result<Tensor<f32>> {
         // LightResidualBlock: relu(conv(x)) + x
         let mut x = self.res_conv.forward(eng, y_hat)?;
         fast::relu(&mut x);
         fast::add_assign(&mut x, y_hat)?;
         let x = self.act1.forward(eng, self.up1.forward(eng, &x)?)?;
-        let x = x.crop(h.div_ceil(8), w.div_ceil(8))?;
+        let x = x.crop_par(eng, h.div_ceil(8), w.div_ceil(8))?;
         let x = self
             .up2
             .forward(eng, &x)?
-            .crop(h.div_ceil(4), w.div_ceil(4))?;
+            .crop_par(eng, h.div_ceil(4), w.div_ceil(4))?;
         let x = self.act2.forward(eng, x)?;
         let x = self.act3.forward(eng, self.conv3.forward(eng, &x)?)?;
         let mut x = fast::pixel_shuffle_to_planar(&self.conv4.forward(eng, &x)?, 4)?;
@@ -177,10 +265,63 @@ impl SynthesisPrimary {
     }
 }
 
-/// Secondary (chroma) synthesis transform, SOP or BOP.
+/// Secondary (chroma) synthesis transform.
 #[derive(Clone, Debug)]
 pub struct SynthesisSecondary {
+    /// `LightCombineBlock`: conv3x3(160 + 96 → 48); its output is `cat(info, chroma latent)`.
     combine: ConvLayer,
+    tail: SecondaryTail,
+}
+
+#[derive(Clone, Debug)]
+enum SecondaryTail {
+    Light(alloc::boxed::Box<LightSecondary>),
+    Hop(alloc::boxed::Box<HopSecondary>),
+}
+
+/// `DecoderHOPSec` behind the combine block.
+#[derive(Clone, Debug)]
+struct HopSecondary {
+    up2: ConvTransposeLayer,
+    cab: Cab,
+    act2: ResAu,
+    conv3: ConvLayer,
+    tam: Tam,
+    act3: ResAu,
+    up4: ConvTransposeLayer,
+}
+
+impl HopSecondary {
+    const C: usize = 64;
+
+    fn load(ck: &Checkpoint<'_>, eng: &Engine) -> Result<Self> {
+        let c = Self::C;
+        Ok(Self {
+            up2: conv3x3_t(ck, "conv2_t", 144, c, eng)?,
+            cab: Cab::load(ck, "CAB", c, eng)?,
+            act2: ResAu::load(ck, "iact2", c, eng)?,
+            conv3: ConvLayer::new(load::conv1x1(ck, "conv3_t", c, 4 * c, true)?, eng)?,
+            tam: Tam::load(ck, "TAM", c, false, eng)?,
+            act3: ResAu::load(ck, "iact3", c, eng)?,
+            up4: conv3x3_t(ck, "conv4_t", c, 8, eng)?,
+        })
+    }
+
+    fn forward(&self, eng: &Engine, x: &BTensor, h: usize, w: usize) -> Result<Tensor<f32>> {
+        let x = self.cab.forward(eng, &self.up2.forward(eng, x)?)?;
+        let x = x.crop_par(eng, h.div_ceil(8), w.div_ceil(8))?;
+        let x = self.act2.forward(eng, x)?;
+        let x = fast::pixel_shuffle(eng, &self.conv3.forward(eng, &x)?, 2)?;
+        let x = self.tam.forward(eng, x)?;
+        let x = x.crop_par(eng, h.div_ceil(4), w.div_ceil(4))?;
+        let x = self.act3.forward(eng, x)?;
+        fast::pixel_shuffle_to_planar(&self.up4.forward(eng, &x)?, 2)
+    }
+}
+
+/// `DecoderSOPSec` / `DecoderBOPSec` behind the combine block.
+#[derive(Clone, Debug)]
+struct LightSecondary {
     up: Upsample,
     act2: ResAu,
     conv3: ConvLayer,
@@ -188,24 +329,50 @@ pub struct SynthesisSecondary {
     conv4: ConvLayer,
 }
 
-impl SynthesisSecondary {
-    pub fn load(ck: &Checkpoint<'_>, op: OperatingPoint, eng: &Engine) -> Result<Self> {
+impl LightSecondary {
+    fn load(ck: &Checkpoint<'_>, op: OperatingPoint, eng: &Engine) -> Result<Self> {
         let (c2, c3) = match op {
             OperatingPoint::Sop => (32, 32),
             OperatingPoint::Bop => (64, 128),
-            OperatingPoint::Hop => return Err(Error::Unsupported("HOP synthesis transform")),
+            OperatingPoint::Hop => {
+                return Err(Error::InvalidArgument("HOP is not a light transform"));
+            }
         };
         Ok(Self {
-            // LightCombineBlock: conv3x3(160 + 96 → 48), output cat(info, chroma latent) = 144 ch
-            combine: ConvLayer::new(
-                load::conv3x3(ck, "first_stage.conv1", 256, 48, 1, true)?,
-                eng,
-            )?,
             up: Upsample::load(ck, op, "conv2_t", 144, c2, eng)?,
             act2: ResAu::load(ck, "iact2", c2, eng)?,
             conv3: ConvLayer::new(load::conv3x3(ck, "conv3", c2, c3, 1, true)?, eng)?,
             act3: ResAu::load(ck, "iact3", c3, eng)?,
             conv4: ConvLayer::new(load::conv1x1(ck, "conv4", c3, 128, false)?, eng)?,
+        })
+    }
+
+    fn forward(&self, eng: &Engine, x: &BTensor, h: usize, w: usize) -> Result<Tensor<f32>> {
+        let x = self
+            .up
+            .forward(eng, x)?
+            .crop_par(eng, h.div_ceil(8), w.div_ceil(8))?;
+        let x = self.act2.forward(eng, x)?;
+        let x = self.act3.forward(eng, self.conv3.forward(eng, &x)?)?;
+        fast::pixel_shuffle_to_planar(&self.conv4.forward(eng, &x)?, 8)
+    }
+}
+
+impl SynthesisSecondary {
+    pub fn load(ck: &Checkpoint<'_>, op: OperatingPoint, eng: &Engine) -> Result<Self> {
+        Ok(Self {
+            combine: ConvLayer::new(
+                load::conv3x3(ck, "first_stage.conv1", 256, 48, 1, true)?,
+                eng,
+            )?,
+            tail: match op {
+                OperatingPoint::Hop => {
+                    SecondaryTail::Hop(alloc::boxed::Box::new(HopSecondary::load(ck, eng)?))
+                }
+                _ => {
+                    SecondaryTail::Light(alloc::boxed::Box::new(LightSecondary::load(ck, op, eng)?))
+                }
+            },
         })
     }
 
@@ -232,13 +399,10 @@ impl SynthesisSecondary {
         let x = BTensor::cat(&[&y_hat_luma.crop(lh, lw)?, y_hat_chroma])?;
         let info = self.combine.forward(eng, &x)?;
         let x = BTensor::cat(&[&info, y_hat_chroma])?;
-        let x = self
-            .up
-            .forward(eng, &x)?
-            .crop(h.div_ceil(8), w.div_ceil(8))?;
-        let x = self.act2.forward(eng, x)?;
-        let x = self.act3.forward(eng, self.conv3.forward(eng, &x)?)?;
-        let mut x = fast::pixel_shuffle_to_planar(&self.conv4.forward(eng, &x)?, 8)?;
+        let mut x = match &self.tail {
+            SecondaryTail::Light(m) => m.forward(eng, &x, h, w)?,
+            SecondaryTail::Hop(m) => m.forward(eng, &x, h, w)?,
+        };
         denormalize(&mut x);
         Ok(x)
     }

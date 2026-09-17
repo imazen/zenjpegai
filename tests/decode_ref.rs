@@ -145,6 +145,8 @@ vectors! {
     img30_base_off_bpp050 => "img30_base_off_bpp050",
     img30_base_off_bpp100 => "img30_base_off_bpp100",
     img30_simple_off_bpp050 => "img30_simple_off_bpp050",
+    // High profile: HOP synthesis (CAB + TAM attention).
+    img30_high_off_bpp050 => "img30_high_off_bpp050",
     // 2096x1400: six overlapping synthesis tiles.
     img01_base_off_bpp050 => "img01_base_off_bpp050",
     img01_base_off_threads8_bpp050 => "img01_base_off_threads8_bpp050",
@@ -156,7 +158,11 @@ vectors! {
 /// Every SIMD tier, threaded or not, must decode a real stream to identical bits.
 #[test]
 fn tiers_and_threads_agree_bit_for_bit() {
-    for name in ["img30_base_off_bpp050", "img30_simple_off_bpp050"] {
+    for name in [
+        "img30_base_off_bpp050",
+        "img30_simple_off_bpp050",
+        "img30_high_off_bpp050",
+    ] {
         let stream = std::fs::read(vector_dir(name).join("stream.bits")).unwrap();
         let mut baseline: Option<(String, Decoded)> = None;
         for tier in Tier::available() {

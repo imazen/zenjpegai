@@ -220,6 +220,116 @@ fn blocked_tensor_roundtrip() {
     }
 }
 
+/// Blocked pixel shuffle and the parallel layout helpers are pure data movement.
+#[test]
+fn pixel_shuffle_and_layout_helpers_match_reference() {
+    let mut rng = Rng(0x5AFE);
+    for &(c, r, h, w) in &[
+        (3usize, 2usize, 5usize, 7usize),
+        (16, 2, 3, 4),
+        (2, 4, 2, 3),
+        (40, 2, 1, 9),
+    ] {
+        let x = Tensor::from_vec(c * r * r, h, w, rng.vec(c * r * r * h * w)).unwrap();
+        let want = reference::pixel_shuffle(&x, r).unwrap();
+        for eng in engines() {
+            let v = eng.tier.block();
+            let bx = BTensor::from_planar_par(&eng, &x, v).unwrap();
+            assert_eq!(bx.data, BTensor::from_planar(&x, v).unwrap().data);
+            assert_eq!(bx.to_planar_par(&eng).unwrap().data, x.data);
+            let got = zenjpegai::nn::fast::pixel_shuffle(&eng, &bx, r).unwrap();
+            assert_bits_eq("pixel_shuffle", &eng, &want, &got.to_planar().unwrap());
+            let padded = bx.pad_par(&eng, 1, 2, 3, 0).unwrap();
+            assert_eq!(padded.data, bx.pad(1, 2, 3, 0).unwrap().data);
+            let cropped = padded.clone().crop_par(&eng, h + 1, w).unwrap();
+            assert_eq!(cropped.data, padded.crop(h + 1, w).unwrap().data);
+        }
+    }
+}
+
+/// Depthwise 3x3 (the transformer blocks' `dwconv`): own kernel, same contract.
+#[test]
+fn depthwise_conv_bit_identical() {
+    use zenjpegai::nn::fast::PackedDepthwise;
+    let mut rng = Rng(0xD1CE);
+    for &(ch, h, w, bias) in &[
+        (32usize, 5usize, 9usize, false),
+        (19, 1, 1, true),
+        (48, 7, 33, true),
+    ] {
+        let conv = Conv2d::new(
+            ch,
+            ch,
+            (3, 3),
+            1,
+            (1, 1),
+            ch,
+            rng.vec(ch * 9),
+            bias.then(|| rng.vec(ch)),
+        )
+        .unwrap();
+        let x = Tensor::from_vec(ch, h, w, rng.vec(ch * h * w)).unwrap();
+        let want = reference::conv2d(&conv, &x).unwrap();
+        for eng in engines() {
+            let v = eng.tier.block();
+            let got = PackedDepthwise::new(&conv, v)
+                .unwrap()
+                .forward(&eng, &BTensor::from_planar(&x, v).unwrap())
+                .unwrap()
+                .to_planar()
+                .unwrap();
+            assert_bits_eq(&format!("depthwise {ch} {h}x{w}"), &eng, &want, &got);
+        }
+    }
+}
+
+/// Attention math: every tier and thread setting must agree bit for bit with the scalar,
+/// single-threaded engine (there is no separate reference implementation of these ops).
+#[test]
+fn attention_math_is_tier_independent() {
+    use zenjpegai::nn::fast::math;
+    let mut rng = Rng(0xA77E);
+    let (dim, h, w) = (32usize, 7usize, 13usize);
+    let qkv = Tensor::from_vec(3 * dim, h, w, rng.vec(3 * dim * h * w)).unwrap();
+    let temperature = [0.7f32, 1.3, 2.1, 0.05];
+    let (wt, bs) = (rng.vec(3 * dim), rng.vec(3 * dim));
+    let run = |eng: &Engine| {
+        let attn = math::channel_attention(eng, &qkv, 4, &temperature).unwrap();
+        let mut ln = qkv.clone();
+        math::layer_norm_channels(&mut ln, &wt, &bs).unwrap();
+        let mut sg: Vec<f32> = qkv.data.iter().map(|v| v * 9.0).collect();
+        math::sigmoid(eng, &mut sg);
+        let mut gate = qkv.data.clone();
+        math::elu_gate(eng, &mut gate, &ln.data).unwrap();
+        (attn.data, ln.data, sg, gate)
+    };
+    let want = run(&Engine::with(Tier::Scalar, false));
+    assert!(
+        want.0
+            .iter()
+            .chain(&want.1)
+            .chain(&want.2)
+            .chain(&want.3)
+            .all(|v| v.is_finite())
+    );
+    for eng in engines() {
+        let got = run(&eng);
+        for (a, b) in [
+            (&want.0, &got.0),
+            (&want.1, &got.1),
+            (&want.2, &got.2),
+            (&want.3, &got.3),
+        ] {
+            assert!(
+                a.iter()
+                    .zip(b.iter())
+                    .all(|(x, y)| x.to_bits() == y.to_bits()),
+                "{eng:?}"
+            );
+        }
+    }
+}
+
 /// The int8 convolution of the hyper-scale decoder: every tier must equal plain wrapping-i32
 /// loops exactly, including odd channel counts, out-of-range inputs (clamped) and accumulator
 /// wrap-around (huge biases).

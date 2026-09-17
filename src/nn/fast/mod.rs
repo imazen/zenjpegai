@@ -4,8 +4,10 @@
 //! [`crate::nn`]); `tests/fast_vs_reference.rs` checks it on every tier the machine has.
 
 mod conv;
+mod depthwise;
 mod int_conv;
 mod layers;
+pub mod math;
 mod simd;
 mod tensor;
 
@@ -13,12 +15,13 @@ use archmage::prelude::*;
 
 pub(crate) use conv::for_each_row;
 pub use conv::{PackedConv, PackedConvTranspose};
+pub use depthwise::PackedDepthwise;
 pub use int_conv::PackedIntConv;
 pub use layers::{
     ConvLayer, ConvTransposeLayer, add_assign, gate, pixel_shuffle, pixel_shuffle_to_planar, relu,
     relu6,
 };
-pub use tensor::BTensor;
+pub use tensor::{BTensor, release_buffers};
 
 /// SIMD tier, resolved once per engine.
 #[derive(Clone, Copy, Debug)]

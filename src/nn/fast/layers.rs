@@ -5,6 +5,7 @@ use archmage::prelude::*;
 
 use super::Engine;
 use super::conv::{PackedConv, PackedConvTranspose};
+use super::depthwise::PackedDepthwise;
 use super::tensor::BTensor;
 use crate::error::{Error, Result};
 use crate::nn::{Conv2d, ConvTranspose2d, reference};
@@ -16,6 +17,7 @@ pub struct ConvLayer {
     /// Kept for layers the fast path does not cover (strided convolutions, large kernels).
     fallback: Option<(Conv2d, [usize; 4])>,
     packed: Option<PackedConv>,
+    depthwise: Option<PackedDepthwise>,
     v: usize,
 }
 
@@ -27,15 +29,27 @@ impl ConvLayer {
     /// `extra_pad` is `[top, left, bottom, right]` zero padding on top of the layer's own.
     pub fn with_extra_pad(conv: Conv2d, eng: &Engine, extra_pad: [usize; 4]) -> Result<Self> {
         let v = eng.tier.block();
+        if extra_pad == [0; 4]
+            && let Ok(d) = PackedDepthwise::new(&conv, v)
+        {
+            return Ok(Self {
+                fallback: None,
+                packed: None,
+                depthwise: Some(d),
+                v,
+            });
+        }
         match PackedConv::new(&conv, v, extra_pad) {
             Ok(p) => Ok(Self {
                 fallback: None,
                 packed: Some(p),
+                depthwise: None,
                 v,
             }),
             Err(Error::Unsupported(_)) => Ok(Self {
                 fallback: Some((conv, extra_pad)),
                 packed: None,
+                depthwise: None,
                 v,
             }),
             Err(e) => Err(e),
@@ -45,6 +59,9 @@ impl ConvLayer {
     pub fn forward(&self, eng: &Engine, x: &BTensor) -> Result<BTensor> {
         if let Some(p) = &self.packed {
             return p.forward(eng, x);
+        }
+        if let Some(d) = &self.depthwise {
+            return d.forward(eng, x);
         }
         let (conv, extra) = self
             .fallback
@@ -195,7 +212,34 @@ pub fn pixel_shuffle_to_planar(x: &BTensor, r: usize) -> Result<Tensor<f32>> {
     Ok(out)
 }
 
-/// `nn.PixelShuffle(r)` staying in blocked layout.
-pub fn pixel_shuffle(x: &BTensor, r: usize) -> Result<BTensor> {
-    BTensor::from_planar(&pixel_shuffle_to_planar(x, r)?, x.v)
+/// `nn.PixelShuffle(r)` staying in blocked layout: `[c * r * r, h, w]` → `[c, h * r, w * r]`,
+/// output channel `oc` at `(y * r + dy, x * r + dx)` taken from input channel
+/// `oc * r * r + dy * r + dx` at `(y, x)`.
+pub fn pixel_shuffle(eng: &Engine, x: &BTensor, r: usize) -> Result<BTensor> {
+    if r == 0 || !x.c.is_multiple_of(r * r) {
+        return Err(Error::InvalidArgument(
+            "pixel_shuffle: channels not divisible by r^2",
+        ));
+    }
+    let (c, h, w, v) = (x.c / (r * r), x.h, x.w, x.v);
+    let (oh, ow) = (h * r, w * r);
+    let mut out = BTensor::zeros(c, oh, ow, v)?;
+    if ow == 0 {
+        return Ok(out);
+    }
+    super::for_each_row(eng, &mut out.data, ow * v, |idx, row| {
+        let (ob, oy) = (idx / oh, idx % oh);
+        let (y, dy) = (oy / r, oy % r);
+        for lane in 0..(c - ob * v).min(v) {
+            for dx in 0..r {
+                let ch = (ob * v + lane) * r * r + dy * r + dx;
+                let (ib, il) = (ch / v, ch % v);
+                let src = &x.data[(ib * h + y) * w * v..][..w * v];
+                for (xi, s) in src.chunks_exact(v).enumerate() {
+                    row[(xi * r + dx) * v + lane] = s[il];
+                }
+            }
+        }
+    });
+    Ok(out)
 }

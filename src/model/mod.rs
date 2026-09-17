@@ -1,5 +1,6 @@
 //! Trained model parameters and the networks that use them.
 
+mod attention;
 pub mod common;
 pub mod hsd;
 pub mod hyper_decoder;

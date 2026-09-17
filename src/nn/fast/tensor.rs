@@ -6,10 +6,88 @@
 
 use alloc::vec::Vec;
 
+use super::{Engine, for_each_row};
 use crate::error::{Error, Result};
 use crate::tensor::Tensor;
 
-#[derive(Clone, Debug)]
+/// Recycled tensor storage.
+///
+/// A synthesis pass allocates a few hundred feature maps of tens of megabytes; handing each back
+/// to the allocator means an `munmap` per tensor and a page fault per 4 KiB of the next one.
+/// Dropped [`BTensor`]s park their buffer here instead and [`BTensor::scratch`] reuses it without
+/// clearing. The pool is bounded (24 buffers, 1 GiB) and [`release_buffers`] empties it.
+#[cfg(feature = "std")]
+mod pool {
+    use alloc::vec::Vec;
+    use std::sync::Mutex;
+
+    const MAX_BUFFERS: usize = 24;
+    /// Most floats parked at once (1 GiB).
+    const MAX_FLOATS: usize = 1 << 28;
+    /// Below this many floats the allocator is cheaper than the lock.
+    const MIN_LEN: usize = 1 << 14;
+
+    static POOL: Mutex<Vec<Vec<f32>>> = Mutex::new(Vec::new());
+
+    /// A buffer of length `n` with arbitrary (but initialised) contents, if one fits.
+    pub fn take(n: usize) -> Option<Vec<f32>> {
+        if n < MIN_LEN {
+            return None;
+        }
+        let mut pool = POOL.lock().ok()?;
+        // Smallest buffer that fits without wasting more than half of itself.
+        let best = pool
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| b.capacity() >= n && b.capacity() / 2 <= n)
+            .min_by_key(|(_, b)| b.capacity())
+            .map(|(i, _)| i)?;
+        let mut buf = pool.swap_remove(best);
+        drop(pool);
+        buf.resize(n, 0.0);
+        Some(buf)
+    }
+
+    pub fn give(buf: Vec<f32>) {
+        if buf.capacity() < MIN_LEN {
+            return;
+        }
+        if buf.capacity() > MAX_FLOATS {
+            return;
+        }
+        let Ok(mut pool) = POOL.lock() else { return };
+        // Make room by dropping the smallest buffers: the large ones are the expensive ones to
+        // fault in again. Give up if the smallest is no smaller than the newcomer.
+        loop {
+            let held: usize = pool.iter().map(Vec::capacity).sum();
+            if pool.len() < MAX_BUFFERS && held + buf.capacity() <= MAX_FLOATS {
+                break;
+            }
+            let Some((i, _)) = pool.iter().enumerate().min_by_key(|(_, b)| b.capacity()) else {
+                return;
+            };
+            if pool[i].capacity() >= buf.capacity() {
+                return;
+            }
+            pool.swap_remove(i);
+        }
+        pool.push(buf);
+    }
+
+    pub fn clear() {
+        if let Ok(mut pool) = POOL.lock() {
+            pool.clear();
+        }
+    }
+}
+
+/// Free the tensor buffers kept for reuse.
+pub fn release_buffers() {
+    #[cfg(feature = "std")]
+    pool::clear();
+}
+
+#[derive(Debug)]
 pub struct BTensor {
     pub c: usize,
     pub h: usize,
@@ -19,7 +97,52 @@ pub struct BTensor {
     pub data: Vec<f32>,
 }
 
+impl Clone for BTensor {
+    fn clone(&self) -> Self {
+        let mut out = Self::scratch_unchecked(self.c, self.h, self.w, self.v, self.data.len());
+        out.data.copy_from_slice(&self.data);
+        out
+    }
+}
+
+impl Drop for BTensor {
+    fn drop(&mut self) {
+        #[cfg(feature = "std")]
+        pool::give(core::mem::take(&mut self.data));
+    }
+}
+
 impl BTensor {
+    fn scratch_unchecked(c: usize, h: usize, w: usize, v: usize, n: usize) -> Self {
+        #[cfg(feature = "std")]
+        if let Some(data) = pool::take(n) {
+            return Self { c, h, w, v, data };
+        }
+        Self {
+            c,
+            h,
+            w,
+            v,
+            data: alloc::vec![0.0; n],
+        }
+    }
+
+    /// Like [`Self::zeros`] but with arbitrary contents: for outputs a kernel overwrites
+    /// completely.
+    pub fn scratch(c: usize, h: usize, w: usize, v: usize) -> Result<Self> {
+        let n = c
+            .div_ceil(v)
+            .checked_mul(h)
+            .and_then(|n| n.checked_mul(w))
+            .and_then(|n| n.checked_mul(v))
+            .ok_or(Error::LimitExceeded("tensor size overflow"))?;
+        #[cfg(feature = "std")]
+        if let Some(data) = pool::take(n) {
+            return Ok(Self { c, h, w, v, data });
+        }
+        Self::zeros(c, h, w, v)
+    }
+
     pub fn blocks(&self) -> usize {
         self.c.div_ceil(self.v)
     }
@@ -31,10 +154,9 @@ impl BTensor {
             .and_then(|n| n.checked_mul(w))
             .and_then(|n| n.checked_mul(v))
             .ok_or(Error::LimitExceeded("tensor size overflow"))?;
-        let mut data = Vec::new();
-        data.try_reserve_exact(n)
-            .map_err(|_| Error::LimitExceeded("out of memory"))?;
-        data.resize(n, 0.0);
+        // `vec![0.0; n]` is one `calloc`: fresh pages arrive zeroed from the kernel and are only
+        // touched by whoever writes them first. Reserve-then-fill would write everything twice.
+        let data = alloc::vec![0.0f32; n];
         Ok(Self { c, h, w, v, data })
     }
 
@@ -64,6 +186,89 @@ impl BTensor {
                 *d = s[lane];
             }
         }
+        Ok(out)
+    }
+
+    /// [`Self::from_planar`], one task per channel block.
+    pub fn from_planar_par(eng: &Engine, x: &Tensor<f32>, v: usize) -> Result<Self> {
+        let mut out = Self::zeros(x.c, x.h, x.w, v)?;
+        let plane = x.h * x.w;
+        if plane == 0 {
+            return Ok(out);
+        }
+        for_each_row(eng, &mut out.data, plane * v, |b, dst| {
+            let lanes = (x.c - b * v).min(v);
+            for lane in 0..lanes {
+                let src = &x.data[(b * v + lane) * plane..][..plane];
+                for (d, &s) in dst.chunks_exact_mut(v).zip(src) {
+                    d[lane] = s;
+                }
+            }
+        });
+        Ok(out)
+    }
+
+    /// [`Self::to_planar`], one task per channel block.
+    pub fn to_planar_par(&self, eng: &Engine) -> Result<Tensor<f32>> {
+        let mut out = Tensor::<f32>::zeros(self.c, self.h, self.w)?;
+        let plane = self.h * self.w;
+        let v = self.v;
+        if plane == 0 {
+            return Ok(out);
+        }
+        for_each_row(eng, &mut out.data, plane * v, |b, dst| {
+            let src = &self.data[b * plane * v..][..plane * v];
+            for (lane, d) in dst.chunks_exact_mut(plane).enumerate() {
+                for (o, s) in d.iter_mut().zip(src.chunks_exact(v)) {
+                    *o = s[lane];
+                }
+            }
+        });
+        Ok(out)
+    }
+
+    /// [`Self::pad`], one task per row.
+    pub fn pad_par(
+        &self,
+        eng: &Engine,
+        top: usize,
+        left: usize,
+        bottom: usize,
+        right: usize,
+    ) -> Result<Self> {
+        let (ph, pw) = (self.h + top + bottom, self.w + left + right);
+        let mut out = Self::zeros(self.c, ph, pw, self.v)?;
+        let v = self.v;
+        if pw == 0 {
+            return Ok(out);
+        }
+        for_each_row(eng, &mut out.data, pw * v, |idx, row| {
+            let (b, y) = (idx / ph, idx % ph);
+            if y >= top && y < top + self.h {
+                let src = &self.data[(b * self.h + y - top) * self.w * v..][..self.w * v];
+                row[left * v..][..self.w * v].copy_from_slice(src);
+            }
+        });
+        Ok(out)
+    }
+
+    /// [`Self::crop`], one task per row; consumes `self` so an unchanged size costs nothing.
+    pub fn crop_par(self, eng: &Engine, h: usize, w: usize) -> Result<Self> {
+        if h > self.h || w > self.w {
+            return Err(Error::InvalidArgument("crop larger than tensor"));
+        }
+        if h == self.h && w == self.w {
+            return Ok(self);
+        }
+        let mut out = Self::scratch(self.c, h, w, self.v)?;
+        let v = self.v;
+        if w == 0 {
+            return Ok(out);
+        }
+        for_each_row(eng, &mut out.data, w * v, |idx, row| {
+            let (b, y) = (idx / h, idx % h);
+            row.copy_from_slice(&self.data[(b * self.h + y) * self.w * v..][..w * v]);
+        });
         Ok(out)
     }
 
