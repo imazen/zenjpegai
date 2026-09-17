@@ -39,7 +39,7 @@ against reference-produced data passes. "stub" and "partial" mean what they say.
 | `decoder::output` | `ccs_sgmm_tool.py::decompress` (`to_format_`), `common/image.py::to_444_/to_RGB_/clip_data_/write_yuv`, `pytorch_ops.py::resize_tensor`, `colorspace.py` (BT.709), `image_io.py::write_png` quantisation | ported: coded → source chroma format (bicubic 4:2:0 / 4:2:2 → 4:4:4 with `align_corners=True`, reproducing PyTorch's compiled kernel including where its build fuses multiply-adds), BT.709 → RGB, YUV output for YUV sources (4:4:4 / 4:2:2 / 4:2:0), 8 and 10 bit, non-displayed border. **Not ported: the user-defined colour transform (`colour_transform_idx = 2`)**: upstream's inverse uses the first row of the inverse matrix for all three components, so there is no trustworthy oracle; such streams are rejected | `tests/nn_vectors.rs::bicubic_align_corners_matches_torch` (bit-identical to PyTorch on 6 shapes); `tests/decode_ref.rs`: 9 format streams (YUV 420/422/444, 10-bit 420/444, odd 203x301, RGB coded 4:2:0 and 4:2:2, display crop) |
 | `filters::efe_linear` | `filters/EFElinear/EFElinear.py`: `decompress`, `SplitApply`, `LumaAidedUpsampler_apply`, `pixelUnshuffleGeneral`, `pixelShuffleGeneral`, `deinteger` | ported for every chroma format the reference can produce: 4:4:4 source coded 4:4:4 / 4:2:2 / 4:2:0 (the latter two with the 4x4 DCT-IF kernels and four coded phases, incl. `DCTIF_only` = no coded filters), 4:2:2 and 4:2:0 sources; filter lengths 1..4, all 8 region splits, odd picture sizes, the second ("up-sampled") picture for the non-linear filter's switch. **Rejected with `Error::Unsupported` (no oracle, the reference fails on them too):** a plane signalled as not filtered (`best_cand_idx = 0`) in a picture coded at the source's chroma resolution; vertical-only subsampling (`*_ver = 2, *_hor = 1`); 4:2:2 source coded 4:2:0. Note that the *decoder* around it still only outputs 4:4:4-coded 4:4:4 pictures (`decoder::output`, and the bicubic `to_format_` between synthesis and filters is not ported), so the subsampled branches are verified in isolation only | `tests/filters_efe_ref.rs`: 17 reference streams, filter run on the reference's own input planes, output within 2e-4 (0..255) of the reference's, measured max 9.2e-5; identical bits on every tier, threaded or not. `tests/decode_ref.rs`: 7 EFE streams through the whole decoder, plus upstream's two `tools_on` streams (all four filters chained: the second picture travels EFE linear → eICCI → EFE non-linear) |
 | `filters::efe_nonlinear` | `filters/EFEnonlinear/EFEnonlinear.py`: `decompress`, `LumaAidedAdaptiveNonlinearFilter_apply`, `apply_OnoffSwitch`, `downsample`, `deinteger` | ported: per-tile two-layer 1x1 network (1 and 4 tiles checked), U-only / V-only / both, on/off masks with values 0, 1, 2 and block sizes 112 / 96, 4:4:4 / 4:2:2 / 4:2:0 sources, odd sizes. Same `Unsupported` formats as EFE linear | `tests/filters_efe_ref.rs`: **bit-identical** to the reference on all 16 streams that enable it (max abs error 0); `tests/decode_ref.rs` as above |
-| `filters::lef` | `filters/LEF/LEFfilter.py` (`decompress`, `adptive_sharpness`), nearest up-sampling as `torch.nn.functional.interpolate` does it (`floor(dst * (in / out))` in f32) | ported: luma only, so every chroma format takes the same path. **Unverified: bit depths other than 8** (the range is taken as `2^bit_depth - 1`; the decoder rejects 10-bit streams before it gets here) | `tests/filters_lef_icci_ref.rs`: fed the reference's own input plane, the output is **bit-identical** to the reference's on 4 streams (`model_id` 1 and 2: two of the four constant rows are exercised), on every tier, threaded or not. `tests/decode_ref.rs::img30_base_lef_bpp050`: whole decode |
+| `filters::lef` | `filters/LEF/LEFfilter.py` (`decompress`, `adptive_sharpness`), nearest up-sampling as `torch.nn.functional.interpolate` does it (`floor(dst * (in / out))` in f32) | ported: luma only, so every chroma format takes the same path. **Unverified: bit depths other than 8** (the range is taken as `2^bit_depth - 1`; the decoder rejects 10-bit streams before it gets here) | `tests/filters_lef_icci_ref.rs`: fed the reference's own input plane, the output is **bit-identical** to the reference's on 4 streams (`model_id` 1 and 2: two of the four constant rows are exercised), on every tier, threaded or not. `tests/decode_ref.rs::img30_base_lef_bpp050` and `decoder_api_on_filter_streams`: whole decode |
 | `filters::icci` + `model::icci` | `filters/eICCI/{icci_filter.py, icci_models.py, model_idxes.py, params.py}`, `base_layers/conv_layers.py::ResidualBlock_BN_RectKernel`, `tiling.py::_adjust_boundary_tiles`, short lists from `cfg/pipeline.json` | ported for 4:4:4: per-tile network selection (long and short lists, all three operating points' banks), the filter's own overlapping tiling with the 176-sample boundary adjustment, two-level Haar transform, both trunks on `nn::fast` (batch norm and residual scales folded into the convolutions), networks cached in `Decoder`. **Missing: 4:2:0 / 4:2:2 (`Unsupported`; the reference encoder never enables eICCI there, so no oracle), tiling combined with a non-displayed border (`Unsupported`, unverified), HOP bank and long-list indices (code path shared, no oracle stream selects them), bit depths other than 8** | `tests/filters_lef_icci_ref.rs`: fed the reference's input planes, output within 1.1e-4 (0..255) on 4 streams incl. a 2096x1400 one with six filter tiles; bit-identical across tiers. `tests/decode_ref.rs`: `img30_base_eicci_bpp050`, `img01_base_eiccitiles_lef_bpp050` |
 | `gpu/` (`zenjpegai-gpu`, separate workspace member; the core crate does not depend on wgpu) | same sources as `model::synthesis` / `model::attention`; runs them as WGSL compute shaders through wgpu 30 | ported: SOP, BOP, HOP synthesis (luma + chroma), synthesis tiling and independent regions, `GpuDecoder` (CPU entropy / latent stage and output stage, GPU synthesis), readback-free `rgba8unorm` presentation; builds for wasm32. **Never run on a hardware GPU or in a browser; no kernel tuning, no f16** (`gpu/README.md` "Status") | `gpu/tests/kernels.rs`: every kernel vs `nn::reference` / `nn::fast::math`, max relative error 1.7e-6 (conv, transposed conv), 2.5e-7 (attention), exact copies / shuffles. `gpu/tests/decode_ref.rs`: planes vs reference 3.2e-4 (SOP), 4.3e-4 (BOP), 3.4e-4 (HOP), 6.6e-4 / 5.6e-4 (2096x1400, 6 tiles / 12 tiles in 2 independent regions), bound 3e-3; 8-bit output differs by 1 in 50 / 59 / 35 of 1,491,840 and 348 / 373 of 8,803,200 samples; vs the CPU engine planes differ by at most 9.2e-4. All measured on llvmpipe (Mesa 26.0.8), feature `gpu-tests`, `just gpu-test` |
 
@@ -62,6 +62,7 @@ against reference-produced data passes. "stub" and "partial" mean what they say.
 | 2096x1400 image 00001 with EFE linear + non-linear (4 tiles); 277x201 crop (odd size) | < 5e-4 | < 5e-4 | < 3e-3 | 384 of 8,803,200; 5 of 167,031, all by 1 |
 | base profile + LEF, 0.50 bpp | < 5e-4 | < 5e-4 | < 3e-3 | 58, all by 1 |
 | base profile + eICCI (U and V filtered), 0.50 bpp | < 5e-4 | < 5e-4 | < 3e-3 | 53, all by 1 |
+| upstream `tools_on` (RVS, GRFS, LSBS, all four post-filters), 0.25 / 1.00 bpp, through `Decoder` | < 5e-4 | < 5e-4 | < 3e-3 | 65 / 56, all by 1 |
 | 2096x1400, base profile + eICCI in six filter tiles (Y, U, V filtered) + LEF, 0.50 bpp | < 5e-4 | < 5e-4 | < 3e-3 | 427 of 8,803,200, all by 1 |
 
 Post-filters on their own (input = the reference's planes entering the filter, 0..255 scale):
@@ -139,6 +140,46 @@ For the stages behind the entropy decoder the oracle is the reference decoder ru
 defect patched at runtime (`scripts/ref_vectors/dump_decode.py --contiguous-masks`, dumps in
 `<vector>/fixed_decoder/`). With the patch its residual equals the encoder's bit for bit on all
 three region streams (checked), so its psi / y_hat / reconstruction are what the encoder intended.
+
+## LEF / eICCI: speed, and what is still missing
+
+Measured 2026-09-17 on a busy 9950X3D (load 16; `benchmarks/filters_lef_icci_2026-09-17.tsv`,
+`scripts/bench/filters_lef_icci.sh`), filter time only, same input planes:
+
+| stream | filter | reference (1 thread, its stock setting) | zenjpegai 1 thread | zenjpegai 32 threads |
+| --- | --- | --- | --- | --- |
+| 560x888, eICCI on U+V | eICCI | 38 .. 46 ms | 32.4 ms | 7.8 ms |
+| 560x888, tools_on (eICCI on Y+U+V) | eICCI | 73 .. 98 ms | 49.1 ms | 10.3 ms |
+| 560x888 | LEF | 9.8 .. 15 ms | 0.54 ms | 0.28 .. 0.37 ms |
+| 2096x1400, 6 eICCI tiles, Y+U+V | eICCI | 424 .. 518 ms | 310 ms | 70 ms |
+| 2096x1400 | LEF | 93 .. 110 ms | 3.5 ms | 2.1 ms |
+
+(The reference allowed 32 threads is 10x *slower* on this loaded box; rows in the TSV.)
+
+Missing, most important first, with the next concrete step for each:
+
+1. **eICCI on 4:2:0 / 4:2:2 pictures** (`Error::Unsupported`). The reference decoder would
+   up-sample to 4:4:4 (`Image.to_444_`), filter, and down-sample (`to_format_`), but its encoder
+   refuses to enable the filter there, so there is no oracle stream. Next step: force
+   `icci_enable_flag` in a patched encode (like `force_efe_encode.py` does for EFE), dump with
+   `dump_filters_lef_icci.py`, then port `to_444_` / `to_format_` around `filters::icci::filter`.
+2. **eICCI tiling together with `diff_display_img_*` != 0** (`Error::Unsupported`). The reference
+   relies on Python slices clamping. Next step: a stream with a non-multiple-of-16 picture *and*
+   `numSamplesPerTile` small enough to tile (`scripts/ref_vectors/cfg/eicci_tiles.json` on a
+   cropped input), then clamp tile and core areas to the displayed size in `tile_layout`.
+3. **Unexercised but shared code paths** (no oracle stream selects them): the HOP network bank
+   (`eicci_hop_*`), long-list indices (`icci_use_shortList = 0`), SOP/HOP short lists, LEF
+   constants of `model_id` 0 and 3, per-tile *different* selections, tiles with only one chroma
+   plane filtered. Next step: encode HOP / SOP / very low and very high rate streams with
+   `-post_filters.eICCI.process_short_list 0`, add them to `tests/filters_lef_icci_ref.rs`.
+4. **Bit depths other than 8** for both filters (range taken as `2^bit_depth - 1`, as
+   `Image.data_range` suggests, never compared). Next step: a 10-bit source stream with LEF and
+   eICCI on, same per-filter test.
+5. **eICCI multi-thread scaling** is about 4.5x on 16 cores: the network is 140x222 at 48
+   channels, too small for the engine's row-level split to fill the pool. Next step: run the
+   luma and chroma trunks (independent) as two rayon tasks, or tile-level parallelism when the
+   filter is tiled (tiles must still be *written* in raster order, see below, so only the
+   inference of tiles whose inputs are final can overlap).
 
 ## Reference behaviour of the post-filters worth knowing
 

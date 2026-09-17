@@ -1,0 +1,36 @@
+# commit 147304efe89d host-cpu AMD Ryzen 9 9950X3D 16-Core Processor threads 32 load 15.87 date 2026-09-17T23:43:09Z
+# reference: time inside <Filter>.decompress during a stock decode (networks already loaded); threads=1 is what the reference does
+# zenjpegai: best of 20 calls on the reference's input planes (eICCI networks cached); decode_ms = whole decode, steady state
+stream	impl	threads	run	eicci_ms	lef_ms	decode_ms
+img30_base_lef_bpp050	reference	1	1	0	11	326.9
+img30_base_lef_bpp050	reference	1	2	0	9.8	236
+img30_base_lef_bpp050	reference	1	3	0	10.2	239.4
+img30_base_lef_bpp050	reference	32	1	0	179	2614.5
+img30_base_lef_bpp050	reference	32	2	0	180	2519.1
+img30_base_lef_bpp050	reference	32	3	0	186	2540.3
+img30_base_lef_bpp050	zenjpegai	1	best	0	0.54	103.9
+img30_base_lef_bpp050	zenjpegai	32	best	0	0.28	34.0
+img30_base_eicci_bpp050	reference	1	1	39	0	283.7
+img30_base_eicci_bpp050	reference	1	2	38.1	0	316.6
+img30_base_eicci_bpp050	reference	1	3	45.9	0	283.5
+img30_base_eicci_bpp050	reference	32	1	1467	0	3991.8
+img30_base_eicci_bpp050	reference	32	2	1355	0	3747.9
+img30_base_eicci_bpp050	reference	32	3	3018.9	0	5521.7
+img30_base_eicci_bpp050	zenjpegai	1	best	32.38	0	173.9
+img30_base_eicci_bpp050	zenjpegai	32	best	7.77	0	55.9
+img30_base_on_bpp025	reference	1	1	97.7	14.9	447
+img30_base_on_bpp025	reference	1	2	95.6	13.1	499.8
+img30_base_on_bpp025	reference	1	3	73.2	11.4	371.9
+img30_base_on_bpp025	reference	32	1	1698	189	5470.9
+img30_base_on_bpp025	reference	32	2	2259	194	6734.2
+img30_base_on_bpp025	reference	32	3	29.1	2.3	1745.3
+img30_base_on_bpp025	zenjpegai	1	best	49.09	0.54	153.1
+img30_base_on_bpp025	zenjpegai	32	best	10.31	0.37	54.8
+img01_base_eiccitiles_lef_bpp050	reference	1	1	424	92.7	1797.1
+img01_base_eiccitiles_lef_bpp050	reference	1	2	518	109.9	2059.1
+img01_base_eiccitiles_lef_bpp050	reference	1	3	450.9	100.6	1951.4
+img01_base_eiccitiles_lef_bpp050	reference	32	1	14058.5	176.3	20574.7
+img01_base_eiccitiles_lef_bpp050	reference	32	2	12461.7	209.3	16614.9
+img01_base_eiccitiles_lef_bpp050	reference	32	3	9341	68.5	14211.8
+img01_base_eiccitiles_lef_bpp050	zenjpegai	1	best	309.61	3.54	868.6
+img01_base_eiccitiles_lef_bpp050	zenjpegai	32	best	69.76	2.08	232.1

@@ -321,6 +321,160 @@ pub fn idwt2(bands: &[f32], h: usize, w: usize) -> Result<Tensor<f32>> {
     Ok(out)
 }
 
+/// Two Haar levels of one 4x4 block (`p[row][col]`), same operation sequence as [`dwt2`].
+#[inline(always)]
+fn dwt2_block(p: [[f32; 4]; 4]) -> [f32; BANDS] {
+    let haar = |x1: f32, x2: f32, x3: f32, x4: f32| {
+        [
+            x1 + x2 + x3 + x4,
+            -x1 - x2 + x3 + x4,
+            -x1 + x2 - x3 + x4,
+            x1 - x2 - x3 + x4,
+        ]
+    };
+    // Level 1 per 2x2 sub-block (by, bx): l1[by][bx][band].
+    let mut l1 = [[[0.0f32; 4]; 2]; 2];
+    for (by, row) in l1.iter_mut().enumerate() {
+        for (bx, o) in row.iter_mut().enumerate() {
+            let (r, c) = (2 * by, 2 * bx);
+            *o = haar(
+                p[r][c] / 2.0,
+                p[r + 1][c] / 2.0,
+                p[r][c + 1] / 2.0,
+                p[r + 1][c + 1] / 2.0,
+            );
+        }
+    }
+    let mut out = [0.0f32; BANDS];
+    for k in 0..4 {
+        let o = haar(
+            l1[0][0][k] / 2.0,
+            l1[1][0][k] / 2.0,
+            l1[0][1][k] / 2.0,
+            l1[1][1][k] / 2.0,
+        );
+        out[4 * k..4 * k + 4].copy_from_slice(&o);
+    }
+    out
+}
+
+/// Inverse of [`dwt2_block`], same operation sequence as [`idwt2`].
+#[inline(always)]
+fn idwt2_block(s: [f32; BANDS]) -> [[f32; 4]; 4] {
+    // (even row, even col), (odd, even), (even, odd), (odd, odd)
+    let haar = |x1: f32, x2: f32, x3: f32, x4: f32| {
+        [
+            x1 - x2 - x3 + x4,
+            x1 - x2 + x3 - x4,
+            x1 + x2 - x3 - x4,
+            x1 + x2 + x3 + x4,
+        ]
+    };
+    // q[i][dy][dx]: first-level band i at sub-block (dy, dx).
+    let mut q = [[[0.0f32; 2]; 2]; 4];
+    for (i, qi) in q.iter_mut().enumerate() {
+        let r = haar(
+            s[4 * i] / 2.0,
+            s[4 * i + 1] / 2.0,
+            s[4 * i + 2] / 2.0,
+            s[4 * i + 3] / 2.0,
+        );
+        *qi = [[r[0], r[2]], [r[1], r[3]]];
+    }
+    let mut out = [[0.0f32; 4]; 4];
+    for dy in 0..2 {
+        for dx in 0..2 {
+            let r = haar(
+                q[0][dy][dx] / 2.0,
+                q[1][dy][dx] / 2.0,
+                q[2][dy][dx] / 2.0,
+                q[3][dy][dx] / 2.0,
+            );
+            out[2 * dy][2 * dx] = r[0];
+            out[2 * dy + 1][2 * dx] = r[1];
+            out[2 * dy][2 * dx + 1] = r[2];
+            out[2 * dy + 1][2 * dx + 1] = r[3];
+        }
+    }
+    out
+}
+
+/// The network input of one tile, straight into blocked layout: the `width x height` area at
+/// `(x0, y0)` of each plane, replicate-padded right/bottom to a multiple of 4, as 48 sub-bands
+/// (`process_dwt444_2` after `padding_layer`). One task per output row.
+pub fn tile_input(
+    eng: &Engine,
+    planes: [&Tensor<f32>; 3],
+    (x0, y0, width, height): (usize, usize, usize, usize),
+) -> Result<BTensor> {
+    let v = eng.tier.block();
+    if v > BANDS || !BANDS.is_multiple_of(v) {
+        return Err(Error::Unsupported("eICCI: engine block size"));
+    }
+    for p in planes {
+        if width == 0 || height == 0 || x0 + width > p.w || y0 + height > p.h {
+            return Err(Error::InvalidArgument("eICCI: tile outside the picture"));
+        }
+    }
+    let (bh, bw) = (height.div_ceil(4), width.div_ceil(4));
+    let mut out = BTensor::scratch(3 * BANDS, bh, bw, v)?;
+    fast::for_each_row(eng, &mut out.data, bw * v, |idx, row| {
+        let (b, y) = (idx / bh, idx % bh);
+        let (plane, band0) = (planes[b * v / BANDS], b * v % BANDS);
+        let rows: [&[f32]; 4] = core::array::from_fn(|r| {
+            let sy = y0 + (4 * y + r).min(height - 1);
+            &plane.data[sy * plane.w + x0..][..width]
+        });
+        for (x, dst) in row.chunks_exact_mut(v).enumerate() {
+            let p: [[f32; 4]; 4] = core::array::from_fn(|r| {
+                core::array::from_fn(|c| rows[r][(4 * x + c).min(width - 1)])
+            });
+            dst.copy_from_slice(&dwt2_block(p)[band0..band0 + v]);
+        }
+    });
+    Ok(out)
+}
+
+/// `inverse transform(sub-bands of plane `plane` in `input` + correction)`: the filtered tile
+/// at padded size (`final_X16 = out * scale + X16`, `my_tf_idwt_2`; the scale is folded into
+/// `correction`). One task per band row.
+pub fn tile_output(
+    eng: &Engine,
+    input: &BTensor,
+    plane: usize,
+    correction: &BTensor,
+) -> Result<Tensor<f32>> {
+    let v = input.v;
+    if correction.c != BANDS
+        || input.c != 3 * BANDS
+        || plane >= 3
+        || (correction.h, correction.w, correction.v) != (input.h, input.w, v)
+        || v > BANDS
+        || !BANDS.is_multiple_of(v)
+    {
+        return Err(Error::InvalidArgument("eICCI: correction shape"));
+    }
+    let (bh, bw) = (input.h, input.w);
+    let mut out = Tensor::<f32>::zeros(1, 4 * bh, 4 * bw)?;
+    if bw == 0 {
+        return Ok(out);
+    }
+    fast::for_each_row(eng, &mut out.data, 16 * bw, |y, rows| {
+        for x in 0..bw {
+            let s: [f32; BANDS] = core::array::from_fn(|k| {
+                let at =
+                    |t: &BTensor, ch: usize| t.data[((ch / v) * bh + y) * bw * v + x * v + ch % v];
+                at(correction, k) + at(input, plane * BANDS + k)
+            });
+            let block = idwt2_block(s);
+            for (r, line) in block.iter().enumerate() {
+                rows[r * 4 * bw + 4 * x..][..4].copy_from_slice(line);
+            }
+        }
+    });
+    Ok(out)
+}
+
 /// Loaded eICCI networks, by checkpoint path and engine block size. Shared by every decode of a
 /// [`crate::Decoder`], so a checkpoint is parsed and packed once.
 #[derive(Default)]
@@ -383,6 +537,48 @@ mod tests {
             assert!((a - b).abs() < 1e-5);
         }
         assert!(dwt2(&plane[..h * w - 1], h, w, &mut bands).is_err());
+    }
+
+    /// The per-block transforms used on the decode path equal the plane-wise ones bit for bit,
+    /// replicate padding included.
+    #[test]
+    fn blocked_transforms_match_the_planar_ones() {
+        let (h, w) = (10, 13); // padded to 12 x 16
+        let planes: Vec<Tensor<f32>> = (0..3)
+            .map(|c| {
+                let d = (0..h * w)
+                    .map(|i| ((i * 37 + c * 11) % 101) as f32 / 7.0)
+                    .collect();
+                Tensor::from_vec(1, h, w, d).unwrap()
+            })
+            .collect();
+        for tier in crate::nn::fast::Tier::available() {
+            let eng = Engine::with(tier, false);
+            let input = tile_input(
+                &eng,
+                [&planes[0], &planes[1], &planes[2]],
+                (1, 2, w - 1, h - 2),
+            )
+            .unwrap();
+            let got = input.to_planar().unwrap();
+            let (th, tw, ph, pw) = (h - 2, w - 1, 8, 12);
+            for (c, plane) in planes.iter().enumerate() {
+                let mut padded = alloc::vec![0.0f32; ph * pw];
+                for y in 0..ph {
+                    for x in 0..pw {
+                        padded[y * pw + x] = plane.at(0, 2 + y.min(th - 1), 1 + x.min(tw - 1));
+                    }
+                }
+                let mut want = alloc::vec![0.0f32; BANDS * (ph / 4) * (pw / 4)];
+                dwt2(&padded, ph, pw, &mut want).unwrap();
+                let n = want.len();
+                assert_eq!(&got.data[c * n..(c + 1) * n], &want[..], "plane {c}");
+                // Zero correction: the inverse of the sub-bands, against the planar inverse.
+                let zero = BTensor::zeros(BANDS, ph / 4, pw / 4, input.v).unwrap();
+                let back = tile_output(&eng, &input, c, &zero).unwrap();
+                assert_eq!(back.data, idwt2(&want, ph / 4, pw / 4).unwrap().data);
+            }
+        }
     }
 
     #[test]

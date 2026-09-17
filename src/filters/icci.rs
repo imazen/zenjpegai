@@ -24,9 +24,9 @@ use crate::decoder::reconstruct::Planes;
 use crate::error::{Error, Result};
 use crate::header::{IcciHeader, IcciTile, OperatingPoint, PictureHeader, SynthesisTiling};
 use crate::model::ModelSource;
+use crate::model::icci;
 pub use crate::model::icci::NetCache;
-use crate::model::icci::{self, BANDS};
-use crate::nn::fast::{BTensor, Engine};
+use crate::nn::fast::Engine;
 use crate::tensor::Tensor;
 use crate::tools::regions::Area;
 
@@ -151,43 +151,14 @@ fn selection(
     Ok((y, uv))
 }
 
-/// `tile` of `plane`, replicate-padded right/bottom to `ph x pw`, transformed to 16 sub-bands.
-fn tile_bands(
-    plane: &Tensor<f32>,
-    tile: Area,
-    (ph, pw): (usize, usize),
-    out: &mut [f32],
-) -> Result<()> {
-    let mut padded = Tensor::<f32>::zeros(1, ph, pw)?.data;
-    for (y, row) in padded.chunks_exact_mut(pw).enumerate() {
-        let sy = tile.y + y.min(tile.height - 1);
-        let src = &plane.data[sy * plane.w + tile.x..][..tile.width];
-        row[..tile.width].copy_from_slice(src);
-        row[tile.width..].fill(src[tile.width - 1]);
-    }
-    icci::dwt2(&padded, ph, pw, out)
-}
-
-/// `sub-bands + correction`, inverse transform, and the tile's core written back to `plane`.
-fn write_back(
-    eng: &Engine,
-    plane: &mut Tensor<f32>,
-    tile: &FilterTile,
-    bands: &[f32],
-    correction: &BTensor,
-) -> Result<()> {
-    let mut sum = correction.to_planar_par(eng)?;
-    for (s, &b) in sum.data.iter_mut().zip(bands) {
-        *s += b;
-    }
-    let full = icci::idwt2(&sum.data, sum.h, sum.w)?;
+/// The core of a filtered tile (`full`: the tile at padded size) written back to `plane`.
+fn write_core(plane: &mut Tensor<f32>, tile: &FilterTile, full: &Tensor<f32>) {
     let (ox, oy) = tile.core_offset;
     for y in 0..tile.core.height {
         let src = &full.data[(oy + y) * full.w + ox..][..tile.core.width];
         plane.data[(tile.core.y + y) * plane.w + tile.core.x..][..tile.core.width]
             .copy_from_slice(src);
     }
-    Ok(())
 }
 
 /// Apply the filter to a 4:4:4 picture in the codec range. `op` is the operating point the
@@ -232,7 +203,6 @@ pub fn filter(
         ));
     }
     let range = ((1u32 << hdr.bit_depth) - 1) as f32;
-    let v = eng.tier.block();
 
     for p in [&mut image.y, &mut image.u, &mut image.v] {
         for s in &mut p.data {
@@ -244,34 +214,32 @@ pub fn filter(
         if net_y.is_none() && net_uv.is_none() {
             continue;
         }
-        let area = tile.image;
-        let padded = (
-            area.height.next_multiple_of(4),
-            area.width.next_multiple_of(4),
-        );
-        let (bh, bw) = (padded.0 / 4, padded.1 / 4);
-        let n = BANDS * bh * bw;
-        let mut yuv16 = Tensor::<f32>::zeros(3 * BANDS, bh, bw)?;
-        for (p, out) in [&image.y, &image.u, &image.v]
+        let a = tile.image;
+        let input = icci::tile_input(
+            eng,
+            [&image.y, &image.u, &image.v],
+            (a.x, a.y, a.width, a.height),
+        )?;
+        // Every correction is computed from the tile as it was read, then written back.
+        let luma = net_y
+            .map(|i| cache.get(models, op, i, eng)?.luma_correction(eng, &input))
+            .transpose()?;
+        let chroma = net_uv
+            .map(|i| {
+                let want = [sel.use_yuv[1], sel.use_yuv[2]];
+                cache
+                    .get(models, op, i, eng)?
+                    .chroma_corrections(eng, &input, want)
+            })
+            .transpose()?;
+        let [cu, cv] = chroma.unwrap_or([None, None]);
+        for (p, (plane, c)) in [&mut image.y, &mut image.u, &mut image.v]
             .into_iter()
-            .zip(yuv16.data.chunks_exact_mut(n))
+            .zip([luma, cu, cv])
+            .enumerate()
         {
-            tile_bands(p, area, padded, out)?;
-        }
-        let input = BTensor::from_planar_par(eng, &yuv16, v)?;
-        if let Some(i) = net_y {
-            let net = cache.get(models, op, i, eng)?;
-            let c = net.luma_correction(eng, &input)?;
-            write_back(eng, &mut image.y, tile, &yuv16.data[..n], &c)?;
-        }
-        if let Some(i) = net_uv {
-            let net = cache.get(models, op, i, eng)?;
-            let [cu, cv] = net.chroma_corrections(eng, &input, [sel.use_yuv[1], sel.use_yuv[2]])?;
-            if let Some(c) = cu {
-                write_back(eng, &mut image.u, tile, &yuv16.data[n..2 * n], &c)?;
-            }
-            if let Some(c) = cv {
-                write_back(eng, &mut image.v, tile, &yuv16.data[2 * n..], &c)?;
+            if let Some(c) = c {
+                write_core(plane, tile, &icci::tile_output(eng, &input, p, &c)?);
             }
         }
     }

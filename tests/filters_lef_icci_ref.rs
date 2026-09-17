@@ -206,3 +206,51 @@ fn icci_img01_base_eiccitiles_lef_bpp050() {
 fn lef_img01_base_eiccitiles_lef_bpp050() {
     check_lef("img01_base_eiccitiles_lef_bpp050");
 }
+
+/// The public `Decoder` on the filter streams (LEF, eICCI, tiled eICCI + LEF, and upstream's
+/// tools_on with all four filters): 8-bit output against the reference decoder's, same gate as
+/// `tests/decode_ref.rs`. One decoder for all streams, so the eICCI network cache is exercised,
+/// and every stream is decoded twice (second decode must be identical).
+#[test]
+fn decoder_api_on_filter_streams() {
+    use zenjpegai::decoder::output::quantize_plane;
+    let dec = zenjpegai::Decoder::new(ref_root().join("models"));
+    for name in [
+        "img30_base_lef_bpp050",
+        "img30_base_eicci_bpp050",
+        "img30_base_on_bpp025",
+        "img30_base_on_bpp100",
+        "img01_base_eiccitiles_lef_bpp050",
+    ] {
+        let dir = vector_dir(name);
+        let stream = std::fs::read(dir.join("stream.bits")).unwrap();
+        let dump = load_dump(&dir);
+        let ours = dec.decode(&stream).unwrap();
+        assert_eq!(ours, dec.decode(&stream).unwrap(), "{name}: second decode");
+        let [r, g, b] = ["out.a", "out.b", "out.c"].map(|k| quantize_plane(&dump[k].f32(), 8));
+        let theirs: Vec<u16> = (0..r.len()).flat_map(|i| [r[i], g[i], b[i]]).collect();
+        assert_eq!(ours.data.len(), theirs.len(), "{name}");
+        let differing = ours
+            .data
+            .iter()
+            .zip(&theirs)
+            .filter(|(a, b)| a != b)
+            .count();
+        let worst = ours
+            .data
+            .iter()
+            .zip(&theirs)
+            .map(|(a, b)| (*a as i32 - *b as i32).abs())
+            .max()
+            .unwrap();
+        println!(
+            "{name}: Decoder output, {differing} of {} samples differ, worst {worst}",
+            theirs.len()
+        );
+        assert!(worst <= 1, "{name}: an 8-bit sample differs by {worst}");
+        assert!(
+            differing * 5000 < theirs.len(),
+            "{name}: {differing} samples differ"
+        );
+    }
+}
