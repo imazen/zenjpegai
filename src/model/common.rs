@@ -7,6 +7,8 @@ use alloc::format;
 use alloc::vec::Vec;
 
 use super::hsd::HyperScaleDecoder;
+use super::hyper_decoder::HyperDecoder;
+use super::mcm::ContextModel;
 use crate::error::{Error, Result};
 use crate::mans::{MAX_Z, normalize_z_cdf};
 use crate::weights::Checkpoint;
@@ -38,6 +40,9 @@ pub struct CommonModel {
     pub hsd: HyperScaleDecoder,
     /// Log-domain gain vector (`GainUnit.get_gain_vector_log`), one entry per latent channel.
     pub gain_vector_log: Vec<i32>,
+    pub hyper_decoder: HyperDecoder,
+    /// Present for luma only (`use_context_module`); chroma takes its mean straight from `psi`.
+    pub context: Option<ContextModel>,
 }
 
 impl CommonModel {
@@ -110,11 +115,18 @@ impl CommonModel {
             })
             .collect();
 
+        let context = if ck.contains("context.MCM.0.fusion_pred_net.conv1.weight") {
+            Some(ContextModel::load(ck, chs)?)
+        } else {
+            None
+        };
         Ok(Self {
             chs,
             z_cdfs,
             hsd: HyperScaleDecoder::load(ck, chs)?,
             gain_vector_log,
+            hyper_decoder: HyperDecoder::load(ck, chs)?,
+            context,
         })
     }
 }

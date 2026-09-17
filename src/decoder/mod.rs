@@ -1,6 +1,8 @@
 //! Decoder pipeline.
 
 pub mod entropy;
+pub mod output;
+pub mod reconstruct;
 
 use crate::container::{Codestream, Marker, RegionLayout, split_regions, split_threads};
 use crate::error::{Error, Result};

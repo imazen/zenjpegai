@@ -2,6 +2,10 @@
 
 pub mod common;
 pub mod hsd;
+pub mod hyper_decoder;
+pub(crate) mod load;
+pub mod mcm;
+pub mod synthesis;
 
 pub use common::CommonModel;
 
@@ -41,5 +45,46 @@ impl ModelDir {
         ))?;
         let ck = crate::weights::Checkpoint::parse(&file)?;
         CommonModel::load(&ck, crate::header::LATENT_CHANNELS[ccs])
+    }
+
+    fn synthesis_file(
+        &self,
+        model_id: usize,
+        ccs: usize,
+        op: crate::header::OperatingPoint,
+    ) -> crate::error::Result<alloc::vec::Vec<u8>> {
+        use crate::header::OperatingPoint::{Bop, Hop, Sop};
+        let beta = MODEL_BETAS
+            .get(model_id)
+            .ok_or(crate::Error::InvalidData("model_id out of range"))?;
+        let dir = match op {
+            Sop => "VM_sop",
+            Bop => "VM_bop",
+            Hop => "VM_hop",
+        };
+        self.read(&alloc::format!(
+            "{dir}/decoder_{}_{beta}.pth",
+            COMPONENT_NAMES[ccs]
+        ))
+    }
+
+    /// Luma synthesis transform of model `model_id` at operating point `op`.
+    pub fn load_synthesis_primary(
+        &self,
+        model_id: usize,
+        op: crate::header::OperatingPoint,
+    ) -> crate::error::Result<synthesis::SynthesisPrimary> {
+        let file = self.synthesis_file(model_id, 0, op)?;
+        synthesis::SynthesisPrimary::load(&crate::weights::Checkpoint::parse(&file)?, op)
+    }
+
+    /// Chroma synthesis transform of model `model_id` at operating point `op`.
+    pub fn load_synthesis_secondary(
+        &self,
+        model_id: usize,
+        op: crate::header::OperatingPoint,
+    ) -> crate::error::Result<synthesis::SynthesisSecondary> {
+        let file = self.synthesis_file(model_id, 1, op)?;
+        synthesis::SynthesisSecondary::load(&crate::weights::Checkpoint::parse(&file)?, op)
     }
 }

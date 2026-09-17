@@ -23,11 +23,34 @@ against reference-produced data passes. "stub" and "partial" mean what they say.
 | `tools::skip` | `skip_ls/skip_mode.py` (mask + cube-flag expansion) | ported (decoder side); cube flags exercised only by header round trips so far, no reference stream with `use_cube_flags = 1` yet | `tests/entropy_ref.rs` (threshold mask) |
 | `tools::regions` | `tiling/tiling.py::TileManagerHyper` | ported: region grids for y / psi / z, with and without overlap extension | unit tests + `tests/entropy_ref.rs` region streams (latent grid only) |
 | `decoder::entropy` | `common_modules.py::decode/decode_z/decode_y/_ac_decode_y/_cal_step_size`, `gm.py::build_indexes` | ported for: all 4 models, 1..16 threads, no regions / dependent / independent regions. **Missing: RVS + GRFS sigma adjustment, quality map, `num_decode_chs` (progressive decode)** — such streams are rejected as `Unsupported` | `tests/entropy_ref.rs`: 12 reference streams; z_hat, sigma, quantised residual exact, dequantised residual bit-identical |
+| `nn` + `nn::reference` | `torch.nn.functional` conv2d / conv_transpose2d / pixel_shuffle / ReLU / ReLU6 | ported as plain loops that *define* the crate's numeric contract (FMA accumulation in `(ic, ky, kx)` order). **No optimised kernels yet — this is the slow path** | `tests/nn_vectors.rs`: 11 tiny PyTorch-computed cases (groups, depthwise, stride 2, 2x2, 1x3/3x1, both transposed geometries) within 2e-6 relative; pixel shuffle exact |
+| `model::hyper_decoder` | `components/autoencoder_hyper/decoder/base.py` | ported | `tests/decode_ref.rs` (`psi` within 5e-4 abs of the reference) |
+| `model::mcm` | `components/contexts/{context,MCM_phases,fusion_pred_net,utils}.py` (decoder direction) | ported: 4-phase context model + the context-free chroma path | `tests/decode_ref.rs` (`y_hat` within 5e-4) |
+| `model::synthesis` | `components/autoencoder_data/decoder/{sop,bop}_{prim,sec}.py`, `activations/resau.py`, `base_layers/conv_layers.py` | ported: **SOP and BOP only. HOP (CAB + TAM attention) is missing** | `tests/decode_ref.rs` (planes within 3e-3 on a 0..255 scale) |
+| `decoder::reconstruct` | `ccs_sgmm_tool.py::forward/decompress`, `common_modules.py::hyper_decode_tile/_decompress_ar_scale/decompress_y_hat_to_image_tile` | partial: **one region, one synthesis tile only** (pictures up to 1 MP with default settings). Tiled / region reconstruction is rejected as `Unsupported` | `tests/decode_ref.rs` |
+| `decoder::output` | `common/image.py::to_RGB_/clip_data_`, `colorspace.py` (BT.709), `image_io.py::write_png` quantisation | partial: **4:4:4, BT.709 → RGB only.** Missing: 4:2:0 / 4:2:2 chroma upsampling (bicubic), custom colour transform, YUV output | `tests/decode_ref.rs`: 8-bit output differs from the reference decoder in 49..73 of 1,491,840 samples, each by 1 |
 
-Not started: z/residual substream decode, hyper-scale decoder, quantizer
-tools (gain unit, RVS, quality map), skip mode, tiling/regions, hyper decoder, MCM context model,
-synthesis transforms (SOP/BOP/HOP), post-filters (EFE linear/nonlinear, eICCI, LEF), colour
-processing, image IO, the whole encoder side above the entropy coder, CLI, benchmarks.
+## Accuracy of the float path (measured, 560x888 test image 00030, upstream b9e573f, torch 1.10.2 CPU)
+
+| stream | psi max abs | y_hat max abs | planes max abs (0..255) | 8-bit samples differing (of 1,491,840) |
+| --- | --- | --- | --- | --- |
+| base profile (BOP), 0.12 bpp | < 5e-4 | < 5e-4 | < 3e-3 | 51, all by 1 |
+| base profile (BOP), 0.50 bpp | 8.9e-7 | 8.0e-5 | 4.7e-4 | 73, all by 1 |
+| base profile (BOP), 1.00 bpp | < 5e-4 | < 5e-4 | < 3e-3 | 67, all by 1 |
+| simple profile (SOP), 0.50 bpp | < 5e-4 | < 5e-4 | < 3e-3 | 49, all by 1 |
+
+Entries written `< x` are the bounds `tests/decode_ref.rs` asserts, not individually recorded
+maxima; the other numbers were read off `examples/dbg_recon`.
+
+The differences come from convolution summation order (PyTorch/oneDNN vs this crate's fixed
+order); they land on 8-bit rounding boundaries in about 0.005 % of samples.
+
+Not started (decoder): RVS / GRFS, quality map, LSBS, tiled and region-partitioned
+reconstruction, HOP synthesis, the four post-filters (EFE linear, eICCI, EFE non-linear, LEF),
+chroma-subsampled and 10-bit output, custom colour transform, UDI, progressive (`num_decode_chs`)
+decode. Not started (everything else): optimised SIMD kernels and threading, the whole encoder
+above the entropy coder (analysis transforms, hyper-encoder, quantisation/RDO tools, bitrate
+matching, header/stream assembly), CLI, benchmarks, CI.
 
 ## Reference behaviour that differs from its own configuration
 

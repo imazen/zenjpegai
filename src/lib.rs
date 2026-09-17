@@ -17,6 +17,7 @@ mod error;
 pub mod header;
 pub mod mans;
 pub mod model;
+pub mod nn;
 pub mod tensor;
 pub mod tools;
 pub mod weights;
