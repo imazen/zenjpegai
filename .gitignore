@@ -1,0 +1,25 @@
+/Cargo.lock
+target/
+.workongoing
+.jj/
+.cargo/config.toml
+
+# model weights and reference streams never go in git (see models/README.md)
+*.pth
+*.zjai
+/models/*.bin
+/scratch/
+
+# Profiling
+perf.data
+perf.data.old
+flamegraph.svg
+heaptrack.*.zst
+cachegrind.out.*
+callgrind.out.*
+massif.out.*
+
+# Fuzz
+fuzz/target/
+fuzz/artifacts/
+fuzz/corpus/

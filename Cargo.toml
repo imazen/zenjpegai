@@ -1,0 +1,39 @@
+[package]
+name = "zenjpegai"
+version = "0.0.1"
+edition = "2024"
+license = "AGPL-3.0-only OR LicenseRef-Imazen-Commercial"
+rust-version = "1.89"
+
+description = "JPEG AI (ISO/IEC 6048-1 | ITU-T T.840.1) learned image codec in safe Rust — a port of the JPEG AI reference software"
+homepage = "https://github.com/imazen/zenjpegai"
+repository = "https://github.com/imazen/zenjpegai"
+documentation = "https://docs.rs/zenjpegai"
+categories = ["multimedia::images", "multimedia::encoding", "encoding"]
+keywords = ["jpeg-ai", "image", "decoder", "encoder", "codec"]
+readme = "README.md"
+autobenches = false
+
+include = ["/src", "LICENSE-AGPL3", "LICENSE-COMMERCIAL", "upstream-notices", "README.md", "CHANGELOG.md"]
+
+[features]
+default = ["std", "parallel"]
+# File IO helpers (checkpoint loading from disk) and std::error::Error impls.
+std = []
+# Multi-threaded network inference and entropy-thread decoding via rayon.
+parallel = ["std", "dep:rayon"]
+# AVX-512 kernels (archmage v4 tier).
+avx512 = ["archmage/avx512", "magetypes/avx512"]
+
+[dependencies]
+archmage = { version = "0.9.29", features = ["macros"] }
+magetypes = { version = "0.9.29" }
+rayon = { version = "1.12.0", optional = true }
+libm = "0.2.16"
+
+[profile.release]
+debug = "line-tables-only"
+incremental = true
+
+[profile.bench]
+debug = "line-tables-only"
