@@ -14,8 +14,9 @@ against reference-produced data passes. "stub" and "partial" mean what they say.
 | `mans::tables` | `lib_wrappers/mans/utils.py`, `ec_lib_mans.py::init_quant_params` | ported, integer-only | `mans::tables::tests::tables_match_reference` (FNV-1a of the reference-built encode/decode/state-map tables) |
 | `mans::decoder` | `cpp_exts/mans/decompressor.{h,cpp}` | ported: residual + z, 1..16 threads (threads run sequentially for now) | `tests/mans_vectors.rs`: decodes payloads written by the reference C++ `ANSEncoder` |
 | `mans::encoder` | `cpp_exts/mans/compressor.{h,cpp}` | ported: residual + z, 1..16 threads | `tests/mans_vectors.rs`: output bytes and thread sizes equal the reference's |
+| `weights` | `torch.load` of `models/**/*.pth` (no upstream source: replaces PyTorch's unpickler) | ported: stored-ZIP reader (zip64 aware), data-only pickle interpreter, lazy strided tensor materialisation | `tests/weights_ref.rs` (`reference-tests` feature): tensor hashes equal `torch.load`'s for int8/int32/int64/bool/f32 tensors; all 68 upstream checkpoints parse |
 
-Not started: headers, weight loading, z/residual substream decode, hyper-scale decoder, quantizer
+Not started: headers, z/residual substream decode, hyper-scale decoder, quantizer
 tools (gain unit, RVS, quality map), skip mode, tiling/regions, hyper decoder, MCM context model,
 synthesis transforms (SOP/BOP/HOP), post-filters (EFE linear/nonlinear, eICCI, LEF), colour
 processing, image IO, the whole encoder side above the entropy coder, CLI, benchmarks.

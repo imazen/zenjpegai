@@ -22,6 +22,9 @@ default = ["std", "parallel"]
 std = []
 # Multi-threaded network inference and entropy-thread decoding via rayon.
 parallel = ["std", "dep:rayon"]
+# Tests that need the upstream reference checkout (models, reference vectors). With this
+# feature on, missing data is a hard failure, never a skip. Run through `just test-ref`.
+reference-tests = []
 # AVX-512 kernels (archmage v4 tier).
 avx512 = ["archmage/avx512", "magetypes/avx512"]
 

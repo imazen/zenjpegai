@@ -14,5 +14,6 @@ pub mod bitio;
 pub mod container;
 mod error;
 pub mod mans;
+pub mod weights;
 
 pub use error::Error;
