@@ -28,7 +28,7 @@ against reference-produced data passes. "stub" and "partial" mean what they say.
 | `tools::regions` | `tiling/tiling.py::TileManagerHyper` | ported: region grids for y / psi / z, with and without overlap extension | unit tests + `tests/entropy_ref.rs` region streams (latent grid only) |
 | `decoder::entropy` | `common_modules.py::decode/decode_z/decode_y/_ac_decode_y/_cal_step_size`, `gm.py::build_indexes` | ported for: all 4 models, 1..16 threads, no regions / dependent / independent regions, RVS, GRFS and the quality map. **Missing: `num_decode_chs` (progressive decode)** — such streams are rejected as `Unsupported` | `tests/entropy_ref.rs`: 21 reference streams (6 with RVS and/or GRFS, 3 with a quality map); z_hat, sigma, quantised residual exact, dequantised residual bit-identical |
 | `nn` + `nn::reference` | `torch.nn.functional` conv2d / conv_transpose2d / pixel_shuffle / ReLU / ReLU6 | ported as plain loops that *define* the crate's numeric contract (FMA accumulation in `(ic, ky, kx)` order). Kept as the oracle and as the fallback for geometries the fast engine does not cover (stride-2 convolutions) | `tests/nn_vectors.rs`: 11 tiny PyTorch-computed cases (groups, depthwise, stride 2, 2x2, 1x3/3x1, both transposed geometries) within 2e-6 relative; pixel shuffle exact |
-| `nn::fast` | (replaces oneDNN under PyTorch) | NCHWc blocked tensors (16 lanes on AVX-512, 8 on AVX2 / NEON / scalar); register-blocked FMA micro-kernel for stride-1 and stride-2 convolutions (any group count with block-aligned groups, up to 9 taps) reading the input in place with virtual zero padding; depthwise 3x3; stride-2 transposed convolution (k <= 4); int8 `madd` convolution for the HSD; ReLU/ReLU6/gate/sigmoid/ELU-gate, layer norm, channel attention, pixel shuffle on blocked data; rayon over output rows; bounded buffer pool. `exp` is one fixed algorithm (Cephes `expf`) and long sums run in `f64` with a fixed order, so every tier agrees bit for bit. **Not done: Winograd, int8 VNNI, padding-free transposed convolution** | `tests/fast_vs_reference.rs`: every tier, with and without threads, bit-identical to `nn::reference`; `tests/math_tiers.rs`; `tests/decode_ref.rs::tiers_and_threads_agree_bit_for_bit` on whole SOP / BOP / HOP decodes |
+| `nn::fast` | (replaces oneDNN under PyTorch) | NCHWc blocked tensors (16 lanes on AVX-512, 8 on AVX2 / NEON / WebAssembly SIMD128 / scalar); register-blocked FMA micro-kernel for stride-1 and stride-2 convolutions (any group count with block-aligned groups, up to 9 taps) reading the input in place with virtual zero padding; depthwise 3x3; stride-2 transposed convolution (k <= 4); int8 `madd` convolution for the HSD; ReLU/ReLU6/gate/sigmoid/ELU-gate, layer norm, channel attention, pixel shuffle on blocked data; rayon over output rows; bounded buffer pool. `exp` is one fixed algorithm (Cephes `expf`) and long sums run in `f64` with a fixed order, so every tier agrees bit for bit. **Not done: Winograd, int8 VNNI, padding-free transposed convolution** | `tests/fast_vs_reference.rs`: every tier, with and without threads, bit-identical to `nn::reference`; `tests/math_tiers.rs`; `tests/decode_ref.rs::tiers_and_threads_agree_bit_for_bit` on whole SOP / BOP / HOP decodes |
 | `model::hyper_decoder` | `components/autoencoder_hyper/decoder/base.py` | ported | `tests/decode_ref.rs` (`psi` within 5e-4 abs of the reference) |
 | `model::mcm` | `components/contexts/{context,MCM_phases,fusion_pred_net,utils}.py` (decoder direction) | ported: 4-phase context model + the context-free chroma path | `tests/decode_ref.rs` (`y_hat` within 5e-4) |
 | `model::synthesis` | `components/autoencoder_data/decoder/{sop,bop,hop}_{prim,sec}.py`, `activations/resau.py`, `base_layers/conv_layers.py` | ported: SOP, BOP and HOP, luma and chroma | `tests/decode_ref.rs` (planes within 3e-3 on a 0..255 scale) |
@@ -61,6 +61,38 @@ chroma-subsampled and 10-bit output, custom colour transform, UDI, progressive (
 decode. Not started (everything else): the whole encoder
 above the entropy coder (analysis transforms, hyper-encoder, quantisation/RDO tools, bitrate
 matching, header/stream assembly), CI.
+
+## WebAssembly numeric policy (measured 2026-09-17)
+
+WebAssembly has no deterministic fused multiply-add: `f32::mul_add` becomes a soft-float `fmaf`
+call and relaxed-simd's `relaxed_madd` fuses or not depending on the host CPU. On
+`target_arch = "wasm32"` the contract's multiply-add is therefore **unfused** (`w * x + acc`,
+two roundings; `nn::fmadd`) in `nn::reference`, the scalar tier and the `Wasm128` tier alike.
+Native targets are unchanged (fused everywhere).
+
+- Wasm output is bit-identical across the `Wasm128` and `Scalar` tiers, across builds with and
+  without `simd128`, and across engines (checked: node 26 / V8, wasmtime; PNG bytes equal).
+  `tests/fast_vs_reference.rs`, `tests/math_tiers.rs`, `tests/nn_vectors.rs` and all of
+  `tests/decode_ref.rs` (incl. `tiers_and_threads_agree_bit_for_bit`) pass on `wasm32-wasip1`
+  under node (`just test-wasi`).
+- Wasm output differs from native output by rounding only: 18..183 8-bit samples per picture, each
+  by 1. Against the reference decoder wasm sits where native does
+  (`benchmarks/wasm_parity_2026-09-17.tsv`, `scripts/wasm/parity.sh`):
+
+| stream | samples | wasm vs reference | native vs reference | wasm vs native |
+| --- | --- | --- | --- | --- |
+| img30 BOP 0.12 / 0.25 / 0.50 / 0.75 / 1.00 bpp | 1,491,840 | 54 / 59 / 73 / 58 / 55 | 51 / 64 / 73 / 53 / 67 | 19 / 29 / 30 / 37 / 22 |
+| img30 SOP 0.50 bpp, HOP 0.50 bpp | 1,491,840 | 49, 50 | 49, 41 | 24, 21 |
+| img30 RVS+GRFS, RVS only, GRFS only | 1,491,840 | 43, 48, 51 | 51, 54, 51 | 18, 20, 24 |
+| img01 2096x1400, plain / 8 ANS threads | 8,803,200 | 419 / 419 | 398 / 398 | 153 / 153 |
+| img01 dependent / independent regions / independent + 8 threads | 8,803,200 | 443 / 412 / 376 | 404 / 404 / 396 | 183 / 176 / 170 |
+
+  Every difference is by 1; the worst case (443 of 8,803,200) is a quarter of the whole-picture
+  gate (1 in 5000).
+- Speed, one thread, 560x888 BOP 0.5 bpp stream, node 26 on a Ryzen 9 9950X3D: fused soft-float
+  6.0 s; unfused without SIMD 1.42 s; unfused `Wasm128` 0.35 s (wasmtime: 0.51 s). Native
+  AVX-512, one thread: 0.093 s. The `Wasm128` micro-kernel keeps 4 output positions x 8 channels
+  in registers (3 / 4 / 6 / 8 / 12 positions measured: 428 / 352 / 385 / 457 / 457 ms).
 
 ## Reference behaviour that differs from its own configuration
 

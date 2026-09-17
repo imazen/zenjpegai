@@ -8,6 +8,11 @@
 use alloc::vec::Vec;
 
 use archmage::prelude::*;
+#[cfg(any(
+    target_arch = "x86_64",
+    target_arch = "aarch64",
+    target_arch = "wasm32"
+))]
 use magetypes::simd::generic::f32x8;
 #[cfg(feature = "avx512")]
 use magetypes::simd::generic::f32x16;
@@ -70,6 +75,12 @@ fn dw_row_v3(t: X64V3Token, job: &mut DwRowJob<'_>) {
 #[arcane]
 fn dw_row_neon(t: NeonToken, job: &mut DwRowJob<'_>) {
     dw_row::<f32x8<NeonToken>, 8>(t, job)
+}
+
+#[cfg(target_arch = "wasm32")]
+#[arcane]
+fn dw_row_wasm128(t: Wasm128Token, job: &mut DwRowJob<'_>) {
+    dw_row::<f32x8<Wasm128Token>, 8>(t, job)
 }
 
 fn dw_row_scalar(job: &mut DwRowJob<'_>) {
@@ -172,6 +183,8 @@ impl PackedDepthwise {
                 Tier::V3(t) => dw_row_v3(t, &mut job),
                 #[cfg(target_arch = "aarch64")]
                 Tier::Neon(t) => dw_row_neon(t, &mut job),
+                #[cfg(target_arch = "wasm32")]
+                Tier::Wasm128(t) => dw_row_wasm128(t, &mut job),
                 Tier::Scalar => dw_row_scalar(&mut job),
             }
         });

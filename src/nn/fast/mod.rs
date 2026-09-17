@@ -35,7 +35,11 @@ pub enum Tier {
     /// NEON, 8 lanes as two 128-bit registers.
     #[cfg(target_arch = "aarch64")]
     Neon(NeonToken),
-    /// No SIMD: 8 scalar lanes with `f32::mul_add`.
+    /// WebAssembly SIMD128, 8 lanes as two 128-bit registers. Multiply-add is unfused on every
+    /// wasm tier (see the numeric contract in [`crate::nn`]).
+    #[cfg(target_arch = "wasm32")]
+    Wasm128(Wasm128Token),
+    /// No SIMD: 8 scalar lanes with [`crate::nn::fmadd`].
     Scalar,
 }
 
@@ -54,6 +58,10 @@ impl Tier {
         if let Some(t) = NeonToken::summon() {
             return Tier::Neon(t);
         }
+        #[cfg(target_arch = "wasm32")]
+        if let Some(t) = Wasm128Token::summon() {
+            return Tier::Wasm128(t);
+        }
         Tier::Scalar
     }
 
@@ -71,6 +79,10 @@ impl Tier {
         #[cfg(target_arch = "aarch64")]
         if let Some(t) = NeonToken::summon() {
             tiers.push(Tier::Neon(t));
+        }
+        #[cfg(target_arch = "wasm32")]
+        if let Some(t) = Wasm128Token::summon() {
+            tiers.push(Tier::Wasm128(t));
         }
         tiers.push(Tier::Scalar);
         tiers

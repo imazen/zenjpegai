@@ -1,0 +1,30 @@
+# commit 663b86dbbcc2 host dev node v26.7.0
+# columns: differing samples / total / max abs diff; wasm = Wasm128 tier, unfused multiply-add
+stream	total_samples	wasm_vs_ref	wasm_vs_ref_max	native_vs_ref	native_vs_ref_max	wasm_vs_native	wasm_vs_native_max	wasm_scalar_identical
+img01_base_off_bpp050	8803200	419	1	398	1	153	1	yes
+img01_base_off_depregions_m1	8803200	443	1	404	1	183	1	yes
+img01_base_off_indregions_m1	8803200	412	1	404	1	176	1	yes
+img01_base_off_indregions_threads8_m2	8803200	376	1	396	1	170	1	yes
+img01_base_off_threads8_bpp050	8803200	419	1	398	1	153	1	yes
+img30_base_efelin_bpp050	unsupported: error: Error: Unsupported("EFE linear post-filter")      at src/decoder/api.rs:175  
+img30_base_efenl_bpp050	unsupported: error: Error: Unsupported("EFE non-linear post-filter")      at src/decoder/api.rs:175  
+img30_base_eicci_bpp050	unsupported: error: Error: Unsupported("eICCI post-filter")      at src/decoder/api.rs:175  
+img30_base_grfsonly_bpp075	1491840	51	1	51	1	24	1	yes
+img30_base_lef_bpp050	unsupported: error: Error: Unsupported("LEF post-filter")      at src/decoder/api.rs:175  
+img30_base_lsbs_bpp050	unsupported: error: Error: Unsupported("latent scaling before synthesis (LSBS)")      at src/decoder/api.rs:128  
+img30_base_lsbs_rvs_bpp025	unsupported: error: Error: Unsupported("latent scaling before synthesis (LSBS)")      at src/decoder/api.rs:128  
+img30_base_off_bpp012	1491840	54	1	51	1	19	1	yes
+img30_base_off_bpp025	1491840	59	1	64	1	29	1	yes
+img30_base_off_bpp050	1491840	73	1	73	1	30	1	yes
+img30_base_off_bpp075	1491840	58	1	53	1	37	1	yes
+img30_base_off_bpp100	1491840	55	1	67	1	22	1	yes
+img30_base_on_bpp025	unsupported: error: Error: Unsupported("latent scaling before synthesis (LSBS)")      at src/decoder/api.rs:128  
+img30_base_on_bpp100	unsupported: error: Error: Unsupported("latent scaling before synthesis (LSBS)")      at src/decoder/api.rs:128  
+img30_base_qmap_bpp050	unsupported: error: Error: Unsupported("quality map")      at src/decoder/api.rs:154  
+img30_base_qmap_rvs_bpp025	unsupported: error: Error: Unsupported("quality map")      at src/decoder/api.rs:154  
+img30_base_qmap_threads8_bpp100	unsupported: error: Error: Unsupported("quality map")      at src/decoder/api.rs:154  
+img30_base_rvs_bpp050	1491840	43	1	51	1	18	1	yes
+img30_base_rvsonly_bpp050	1491840	48	1	54	1	20	1	yes
+img30_high_off_bpp050	1491840	50	1	41	1	21	1	yes
+img30_simple_lsbs_rvs_bpp100	unsupported: error: Error: Unsupported("latent scaling before synthesis (LSBS)")      at src/decoder/api.rs:128  
+img30_simple_off_bpp050	1491840	49	1	49	1	24	1	yes

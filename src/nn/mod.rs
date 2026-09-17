@@ -18,6 +18,15 @@
 //! Vectorising across output channels or positions never changes the order *within* an element,
 //! so kernels are free to do that. They may not reassociate, and they may not replace the fused
 //! multiply-add by a separate multiply and add.
+//!
+//! **WebAssembly is the one exception, and it is a whole-target one.** Wasm has no deterministic
+//! fused multiply-add: `f32::mul_add` compiles to a soft-float `fmaf` call (measured under node 26, one thread, 0.5 MP
+//! BOP stream: 6.0 s fused; 1.42 s unfused without SIMD; 0.35 s unfused with SIMD128) and relaxed-simd's
+//! `f32x4.relaxed_madd` may or may not fuse depending on the host CPU. So on
+//! `target_arch = "wasm32"` every `fma` above is `w * x + acc` with two roundings ([`fmadd`]),
+//! in [`reference`], the scalar tier and the SIMD128 tier alike. Wasm results are therefore
+//! bit-identical across wasm engines, tiers and thread counts, and differ from native results
+//! by rounding only (measured in `PORTING.md`).
 
 pub mod fast;
 pub mod reference;
@@ -25,6 +34,21 @@ pub mod reference;
 use alloc::vec::Vec;
 
 use crate::error::{Error, Result};
+
+/// The contract's multiply-add, `a * b + c`: fused on native targets, unfused on wasm32 (see the
+/// module documentation). Every float accumulation of the convolutions goes through this or
+/// through a SIMD equivalent with the same rounding.
+#[inline(always)]
+pub fn fmadd(a: f32, b: f32, c: f32) -> f32 {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        a.mul_add(b, c)
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        a * b + c
+    }
+}
 
 /// 2-D convolution parameters, stride 1 or 2, zero padding, optional groups.
 /// Weight layout is PyTorch's: `[out_ch][in_ch / groups][kh][kw]`.

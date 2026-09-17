@@ -24,3 +24,11 @@ build-release:
 # (llvmpipe) are refused unless ZENJPEGAI_GPU_ALLOW_SOFTWARE=1.
 gpu-test:
     ZENJPEGAI_REF={{ref}} cargo test -p zenjpegai-gpu --features gpu-tests -- --test-threads 1 --nocapture 2>&1 | tee ~/tmp/zenjpegai-gpu-test.log
+
+# The test suite on wasm32-wasip1 under node (Wasm128 tier, unfused multiply-add policy).
+test-wasi:
+    CARGO_TARGET_WASM32_WASIP1_RUNNER="node --no-warnings {{justfile_directory()}}/scripts/wasm/run_wasi.mjs" RUSTFLAGS="-Ctarget-feature=+simd128" ZENJPEGAI_REF={{ref}} cargo test --target wasm32-wasip1 --no-default-features --features std,reference-tests --lib --tests 2>&1 | tee ~/tmp/zenjpegai-test-wasi.log
+
+# Wasm-vs-reference-vs-native 8-bit parity table.
+wasm-parity:
+    scripts/wasm/parity.sh | tee benchmarks/wasm_parity_$(date +%F).tsv

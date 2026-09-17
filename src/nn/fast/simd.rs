@@ -16,7 +16,8 @@ pub(crate) trait SimdF32<const V: usize>: Copy {
     fn splat(t: Self::Token, x: f32) -> Self;
     fn load(t: Self::Token, a: &[f32; V]) -> Self;
     fn store(self, a: &mut [f32; V]);
-    /// `self * a + b`, fused (one rounding).
+    /// `self * a + b`: fused (one rounding) on native targets, unfused on wasm32, where the
+    /// only backends are `Wasm128Token` (magetypes: `f32x4_add(f32x4_mul(..))`) and `Lanes8`.
     fn mul_add(self, a: Self, b: Self) -> Self;
 }
 
@@ -60,9 +61,10 @@ impl<T: F32x16Backend + Send + Sync> SimdF32<16> for f32x16<T> {
     }
 }
 
-/// Scalar tier: eight independent lanes, fused multiply-add through `f32::mul_add` (hardware
-/// FMA when the build enables it, libm's exact `fma` otherwise). Deliberately *not* magetypes'
-/// scalar backend, whose `mul_add` is an unfused multiply and add.
+/// Scalar tier: eight independent lanes, multiply-add through [`crate::nn::fmadd`]: fused
+/// (`f32::mul_add`: hardware FMA when the build enables it, libm's exact `fma` otherwise) on
+/// native targets, unfused on wasm32. Deliberately *not* magetypes' scalar backend, whose
+/// `mul_add` is an unfused multiply and add on every target.
 #[derive(Clone, Copy)]
 pub(crate) struct Lanes8([f32; 8]);
 
@@ -84,7 +86,7 @@ impl SimdF32<8> for Lanes8 {
     fn mul_add(self, a: Self, b: Self) -> Self {
         let mut r = [0.0; 8];
         for i in 0..8 {
-            r[i] = self.0[i].mul_add(a.0[i], b.0[i]);
+            r[i] = crate::nn::fmadd(self.0[i], a.0[i], b.0[i]);
         }
         Self(r)
     }

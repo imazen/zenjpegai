@@ -3,13 +3,13 @@
 //!
 //! The loops are compiled once per CPU tier by `#[autoversion]`, so `f32::mul_add` is a hardware
 //! FMA wherever one exists; without one it is libm's exact `fma`, which is slow but yields the
-//! same bits.
+//! same bits. On wasm32 the multiply-add is unfused by policy ([`super::fmadd`]).
 
 use alloc::vec::Vec;
 
 use archmage::prelude::*;
 
-use super::{Conv2d, ConvTranspose2d};
+use super::{Conv2d, ConvTranspose2d, fmadd};
 use crate::error::{Error, Result};
 use crate::tensor::Tensor;
 
@@ -74,11 +74,11 @@ fn conv_plane(
                     let wv = weight[(i * kh + ky) * kw + kx];
                     if stride == 1 {
                         for (a, &v) in acc.iter_mut().zip(&row[kx..kx + ow]) {
-                            *a = wv.mul_add(v, *a);
+                            *a = fmadd(wv, v, *a);
                         }
                     } else {
                         for (ox, a) in acc.iter_mut().enumerate() {
-                            *a = wv.mul_add(row[ox * stride + kx], *a);
+                            *a = fmadd(wv, row[ox * stride + kx], *a);
                         }
                     }
                 }
@@ -191,7 +191,7 @@ fn conv_transpose_plane(
                         if !tx.is_multiple_of(stride) {
                             continue;
                         }
-                        acc = weight[wbase + ky * k + kx].mul_add(row[tx / stride], acc);
+                        acc = fmadd(weight[wbase + ky * k + kx], row[tx / stride], acc);
                     }
                 }
             }

@@ -15,6 +15,10 @@ Read `PORTING.md` first: it is the honest status table (module → upstream sour
   bit-identical output to the scalar tier. Vectorise across independent lanes (output channels,
   pixels) and keep the per-element op sequence fixed, with FMA everywhere (`f32::mul_add` in
   scalar code). Never use a vector-width-dependent reduction order.
+  **wasm32 exception:** WebAssembly has no deterministic FMA, so on `target_arch = "wasm32"` the
+  multiply-add is unfused in every tier and in `nn::reference` (`nn::fmadd`). Wasm output is
+  bit-identical across wasm tiers / engines / thread counts and differs from native by rounding
+  only (numbers in `PORTING.md`). Never use `f32::mul_add` or relaxed-simd madd in wasm code paths.
 - Versus PyTorch the float path cannot be bit-exact (oneDNN's summation order is not ours);
   parity there is measured (max abs error on tensors, pixel diff histogram on output) and
   recorded in `PORTING.md`. Do not loosen a recorded bound without asking the user.

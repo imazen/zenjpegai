@@ -242,6 +242,12 @@ fn int_row_neon(t: NeonToken, job: &mut IntRowJob<'_>) {
     int_row::<i16x16<NeonToken>, 8, 16, 6>(t, job)
 }
 
+#[cfg(target_arch = "wasm32")]
+#[arcane]
+fn int_row_wasm128(t: Wasm128Token, job: &mut IntRowJob<'_>) {
+    int_row::<i16x16<Wasm128Token>, 8, 16, 6>(t, job)
+}
+
 fn int_row_scalar(job: &mut IntRowJob<'_>) {
     int_row::<ScalarMadd, 8, 16, 2>(ScalarToken, job)
 }
@@ -358,6 +364,8 @@ impl PackedIntConv {
                 Tier::V3(t) => int_row_v3(t, &mut job),
                 #[cfg(target_arch = "aarch64")]
                 Tier::Neon(t) => int_row_neon(t, &mut job),
+                #[cfg(target_arch = "wasm32")]
+                Tier::Wasm128(t) => int_row_wasm128(t, &mut job),
                 Tier::Scalar => int_row_scalar(&mut job),
             }
         });

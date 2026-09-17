@@ -77,6 +77,7 @@ pub fn decode_z(
 
 /// Decode one component: its `z` from `z_dec`, then its residual from `region_payloads`
 /// (the output of [`crate::container::split_regions`] for SORP or SORS).
+#[allow(clippy::too_many_arguments)]
 pub fn decode_component(
     tables: &AnsTables,
     hdr: &PictureHeader,

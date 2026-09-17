@@ -13,6 +13,11 @@
 use alloc::vec::Vec;
 
 use archmage::prelude::*;
+#[cfg(any(
+    target_arch = "x86_64",
+    target_arch = "aarch64",
+    target_arch = "wasm32"
+))]
 use magetypes::simd::generic::f32x8;
 #[cfg(feature = "avx512")]
 use magetypes::simd::generic::f32x16;
@@ -165,6 +170,13 @@ fn conv_row_neon(t: NeonToken, job: &mut RowJob<'_>) {
     conv_row::<f32x8<NeonToken>, 8, 12>(t, job)
 }
 
+#[cfg(target_arch = "wasm32")]
+#[arcane]
+fn conv_row_wasm128(t: Wasm128Token, job: &mut RowJob<'_>) {
+    // 16 v128 registers: 6 positions x 2 halves, the weight vector and the broadcast input.
+    conv_row::<f32x8<Wasm128Token>, 8, 4>(t, job)
+}
+
 fn conv_row_scalar(job: &mut RowJob<'_>) {
     conv_row::<Lanes8, 8, 4>(ScalarToken, job)
 }
@@ -177,6 +189,8 @@ pub(crate) fn run_row(tier: Tier, job: &mut RowJob<'_>) {
         Tier::V3(t) => conv_row_v3(t, job),
         #[cfg(target_arch = "aarch64")]
         Tier::Neon(t) => conv_row_neon(t, job),
+        #[cfg(target_arch = "wasm32")]
+        Tier::Wasm128(t) => conv_row_wasm128(t, job),
         Tier::Scalar => conv_row_scalar(job),
     }
 }
