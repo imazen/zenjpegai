@@ -11,6 +11,8 @@
 
 use alloc::format;
 
+use enough::{Stop, Unstoppable};
+
 use crate::error::{Error, Result};
 use crate::header::OperatingPoint;
 use crate::model::attention::{Cab, ResidualBlock, Tam, conv3x3_t};
@@ -150,9 +152,21 @@ impl SynthesisPrimary {
         h: usize,
         w: usize,
     ) -> Result<Tensor<f32>> {
+        self.forward_with(eng, y_hat, h, w, &Unstoppable)
+    }
+
+    /// [`Self::forward`] that checks `stop` between layers.
+    pub fn forward_with(
+        &self,
+        eng: &Engine,
+        y_hat: &BTensor,
+        h: usize,
+        w: usize,
+        stop: &dyn Stop,
+    ) -> Result<Tensor<f32>> {
         match &self.0 {
-            Primary::Light(m) => m.forward(eng, y_hat, h, w),
-            Primary::Hop(m) => m.forward(eng, y_hat, h, w),
+            Primary::Light(m) => m.forward(eng, y_hat, h, w, stop),
+            Primary::Hop(m) => m.forward(eng, y_hat, h, w, stop),
         }
     }
 }
@@ -191,17 +205,31 @@ impl HopPrimary {
         })
     }
 
-    fn forward(&self, eng: &Engine, y_hat: &BTensor, h: usize, w: usize) -> Result<Tensor<f32>> {
+    fn forward(
+        &self,
+        eng: &Engine,
+        y_hat: &BTensor,
+        h: usize,
+        w: usize,
+        stop: &dyn Stop,
+    ) -> Result<Tensor<f32>> {
         let x = self.res.forward(eng, y_hat)?;
+        stop.check()?;
         let x = self.act1.forward(eng, self.up1.forward(eng, &x)?)?;
         let x = x.crop_par(eng, h.div_ceil(8), w.div_ceil(8))?;
+        stop.check()?;
         let x = self.cab.forward(eng, &self.up2.forward(eng, &x)?)?;
         let x = x.crop_par(eng, h.div_ceil(4), w.div_ceil(4))?;
+        stop.check()?;
         let x = self.act2.forward(eng, x)?;
+        stop.check()?;
         let x = fast::pixel_shuffle(eng, &self.conv3.forward(eng, &x)?, 2)?;
+        stop.check()?;
         let x = self.tam.forward(eng, x)?;
         let x = x.crop_par(eng, h.div_ceil(2), w.div_ceil(2))?;
+        stop.check()?;
         let x = self.act3.forward(eng, x)?;
+        stop.check()?;
         let mut x = self.up4.forward(eng, &x)?.to_planar()?;
         denormalize(&mut x);
         Ok(x)
@@ -246,19 +274,33 @@ impl LightPrimary {
         })
     }
 
-    fn forward(&self, eng: &Engine, y_hat: &BTensor, h: usize, w: usize) -> Result<Tensor<f32>> {
+    fn forward(
+        &self,
+        eng: &Engine,
+        y_hat: &BTensor,
+        h: usize,
+        w: usize,
+        stop: &dyn Stop,
+    ) -> Result<Tensor<f32>> {
         // LightResidualBlock: relu(conv(x)) + x
         let mut x = self.res_conv.forward(eng, y_hat)?;
         fast::relu(&mut x);
         fast::add_assign(&mut x, y_hat)?;
+        stop.check()?;
         let x = self.act1.forward(eng, self.up1.forward(eng, &x)?)?;
         let x = x.crop_par(eng, h.div_ceil(8), w.div_ceil(8))?;
+        stop.check()?;
         let x = self
             .up2
             .forward(eng, &x)?
             .crop_par(eng, h.div_ceil(4), w.div_ceil(4))?;
+        stop.check()?;
         let x = self.act2.forward(eng, x)?;
-        let x = self.act3.forward(eng, self.conv3.forward(eng, &x)?)?;
+        stop.check()?;
+        let x = self.conv3.forward(eng, &x)?;
+        stop.check()?;
+        let x = self.act3.forward(eng, x)?;
+        stop.check()?;
         let mut x = fast::pixel_shuffle_to_planar(&self.conv4.forward(eng, &x)?, 4)?;
         denormalize(&mut x);
         Ok(x)
@@ -307,14 +349,26 @@ impl HopSecondary {
         })
     }
 
-    fn forward(&self, eng: &Engine, x: &BTensor, h: usize, w: usize) -> Result<Tensor<f32>> {
+    fn forward(
+        &self,
+        eng: &Engine,
+        x: &BTensor,
+        h: usize,
+        w: usize,
+        stop: &dyn Stop,
+    ) -> Result<Tensor<f32>> {
         let x = self.cab.forward(eng, &self.up2.forward(eng, x)?)?;
         let x = x.crop_par(eng, h.div_ceil(8), w.div_ceil(8))?;
+        stop.check()?;
         let x = self.act2.forward(eng, x)?;
+        stop.check()?;
         let x = fast::pixel_shuffle(eng, &self.conv3.forward(eng, &x)?, 2)?;
+        stop.check()?;
         let x = self.tam.forward(eng, x)?;
         let x = x.crop_par(eng, h.div_ceil(4), w.div_ceil(4))?;
+        stop.check()?;
         let x = self.act3.forward(eng, x)?;
+        stop.check()?;
         fast::pixel_shuffle_to_planar(&self.up4.forward(eng, &x)?, 2)
     }
 }
@@ -347,13 +401,25 @@ impl LightSecondary {
         })
     }
 
-    fn forward(&self, eng: &Engine, x: &BTensor, h: usize, w: usize) -> Result<Tensor<f32>> {
+    fn forward(
+        &self,
+        eng: &Engine,
+        x: &BTensor,
+        h: usize,
+        w: usize,
+        stop: &dyn Stop,
+    ) -> Result<Tensor<f32>> {
         let x = self
             .up
             .forward(eng, x)?
             .crop_par(eng, h.div_ceil(8), w.div_ceil(8))?;
+        stop.check()?;
         let x = self.act2.forward(eng, x)?;
-        let x = self.act3.forward(eng, self.conv3.forward(eng, &x)?)?;
+        stop.check()?;
+        let x = self.conv3.forward(eng, &x)?;
+        stop.check()?;
+        let x = self.act3.forward(eng, x)?;
+        stop.check()?;
         fast::pixel_shuffle_to_planar(&self.conv4.forward(eng, &x)?, 8)
     }
 }
@@ -387,6 +453,19 @@ impl SynthesisSecondary {
         h: usize,
         w: usize,
     ) -> Result<Tensor<f32>> {
+        self.forward_with(eng, y_hat_luma, y_hat_chroma, h, w, &Unstoppable)
+    }
+
+    /// [`Self::forward`] that checks `stop` between layers.
+    pub fn forward_with(
+        &self,
+        eng: &Engine,
+        y_hat_luma: &BTensor,
+        y_hat_chroma: &BTensor,
+        h: usize,
+        w: usize,
+        stop: &dyn Stop,
+    ) -> Result<Tensor<f32>> {
         let (lh, lw) = (
             y_hat_luma.h.min(y_hat_chroma.h),
             y_hat_luma.w.min(y_hat_chroma.w),
@@ -398,10 +477,11 @@ impl SynthesisSecondary {
         }
         let x = BTensor::cat(&[&y_hat_luma.crop(lh, lw)?, y_hat_chroma])?;
         let info = self.combine.forward(eng, &x)?;
+        stop.check()?;
         let x = BTensor::cat(&[&info, y_hat_chroma])?;
         let mut x = match &self.tail {
-            SecondaryTail::Light(m) => m.forward(eng, &x, h, w)?,
-            SecondaryTail::Hop(m) => m.forward(eng, &x, h, w)?,
+            SecondaryTail::Light(m) => m.forward(eng, &x, h, w, stop)?,
+            SecondaryTail::Hop(m) => m.forward(eng, &x, h, w, stop)?,
         };
         denormalize(&mut x);
         Ok(x)

@@ -54,6 +54,17 @@ pub fn decode_entropy_stage(
     hdr: &PictureHeader,
     models: [&CommonModel; 2],
 ) -> Result<[entropy::ComponentEntropy; 2]> {
+    decode_entropy_stage_with(tables, cs, hdr, models, &enough::Unstoppable)
+}
+
+/// [`decode_entropy_stage`] that checks `stop` per component, region and channel chunk.
+pub fn decode_entropy_stage_with(
+    tables: &AnsTables,
+    cs: &Codestream<'_>,
+    hdr: &PictureHeader,
+    models: [&CommonModel; 2],
+    stop: &dyn enough::Stop,
+) -> Result<[entropy::ComponentEntropy; 2]> {
     let soz = cs
         .find(Marker::Soz)
         .ok_or(Error::InvalidData("no z substream"))?;
@@ -78,6 +89,7 @@ pub fn decode_entropy_stage(
             models[ccs],
             &mut z_dec,
             &regions,
+            stop,
         )?);
     }
     let [y, uv] = <[entropy::ComponentEntropy; 2]>::try_from(out)

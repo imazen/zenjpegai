@@ -120,6 +120,17 @@ impl ContextModel {
         residual: &Tensor<f32>,
         psi: &BTensor,
     ) -> Result<Tensor<f32>> {
+        self.decompress_with(eng, residual, psi, &enough::Unstoppable)
+    }
+
+    /// [`Self::decompress`] that checks `stop` before each of the four stages.
+    pub fn decompress_with(
+        &self,
+        eng: &Engine,
+        residual: &Tensor<f32>,
+        psi: &BTensor,
+        stop: &dyn enough::Stop,
+    ) -> Result<Tensor<f32>> {
         let (c, h, w) = (self.chs, residual.h, residual.w);
         let (hh, hw) = (h.div_ceil(2), w.div_ceil(2));
         if residual.c != c || psi.c != 4 * c || psi.h != hh || psi.w != hw {
@@ -132,6 +143,7 @@ impl ContextModel {
         // Reconstructed stages so far, concatenated along channels (the spatial context).
         let mut context: Option<BTensor> = None;
         for (s, phase) in self.phases.iter().enumerate() {
+            stop.check()?;
             let psi_s = psi.slice_channels(s * c, (s + 1) * c)?;
             let mean = match (&phase.context, &context) {
                 (Some((pointwise, grouped)), Some(ctx)) => {

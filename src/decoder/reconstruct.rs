@@ -4,6 +4,8 @@
 //! context / synthesis steps of `common_modules.py`, including region partitioning (dependent and
 //! independent) and synthesis tiling.
 
+use enough::Stop;
+
 use super::entropy::ComponentEntropy;
 use crate::error::{Error, Result};
 use crate::header::{PictureHeader, ToolHeader};
@@ -69,6 +71,18 @@ pub fn reconstruct_latent(
     model: &CommonModel,
     e: &ComponentEntropy,
 ) -> Result<Latent> {
+    reconstruct_latent_with(eng, hdr, ccs, model, e, &enough::Unstoppable)
+}
+
+/// [`reconstruct_latent`] that checks `stop` per region and between network layers.
+pub fn reconstruct_latent_with(
+    eng: &Engine,
+    hdr: &PictureHeader,
+    ccs: usize,
+    model: &CommonModel,
+    e: &ComponentEntropy,
+    stop: &dyn Stop,
+) -> Result<Latent> {
     let (h, w) = (e.residual.h, e.residual.w);
     let chs = e.residual.c;
     let independent = hdr.regions.is_some_and(|r| r.independent);
@@ -84,6 +98,7 @@ pub fn reconstruct_latent(
     let mut psi = Tensor::<f32>::zeros(4 * chs, h.div_ceil(2), w.div_ceil(2))?;
     let mut psi_single = None;
     for r in 0..n {
+        stop.check()?;
         let (it, zt) = (img.extended[r], zg.extended[r]);
         // The chroma hyper-decoder is told the half-size plane.
         let (th, tw, divider) = if ccs == 0 {
@@ -104,7 +119,9 @@ pub fn reconstruct_latent(
             z_tile = e.z_hat.window(zt.x, zt.y, zt.width, zt.height)?;
             &z_tile
         };
-        let t = model.hyper_decoder.forward(eng, z, out_h, out_w)?;
+        let t = model
+            .hyper_decoder
+            .forward_with(eng, z, out_h, out_w, stop)?;
         assign(&mut psi, pg.extended[r], &t.to_planar()?, (0, 0));
         if n == 1 && t.h == psi.h && t.w == psi.w {
             psi_single = Some(t);
@@ -114,6 +131,7 @@ pub fn reconstruct_latent(
     // 2. y_hat per region, merged.
     let mut y_hat = Tensor::<f32>::zeros(chs, h, w)?;
     for r in 0..n {
+        stop.check()?;
         let (lt, pt, it) = (lg.extended[r], pg.extended[r], img.extended[r]);
         let (res_tile, psi_tile);
         let (res, psi_b) = match psi_single.take() {
@@ -125,7 +143,7 @@ pub fn reconstruct_latent(
             }
         };
         let y = match &model.context {
-            Some(ctx) => ctx.decompress(eng, res, &psi_b)?,
+            Some(ctx) => ctx.decompress_with(eng, res, &psi_b, stop)?,
             None => {
                 let mut y = upshuffle_psi(&psi_b, res.h, res.w)?;
                 for (o, &r) in y.data.iter_mut().zip(&res.data) {
@@ -193,6 +211,18 @@ pub fn synthesize(
     chroma: &SynthesisSecondary,
     y_hat: [&Tensor<f32>; 2],
 ) -> Result<Planes> {
+    synthesize_with(eng, hdr, luma, chroma, y_hat, &enough::Unstoppable)
+}
+
+/// [`synthesize`] that checks `stop` per tile and between network layers.
+pub fn synthesize_with(
+    eng: &Engine,
+    hdr: &PictureHeader,
+    luma: &SynthesisPrimary,
+    chroma: &SynthesisSecondary,
+    y_hat: [&Tensor<f32>; 2],
+    stop: &dyn Stop,
+) -> Result<Planes> {
     let (h, w) = (hdr.height as usize, hdr.width as usize);
     let out_h = h - hdr.diff_display_height as usize;
     let out_w = w - hdr.diff_display_width as usize;
@@ -225,6 +255,7 @@ pub fn synthesize(
     let mut rec_y = Tensor::<f32>::zeros(1, h, w)?;
     let mut rec_uv = Tensor::<f32>::zeros(2, h, w)?;
     for tile in &tiles {
+        stop.check()?;
         let (img, lat) = (tile.image, tile.latent);
         let whole = lat.width == y_hat[0].w && lat.height == y_hat[0].h;
         let (by, buv) = if whole {
@@ -239,8 +270,8 @@ pub fn synthesize(
                 BTensor::from_planar(&win(y_hat[1])?, v)?,
             )
         };
-        let ty = luma.forward(eng, &by, img.height, img.width)?;
-        let tuv = chroma.forward(eng, &by, &buv, img.height, img.width)?;
+        let ty = luma.forward_with(eng, &by, img.height, img.width, stop)?;
+        let tuv = chroma.forward_with(eng, &by, &buv, img.height, img.width, stop)?;
         for (dst, src) in [(&mut rec_y, &ty), (&mut rec_uv, &tuv)] {
             let (ox, oy) = tile.core_offset;
             for c in 0..dst.c {

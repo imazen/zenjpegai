@@ -23,6 +23,8 @@ pub enum Error {
     InvalidArgument(&'static str),
     /// A resource limit set by the caller would be exceeded.
     LimitExceeded(&'static str),
+    /// The caller's [`enough::Stop`] token asked the operation to stop (cancelled or timed out).
+    Cancelled(enough::StopReason),
 }
 
 impl fmt::Display for Error {
@@ -35,11 +37,18 @@ impl fmt::Display for Error {
             Error::Model(s) => write!(f, "model error: {s}"),
             Error::InvalidArgument(s) => write!(f, "invalid argument: {s}"),
             Error::LimitExceeded(s) => write!(f, "limit exceeded: {s}"),
+            Error::Cancelled(r) => write!(f, "stopped: {r}"),
         }
     }
 }
 
 impl core::error::Error for Error {}
+
+impl From<enough::StopReason> for Error {
+    fn from(r: enough::StopReason) -> Self {
+        Error::Cancelled(r)
+    }
+}
 
 /// Internal result alias (untraced).
 pub(crate) type Result<T> = core::result::Result<T, Error>;

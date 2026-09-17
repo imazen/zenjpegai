@@ -28,7 +28,7 @@ reference-tests = []
 # AVX-512 kernels (archmage v4 tier).
 avx512 = ["archmage/avx512", "magetypes/avx512"]
 # The `zenjpegai` command line tool (PNG output through zenpng).
-cli = ["std", "dep:zenpng", "dep:imgref", "dep:rgb", "dep:enough"]
+cli = ["std", "dep:zenpng", "dep:imgref", "dep:rgb"]
 
 [dependencies]
 archmage = { version = "0.9.29", features = ["macros"] }
@@ -39,7 +39,7 @@ whereat = { version = "0.1.5", default-features = false }
 zenpng = { version = "0.1.4", optional = true }
 imgref = { version = "1.12.3", optional = true }
 rgb = { version = "0.8.53", optional = true }
-enough = { version = "0.4.4", optional = true }
+enough = { version = "0.4.4", default-features = false }
 
 [[bin]]
 name = "zenjpegai"

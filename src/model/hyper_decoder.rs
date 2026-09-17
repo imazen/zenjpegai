@@ -51,6 +51,18 @@ impl HyperDecoder {
         out_h: usize,
         out_w: usize,
     ) -> Result<BTensor> {
+        self.forward_with(eng, z_hat, out_h, out_w, &enough::Unstoppable)
+    }
+
+    /// [`Self::forward`] that checks `stop` between layers.
+    pub fn forward_with(
+        &self,
+        eng: &Engine,
+        z_hat: &Tensor<i8>,
+        out_h: usize,
+        out_w: usize,
+        stop: &dyn enough::Stop,
+    ) -> Result<BTensor> {
         let x = Tensor::from_vec(
             z_hat.c,
             z_hat.h,
@@ -59,10 +71,13 @@ impl HyperDecoder {
         )?;
         let x = BTensor::from_planar(&x, eng.tier.block())?;
         let x = self.conv1.forward(eng, &x)?;
+        stop.check()?;
         let mut x = self.conv2.forward(eng, &x)?.crop(out_h, out_w)?;
         fast::relu6(&mut x);
+        stop.check()?;
         let mut x = self.conv3.forward(eng, &x)?;
         fast::relu6(&mut x);
+        stop.check()?;
         self.conv4.forward(eng, &x)
     }
 }

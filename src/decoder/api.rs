@@ -6,8 +6,8 @@ use std::sync::{Arc, Mutex};
 use whereat::{At, at};
 
 use super::output::{RgbImage, quantize, to_rgb_planes};
-use super::reconstruct::{post_process_latent, reconstruct_latent, synthesize};
-use super::{Headers, decode_entropy_stage, read_headers};
+use super::reconstruct::{post_process_latent, reconstruct_latent_with, synthesize_with};
+use super::{Headers, decode_entropy_stage_with, read_headers};
 use crate::container::Codestream;
 use crate::error::Error;
 use crate::filters::{self, FilterContext};
@@ -108,7 +108,20 @@ impl Decoder {
 
     /// Decode a codestream to interleaved RGB at the stream's bit depth.
     pub fn decode(&self, stream: &[u8]) -> Result<RgbImage, At<Error>> {
-        self.decode_inner(stream)
+        self.decode_inner(stream, &enough::Unstoppable)
+    }
+
+    /// [`Decoder::decode`] with cooperative cancellation.
+    ///
+    /// `stop` is checked per region and channel chunk in the entropy stage, per region, network
+    /// layer and synthesis tile afterwards, and between the output stages; never per sample.
+    /// A stop request surfaces as [`Error::Cancelled`] and leaves the decoder reusable.
+    pub fn decode_with(
+        &self,
+        stream: &[u8],
+        stop: &dyn enough::Stop,
+    ) -> Result<RgbImage, At<Error>> {
+        self.decode_inner(stream, stop)
     }
 
     /// Free the feature-map buffers kept for reuse between decodes.
@@ -120,7 +133,8 @@ impl Decoder {
         crate::nn::fast::release_buffers();
     }
 
-    fn decode_inner(&self, stream: &[u8]) -> Result<RgbImage, At<Error>> {
+    fn decode_inner(&self, stream: &[u8], stop: &dyn enough::Stop) -> Result<RgbImage, At<Error>> {
+        stop.check().map_err(|r| at!(Error::from(r)))?;
         let cs = Codestream::parse(stream).map_err(|e| at!(e))?;
         let headers = read_headers(&cs).map_err(|e| at!(e))?;
         let hdr = &headers.picture;
@@ -150,19 +164,33 @@ impl Decoder {
             .map_err(|e| at!(e))?;
         let eng = &self.engine;
 
-        let ent = decode_entropy_stage(&self.tables, &cs, hdr, [&set.common[0], &set.common[1]])
-            .map_err(|e| at!(e))?;
+        let ent = decode_entropy_stage_with(
+            &self.tables,
+            &cs,
+            hdr,
+            [&set.common[0], &set.common[1]],
+            stop,
+        )
+        .map_err(|e| at!(e))?;
         let [ent_y, ent_uv] = ent;
-        let mut ly = reconstruct_latent(eng, hdr, 0, &set.common[0], &ent_y).map_err(|e| at!(e))?;
+        let mut ly = reconstruct_latent_with(eng, hdr, 0, &set.common[0], &ent_y, stop)
+            .map_err(|e| at!(e))?;
         post_process_latent(hdr, &headers.tools, 0, &ent_y, &mut ly).map_err(|e| at!(e))?;
         // The LEF reads the luma scale map; everything else of the entropy stage can go.
         let luma_scale_log = ent_y.scale_log;
-        let mut luv =
-            reconstruct_latent(eng, hdr, 1, &set.common[1], &ent_uv).map_err(|e| at!(e))?;
+        let mut luv = reconstruct_latent_with(eng, hdr, 1, &set.common[1], &ent_uv, stop)
+            .map_err(|e| at!(e))?;
         post_process_latent(hdr, &headers.tools, 1, &ent_uv, &mut luv).map_err(|e| at!(e))?;
         drop(ent_uv);
-        let planes = synthesize(eng, hdr, &set.luma, &set.chroma, [&ly.y_hat, &luv.y_hat])
-            .map_err(|e| at!(e))?;
+        let planes = synthesize_with(
+            eng,
+            hdr,
+            &set.luma,
+            &set.chroma,
+            [&ly.y_hat, &luv.y_hat],
+            stop,
+        )
+        .map_err(|e| at!(e))?;
         drop((ly, luv));
         let planes = if headers.tools.any_post_filter() {
             let ctx = FilterContext {
@@ -176,6 +204,7 @@ impl Decoder {
         } else {
             planes
         };
+        stop.check().map_err(|r| at!(Error::from(r)))?;
         let rgb = to_rgb_planes(hdr, &planes).map_err(|e| at!(e))?;
         drop(planes);
         quantize(&rgb, hdr.bit_depth).map_err(|e| at!(e))

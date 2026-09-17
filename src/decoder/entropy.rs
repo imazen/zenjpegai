@@ -83,7 +83,9 @@ pub fn decode_component(
     model: &CommonModel,
     z_dec: &mut AnsDecoder<'_>,
     region_payloads: &[Option<&[u8]>],
+    stop: &dyn enough::Stop,
 ) -> Result<ComponentEntropy> {
+    stop.check()?;
     if hdr.quality_map.is_some() {
         return Err(Error::Unsupported("quality map"));
     }
@@ -94,6 +96,7 @@ pub fn decode_component(
     let (hz, wz) = hdr.hyper_latent_size(ccs);
 
     let z_hat = decode_z(z_dec, model, hz as usize, wz as usize)?;
+    stop.check()?;
 
     // _decode_scale: hyper-scale decoder, then the quantiser's log-domain additions (gain unit).
     let gain = GainUnit::new(&model.gain_vector_log, hdr.beta_displacement_log[ccs]);
@@ -148,6 +151,7 @@ pub fn decode_component(
         let mut dec = tables.decoder(&threads)?;
         let step = channel_step(rh, rw, num_chs, num_threads);
         for c0 in (0..num_chs).step_by(step) {
+            stop.check()?;
             let c1 = (c0 + step).min(num_chs);
             let n = (c1 - c0) * rh * rw;
             sigma.clear();
@@ -180,6 +184,7 @@ pub fn decode_component(
         }
     }
 
+    stop.check()?;
     let mut residual = Tensor::<f32>::zeros(chs, lh, lw)?;
     // dequantize_resi runs the tools in reverse: RVS first, then the gain unit.
     for ch in 0..chs {
