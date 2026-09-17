@@ -18,3 +18,9 @@ test-ref:
 
 build-release:
     ~/work/zen/scripts/run-heavy -- cargo build --release 2>&1 | tee ~/tmp/zenjpegai-build.log
+
+# GPU backend tests: need an adapter, the checkpoints and the reference vectors (hard failures
+# otherwise). Pick the adapter with ZENJPEGAI_GPU_ADAPTER=<name substring>; software rasterisers
+# (llvmpipe) are refused unless ZENJPEGAI_GPU_ALLOW_SOFTWARE=1.
+gpu-test:
+    ZENJPEGAI_REF={{ref}} cargo test -p zenjpegai-gpu --features gpu-tests -- --test-threads 1 --nocapture 2>&1 | tee ~/tmp/zenjpegai-gpu-test.log

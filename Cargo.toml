@@ -16,6 +16,9 @@ autobenches = false
 
 include = ["/src", "LICENSE-AGPL3", "LICENSE-COMMERCIAL", "upstream-notices", "README.md", "CHANGELOG.md"]
 
+[workspace]
+members = [".", "gpu"]
+
 [features]
 default = ["std", "parallel", "avx512"]
 # File IO helpers (checkpoint loading from disk) and std::error::Error impls.

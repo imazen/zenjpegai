@@ -1,0 +1,26 @@
+[package]
+name = "zenjpegai-gpu"
+version = "0.0.1"
+edition = "2024"
+license = "AGPL-3.0-only OR LicenseRef-Imazen-Commercial"
+rust-version = "1.89"
+description = "WebGPU (wgpu) synthesis backend for the zenjpegai JPEG AI decoder"
+repository = "https://github.com/imazen/zenjpegai"
+publish = false
+
+[features]
+default = ["parallel"]
+# Threaded CPU stages (entropy threads, hyper-decoder, context model) through zenjpegai/parallel.
+parallel = ["zenjpegai/parallel"]
+# Tests that need a GPU adapter, the upstream checkpoints and the reference vectors. With this
+# feature on, a missing adapter or missing data is a hard failure. Run through `just gpu-test`.
+gpu-tests = []
+
+[dependencies]
+zenjpegai = { path = "..", default-features = false, features = ["std"] }
+wgpu = { version = "30.0.1", default-features = false, features = ["std", "wgsl", "vulkan", "metal", "dx12", "webgpu"] }
+bytemuck = { version = "1.25.2", features = ["derive"] }
+futures-channel = { version = "0.3.34", default-features = false, features = ["alloc"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+pollster = "1.0.1"
