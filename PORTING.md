@@ -38,6 +38,8 @@ against reference-produced data passes. "stub" and "partial" mean what they say.
 | `decoder::output` | `common/image.py::to_RGB_/clip_data_`, `colorspace.py` (BT.709), `image_io.py::write_png` quantisation | partial: **4:4:4, BT.709 → RGB only.** Missing: 4:2:0 / 4:2:2 chroma upsampling (bicubic), custom colour transform, YUV output | `tests/decode_ref.rs`: 8-bit output differs from the reference decoder in 49..73 of 1,491,840 samples, each by 1 |
 | `filters::efe_linear` | `filters/EFElinear/EFElinear.py`: `decompress`, `SplitApply`, `LumaAidedUpsampler_apply`, `pixelUnshuffleGeneral`, `pixelShuffleGeneral`, `deinteger` | ported for every chroma format the reference can produce: 4:4:4 source coded 4:4:4 / 4:2:2 / 4:2:0 (the latter two with the 4x4 DCT-IF kernels and four coded phases, incl. `DCTIF_only` = no coded filters), 4:2:2 and 4:2:0 sources; filter lengths 1..4, all 8 region splits, odd picture sizes, the second ("up-sampled") picture for the non-linear filter's switch. **Rejected with `Error::Unsupported` (no oracle, the reference fails on them too):** a plane signalled as not filtered (`best_cand_idx = 0`) in a picture coded at the source's chroma resolution; vertical-only subsampling (`*_ver = 2, *_hor = 1`); 4:2:2 source coded 4:2:0. Note that the *decoder* around it still only outputs 4:4:4-coded 4:4:4 pictures (`decoder::output`, and the bicubic `to_format_` between synthesis and filters is not ported), so the subsampled branches are verified in isolation only | `tests/filters_efe_ref.rs`: 17 reference streams, filter run on the reference's own input planes, output within 2e-4 (0..255) of the reference's, measured max 9.2e-5; identical bits on every tier, threaded or not. `tests/decode_ref.rs`: 7 EFE streams through the whole decoder |
 | `filters::efe_nonlinear` | `filters/EFEnonlinear/EFEnonlinear.py`: `decompress`, `LumaAidedAdaptiveNonlinearFilter_apply`, `apply_OnoffSwitch`, `downsample`, `deinteger` | ported: per-tile two-layer 1x1 network (1 and 4 tiles checked), U-only / V-only / both, on/off masks with values 0, 1, 2 and block sizes 112 / 96, 4:4:4 / 4:2:2 / 4:2:0 sources, odd sizes. Same `Unsupported` formats as EFE linear | `tests/filters_efe_ref.rs`: **bit-identical** to the reference on all 16 streams that enable it (max abs error 0); `tests/decode_ref.rs` as above |
+| `filters::lef` | `filters/LEF/LEFfilter.py` (`decompress`, `adptive_sharpness`), nearest up-sampling as `torch.nn.functional.interpolate` does it (`floor(dst * (in / out))` in f32) | ported: luma only, so every chroma format takes the same path. **Unverified: bit depths other than 8** (the range is taken as `2^bit_depth - 1`; the decoder rejects 10-bit streams before it gets here) | `tests/filters_lef_icci_ref.rs`: fed the reference's own input plane, the output is **bit-identical** to the reference's on 4 streams (`model_id` 1 and 2: two of the four constant rows are exercised), on every tier, threaded or not. `tests/decode_ref.rs::img30_base_lef_bpp050`: whole decode |
+| `filters::icci` + `model::icci` | `filters/eICCI/{icci_filter.py, icci_models.py, model_idxes.py, params.py}`, `base_layers/conv_layers.py::ResidualBlock_BN_RectKernel`, `tiling.py::_adjust_boundary_tiles`, short lists from `cfg/pipeline.json` | ported for 4:4:4: per-tile network selection (long and short lists, all three operating points' banks), the filter's own overlapping tiling with the 176-sample boundary adjustment, two-level Haar transform, both trunks on `nn::fast` (batch norm and residual scales folded into the convolutions), networks cached in `Decoder`. **Missing: 4:2:0 / 4:2:2 (`Unsupported`; the reference encoder never enables eICCI there, so no oracle), tiling combined with a non-displayed border (`Unsupported`, unverified), HOP bank and long-list indices (code path shared, no oracle stream selects them), bit depths other than 8** | `tests/filters_lef_icci_ref.rs`: fed the reference's input planes, output within 1.1e-4 (0..255) on 4 streams incl. a 2096x1400 one with six filter tiles; bit-identical across tiers. `tests/decode_ref.rs`: `img30_base_eicci_bpp050`, `img01_base_eiccitiles_lef_bpp050` |
 
 ## Accuracy of the float path (measured, 560x888 test image 00030, upstream b9e573f, torch 1.10.2 CPU)
 
@@ -53,6 +55,14 @@ against reference-produced data passes. "stub" and "partial" mean what they say.
 | base / simple profile with LSBS, RVS, GRFS in six combinations | < 5e-4 | < 5e-4 | < 3e-3 | 47 .. 57, all by 1 |
 | base profile + EFE linear (stock encoder), and 4 streams with EFE linear + non-linear forced to filter lengths 2..4 / every region split | < 5e-4 | < 5e-4 | < 3e-3 (before filters) | 47 .. 66, all by 1 (the two filters add at most 9.2e-5 of their own) |
 | 2096x1400 image 00001 with EFE linear + non-linear (4 tiles); 277x201 crop (odd size) | < 5e-4 | < 5e-4 | < 3e-3 | 384 of 8,803,200; 5 of 167,031, all by 1 |
+| base profile + LEF, 0.50 bpp | < 5e-4 | < 5e-4 | < 3e-3 | 58, all by 1 |
+| base profile + eICCI (U and V filtered), 0.50 bpp | < 5e-4 | < 5e-4 | < 3e-3 | 53, all by 1 |
+| 2096x1400, base profile + eICCI in six filter tiles (Y, U, V filtered) + LEF, 0.50 bpp | < 5e-4 | < 5e-4 | < 3e-3 | 427 of 8,803,200, all by 1 |
+
+Post-filters on their own (input = the reference's planes entering the filter, 0..255 scale):
+LEF 0 (bit-identical) on 4 streams; eICCI max abs error Y 9.2e-5, U 9.2e-5, V 1.1e-4 over 3
+filtering streams (asserted bound 5e-4). The `planes` column above is the synthesis output
+before the filters.
 
 Entries written `< x` are the bounds `tests/decode_ref.rs` asserts, not individually recorded
 maxima; the other numbers were read off `examples/dbg_recon`.
@@ -60,8 +70,7 @@ maxima; the other numbers were read off `examples/dbg_recon`.
 The differences come from convolution summation order (PyTorch/oneDNN vs this crate's fixed
 order); they land on 8-bit rounding boundaries in about 0.005 % of samples.
 
-Not started (decoder): two of the four post-filters (eICCI, LEF: in progress; see the table for
-EFE linear / non-linear),
+Not started (decoder): eICCI on chroma-subsampled pictures,
 chroma-subsampled and 10-bit output, custom colour transform, UDI, progressive (`num_decode_chs`)
 decode. Not started (everything else): the whole encoder
 above the entropy coder (analysis transforms, hyper-encoder, quantisation/RDO tools, bitrate
@@ -127,12 +136,48 @@ defect patched at runtime (`scripts/ref_vectors/dump_decode.py --contiguous-mask
 `<vector>/fixed_decoder/`). With the patch its residual equals the encoder's bit for bit on all
 three region streams (checked), so its psi / y_hat / reconstruction are what the encoder intended.
 
+## Reference behaviour of the post-filters worth knowing
+
+- **eICCI filters its tiles in place.** The reference *decoder* (`EfficientICCIFilter.decompress`)
+  cuts each tile out of the picture it is writing filtered cores into, so a tile's overlap margin
+  already holds its left / upper neighbours' output. The reference *encoder's* model search
+  (`compress`) evaluates every tile on the unfiltered picture instead; its reconstruction is
+  nevertheless produced by calling `decompress`, so encoder and decoder agree on the picture.
+  The effect is large (0.87 on a 0..255 scale on the tiled test stream when the margin is read
+  unfiltered); this port does what the decoder does. Raster order is therefore normative.
+- **eICCI tiles: `_adjust_boundary_tiles` breaks on small layouts.** With one tile column (or
+  row) narrower than 176 it indexes `[-2]` onto the same tile and produces a negative position;
+  with tiles not larger than 176 + overlap the neighbour becomes empty. The port rejects both as
+  `InvalidData` instead of reproducing the accident.
+- **eICCI always rescales.** Even with no plane selected in any tile the picture goes through
+  `/ 255`, clamp to `[0, 1]`, `* 255`. The port does the same (checked: `img30_base_on_bpp100`).
+- **eICCI tile layout vs picture size.** The layout is computed from the coded picture size
+  (`get_original_img_shape`), the filter runs on the displayed picture (cropped by
+  `diff_display_img_*`). With one tile this is harmless (Python slicing clamps); with tiling on
+  it relies on slices clamping silently. The port returns `Unsupported` for that combination.
+- **eICCI on subsampled pictures.** `compress` switches the filter off when `s_ver != 1 or
+  s_hor != 1`, while `auto_enableflag_detected_value` tests `and`; the decoder would up-sample,
+  filter and down-sample. No stream of the reference encoder exercises that, so the port
+  refuses it.
+- **LEF clamps the whole luma plane** to the data range, the unfiltered one-sample border
+  included; chroma is passed through unclamped.
+
 ## Reference constants that are not in the bitstream
 
 - EFE linear: the eight region splits (`cands`, with `0.33` / `0.66` fractions and borders
   rounded to multiples of 32 phase samples by Python's round-half-even), the DCT-IF 4-tap
   kernels, the weight scale (`(code - 32767) / 2^11`). EFE non-linear: 8 luma bins per tile.
   `filters::efe_linear` / `efe_nonlinear` carry copies.
+
+- LEF: the three sigma-index thresholds and sharpening gains per `model_id`
+  (`LEF.recSharpThrList` / `recSharpMagList`, Python literals; `filters::lef::{THRESHOLDS,
+  MAGNITUDES}`), and the 3x3 kernel `[[5,5,5],[5,24,5],[5,5,5]] / 64`.
+- eICCI: the per-operating-point, per-`model_id` short lists (`cfg/pipeline.json`; the Python defaults in
+  `params.py` hold the same numbers but under integer keys, which the string-keyed lookup would miss), the order
+  of the 10 networks of a bank (`ckpt_files`), the use of the BOP bank for SOP, the network
+  shape (`nf = 48`, `nbY = 2`, `nbUV = 4`; `params.py` defaults to `nbUV = 2`), the minimum tile
+  size 176 (`tile_min_size_for_MSSSIM`, an encoder-side MS-SSIM constraint that shapes the
+  decoder's tile layout), and the batch-norm epsilon `1e-5`.
 
 - RVS thresholds / scale lists and LSBS scale lists are per-model configuration
   (`cfg/pipeline.json`, `tools_N`), and the LSBS thresholds are the tool's Python defaults. A

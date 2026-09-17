@@ -116,6 +116,8 @@ fn check(name: &str, linear: bool, nonlinear: bool, expect_alt: bool) {
                 tools: &headers.tools,
                 luma_scale_log: &scale_log,
                 models: &models,
+                op: headers.picture.synthesis_transforms[0],
+                icci_nets: &Default::default(),
             };
             let first = baseline.is_none();
             let mut results = Vec::new();

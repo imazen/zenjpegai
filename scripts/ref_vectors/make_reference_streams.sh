@@ -2,7 +2,7 @@
 # Encode + decode a matrix of configurations with the reference software and dump the decoder's
 # intermediate tensors for the parity tests.
 #
-#   scripts/ref_vectors/make_reference_streams.sh [SET]      SET: smoke (default) | regions | tools | filters | efe | qmap | all
+#   scripts/ref_vectors/make_reference_streams.sh [SET]      SET: smoke (default) | regions | tools | filters | efe | filtertiles | qmap | all
 #
 # Output: $OUT/<name>/{stream.bits,encoder.log,tensors.bin,manifest.txt,decoded.png,stdout.log}
 # with OUT=/mnt/v/output/zenjpegai/reference/vectors. Existing streams are kept (delete the
@@ -184,5 +184,15 @@ if [ "$SET" = efe ] || [ "$SET" = all ]; then
   efe crop277_s422_efe_f3c6_f4c2_nl "$IN/crop_277x201_8bit_422.yuv" 1 0 "--linear 3:6,4:2 --nonlinear" $EFE
   # (a 4:2:2 source coded 4:2:0 is not implemented in the reference encoder.)
   }
+fi
+if [ "$SET" = filtertiles ] || [ "$SET" = all ]; then
+  # eICCI with its own tiling on (upstream's threshold of 2048^2 samples never tiles the test
+  # pictures): 1024 tiles, overlap 48, last column narrower than the filter's 176 minimum, so
+  # `_adjust_boundary_tiles` runs. LEF on top. Needs dump_filters_lef_icci.py afterwards.
+  one img01_base_eiccitiles_lef_bpp050 $IMG01 50 cfg/tools_off.json "$HERE/cfg/eicci_tiles.json" cfg/tools/LEF.json cfg/profiles/base.json
+  for v in img01_base_eiccitiles_lef_bpp050 img30_base_lef_bpp050 img30_base_eicci_bpp050 img30_base_on_bpp025 img30_base_on_bpp100; do
+    [ -f "$OUT/$v/filters_lef_icci/manifest.txt" ] || nice -n 19 python "$HERE/dump_filters_lef_icci.py" \
+        "$OUT/$v/stream.bits" "$OUT/$v/filters_lef_icci" > "$OUT/$v/dump_filters_lef_icci.log" 2>&1
+  done
 fi
 echo "== done ($(date -u +%H:%M:%S))"

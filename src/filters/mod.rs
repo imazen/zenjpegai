@@ -11,8 +11,8 @@
 
 pub mod efe_linear;
 pub mod efe_nonlinear;
-mod icci;
-mod lef;
+pub mod icci;
+pub mod lef;
 
 use super::decoder::reconstruct::Planes;
 use crate::error::Result;
@@ -31,6 +31,10 @@ pub struct FilterContext<'a> {
     pub luma_scale_log: &'a Tensor<i32>,
     /// Source of the eICCI network checkpoints.
     pub models: &'a dyn ModelSource,
+    /// Operating point the picture was synthesised with (selects the eICCI bank and short lists).
+    pub op: crate::header::OperatingPoint,
+    /// Loaded eICCI networks, kept between decodes.
+    pub icci_nets: &'a icci::NetCache,
 }
 
 /// What one filter hands to the next (`[img, upsampled_img]` in the reference).

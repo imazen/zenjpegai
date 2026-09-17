@@ -137,6 +137,12 @@ vectors! { check:
     img01_efe_f2c0_f3c0_nl => "img01_efe_f2c0_f3c0_nl",
     img01_base_off_bpp050 => "img01_base_off_bpp050",
     img01_base_off_threads8_bpp050 => "img01_base_off_threads8_bpp050",
+    // Post-filter streams (the LEF reads the luma scale map; tools_on adds RVS / LSBS).
+    img30_base_lef_bpp050 => "img30_base_lef_bpp050",
+    img30_base_eicci_bpp050 => "img30_base_eicci_bpp050",
+    img01_base_eiccitiles_lef_bpp050 => "img01_base_eiccitiles_lef_bpp050",
+    img30_base_on_bpp025 => "img30_base_on_bpp025",
+    img30_base_on_bpp100 => "img30_base_on_bpp100",
 }
 
 vectors! { check_qmap:

@@ -65,6 +65,8 @@ fn decode(stream: &[u8], eng: &Engine) -> (zenjpegai::header::PictureHeader, Dec
         tools: &headers.tools,
         luma_scale_log: &ent[0].scale_log,
         models: &models,
+        op,
+        icci_nets: &Default::default(),
     };
     let filtered = zenjpegai::filters::apply(&ctx, planes.clone()).unwrap();
     let psi = [ly.psi, luv.psi];
@@ -182,6 +184,13 @@ vectors! {
     img01_base_off_depregions_m1 => "img01_base_off_depregions_m1",
     img01_base_off_indregions_m1 => "img01_base_off_indregions_m1",
     img01_base_off_indregions_threads8_m2 => "img01_base_off_indregions_threads8_m2",
+    // Post-filters: LEF, eICCI.
+    img30_base_lef_bpp050 => "img30_base_lef_bpp050",
+    img30_base_eicci_bpp050 => "img30_base_eicci_bpp050",
+    img01_base_eiccitiles_lef_bpp050 => "img01_base_eiccitiles_lef_bpp050",
+    // Upstream's tools_on: all four post-filters in a row, on top of RVS / GRFS / LSBS.
+    img30_base_on_bpp025 => "img30_base_on_bpp025",
+    img30_base_on_bpp100 => "img30_base_on_bpp100",
 }
 
 /// Every SIMD tier, threaded or not, must decode a real stream to identical bits.

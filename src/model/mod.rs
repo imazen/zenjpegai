@@ -4,6 +4,7 @@ mod attention;
 pub mod common;
 pub mod hsd;
 pub mod hyper_decoder;
+pub mod icci;
 pub(crate) mod load;
 pub mod mcm;
 pub mod synthesis;

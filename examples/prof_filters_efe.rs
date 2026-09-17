@@ -58,6 +58,8 @@ fn main() {
             tools: &headers.tools,
             luma_scale_log: &scale_log,
             models: &models,
+            op: headers.picture.synthesis_transforms[0],
+            icci_nets: &Default::default(),
         };
         if let (Some(h), Some(input)) = (
             &headers.tools.efe_linear,

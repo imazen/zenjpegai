@@ -35,6 +35,7 @@ pub struct Decoder {
     tables: AnsTables,
     operating_point: Option<OperatingPoint>,
     cache: Mutex<HashMap<(usize, OperatingPoint), Arc<ModelSet>>>,
+    icci_nets: filters::icci::NetCache,
 }
 
 impl Drop for Decoder {
@@ -62,6 +63,7 @@ impl Decoder {
             tables: AnsTables::new(),
             operating_point: None,
             cache: Mutex::new(HashMap::new()),
+            icci_nets: Default::default(),
         }
     }
 
@@ -199,6 +201,8 @@ impl Decoder {
                 tools: &headers.tools,
                 luma_scale_log: &luma_scale_log,
                 models: &*self.models,
+                op,
+                icci_nets: &self.icci_nets,
             };
             filters::apply(&ctx, planes).map_err(|e| at!(e))?
         } else {
