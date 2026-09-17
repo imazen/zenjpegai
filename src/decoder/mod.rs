@@ -21,6 +21,8 @@ pub struct Headers {
     pub picture: PictureHeader,
     pub tools: ToolHeader,
     pub rendering: RenderingInfo,
+    /// User-defined information (UDI substream): opaque bytes, passed through untouched.
+    pub user_data: Option<alloc::vec::Vec<u8>>,
 }
 
 /// Parse and validate the non-entropy-coded substreams.
@@ -44,6 +46,7 @@ pub fn read_headers(cs: &Codestream<'_>) -> Result<Headers> {
         picture,
         tools,
         rendering,
+        user_data: cs.find(Marker::Udi).map(<[u8]>::to_vec),
     })
 }
 

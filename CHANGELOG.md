@@ -6,6 +6,7 @@
 <!-- Breaking changes that will ship together in the next major (or minor for 0.x) release. -->
 
 ### Added
+- UDI (user-defined information) substream exposed as `Headers::user_data`.
 - Progressive decode: `Decoder::max_channels` / `--max-channels` read only a prefix of the latent channels, matching the reference's `num_decode_chs` on three settings.
 - Packed model bundles: `weights::packed` (`ZJM1` checkpoints, `ZJB1` bundles, `PackedBundle` model source, `Recorder`), `zenjpegai pack-models`, and `--models <bundle file>`; a (model, operating point) pair shrinks to 15-29 MB with pixels bit-identical to the `.pth` path. `ModelSource::accessed` + `model::with_checkpoint` (additive).
 - Chroma-subsampled and 10-bit pictures: bicubic chroma up-sampling (bit-identical to PyTorch's kernel), YUV output for YUV sources (`Decoder::decode_picture`, `Picture`, `YuvImage`), 10-bit quantisation, non-displayed border; CLI writes `.yuv` and 16-bit PNG.

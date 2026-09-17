@@ -171,6 +171,18 @@ fn check(name: &str) {
     );
 }
 
+/// The UDI substream is handed back byte for byte.
+#[test]
+fn user_data_is_passed_through() {
+    let dir = vector_dir("img30_base_off_udi_m1");
+    let stream = std::fs::read(dir.join("stream.bits")).unwrap();
+    let payload = std::fs::read(dir.join("../../inputs/udi_payload.bin")).unwrap();
+    let headers = zenjpegai::Decoder::new(ref_root().join("models"))
+        .read_headers(&stream)
+        .unwrap();
+    assert_eq!(headers.user_data.as_deref(), Some(&payload[..]));
+}
+
 /// Progressive decode (`num_decode_chs`): only a prefix of the latent channels is read. The
 /// oracle is the reference decoder run with the same limits (`<vector>/progressive_y*_uv*/`).
 #[test]

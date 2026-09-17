@@ -219,6 +219,9 @@ if [ "$SET" = formats ] || [ "$SET" = all ]; then
   one img30_base_off_c422_bpp050 $IMG30 50 cfg/tools_off.json cfg/profiles/base.json -c_hor_value 2
   # Non-displayed right/bottom border. The bitrate matcher cannot handle it (its loss compares
   # the cropped reconstruction with the uncropped source), hence the fixed model.
+  # User-defined information: opaque bytes in their own substream.
+  printf 'zenjpegai UDI test \000\001\377 payload' > "$IN/udi_payload.bin"
+  one_fixed img30_base_off_udi_m1 $IMG30 1 100 cfg/tools_off.json cfg/profiles/base.json -udi.filepath "$IN/udi_payload.bin"
   one_fixed img30_base_off_display_m1 $IMG30 1 100 cfg/tools_off.json cfg/profiles/base.json -diff_display_img_width 37 -diff_display_img_height 5
 fi
 echo "== done ($(date -u +%H:%M:%S))"
