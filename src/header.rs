@@ -150,6 +150,12 @@ fn ceil_div(a: u32, b: u32) -> u32 {
 }
 
 impl PictureHeader {
+    /// EFE linear's `scale_ver == 2 and scale_hor == 2` (`scale = 3 - c / s`): the coded chroma
+    /// planes have the source's chroma resolution in both directions.
+    pub fn efe_coded_444(&self) -> bool {
+        self.c_ver == self.s_ver && self.c_hor == self.s_hor
+    }
+
     /// Size of component `ccs`'s picture as the core model sees it: the luma size for luma,
     /// half of it (rounded up) for chroma (`SepChannelsSGMMTool.get_processed_img_shape`).
     pub fn component_size(&self, ccs: usize) -> (u32, u32) {
@@ -569,61 +575,480 @@ impl ComponentHeader {
     }
 }
 
+/// Region splits of the EFE linear filter (`EFElinear.cands`): number of sub-filters per
+/// candidate index.
+pub const EFE_LINEAR_SPLITS: [usize; 8] = [1, 2, 2, 3, 3, 4, 6, 6];
+
+/// One `decode_filters()` result of the EFE linear filter: the filters of both chroma planes.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct EfeLinearSet {
+    /// `best_cand_idx - 1` per chroma plane: index into [`EFE_LINEAR_SPLITS`], `None` = plane
+    /// not filtered.
+    pub cand: [Option<u8>; 2],
+    /// Filter side length `fL` per plane (meaningful when `cand` is set).
+    pub filter_len: [u8; 2],
+    /// Offset of the coded weight symbols (`minSymbol`) and their range (`maxSymbol`).
+    pub min_symbol: u16,
+    pub max_symbol: u16,
+    /// Per plane, per split: chroma weights as 16-bit integer codes. `4 * fL * fL` values (the
+    /// four sub-sampling phases), or `fL * fL` when the picture is coded 4:4:4 (one filter
+    /// shared by all phases).
+    pub chroma_weights: [Vec<Vec<u32>>; 2],
+    /// Per plane, per split: luma-aid weights, `fL * fL` integer codes.
+    pub luma_weights: [Vec<Vec<u32>>; 2],
+}
+
+/// EFE linear filter parameters (`EFE_linear_filter_enabled_flag`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct EfeLinearHeader {
+    /// `B1`: chroma plane means in 1/100 units.
+    pub mean: [u16; 2],
+    /// First coded set (`filtersBest2`): used to build the up-sampled picture for the EFE
+    /// non-linear filter.
+    pub upsample_set: EfeLinearSet,
+    /// Second coded set (`filtersBest`): the filter proper.
+    pub set: EfeLinearSet,
+}
+
+/// EFE non-linear filter parameters (`EFE_nonlinear_filter_enabled_flag`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct EfeNonlinearHeader {
+    pub min_symbol: u16,
+    pub max_symbol: u16,
+    /// `bS`, `len_mask_y`, `len_mask_x`: present when at least one mask is.
+    pub mask_geometry: Option<(u16, u16, u16)>,
+    /// `W5[.., .., 0]` / `W5[.., .., 1]`: row-major `len_mask_y * len_mask_x` values in `0..=2`;
+    /// `None` = mask disabled.
+    pub masks: [Option<Vec<u8>>; 2],
+    /// Present when the non-linear filter is on for U or V.
+    pub nonlinear: Option<EfeNonlinearTiles>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct EfeNonlinearTiles {
+    pub tile_width: u16,
+    pub tile_height: u16,
+    /// `minLuma` / `maxLuma`, one per tile.
+    pub luma_min: Vec<u16>,
+    pub luma_max: Vec<u16>,
+    /// `A1` weight codes per plane (`None` = filter off for that plane).
+    pub weights: [Option<Vec<u32>>; 2],
+}
+
+/// eICCI model selection of one filter tile.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct IcciTile {
+    /// `icci_use[0..3]`: filter Y / U / V.
+    pub use_yuv: [bool; 3],
+    /// `icci_use_shortList` (present when any plane is filtered): indices address the per-model
+    /// short list (2 entries) instead of all 10 networks of the operating point.
+    pub short_list: bool,
+    /// `icci_model_signalled_idx[..][Y]` / `[UV]`; meaningful when the planes are filtered.
+    pub index_y: u8,
+    pub index_uv: u8,
+}
+
+/// eICCI parameters (`icci_enable_flag`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct IcciHeader {
+    /// The filter's own tiling (same syntax as synthesis tiling); `None` = one tile.
+    pub tiling: Option<SynthesisTiling>,
+    /// One entry per filter tile, raster order.
+    pub tiles: Vec<IcciTile>,
+}
+
+/// Networks per operating point in the eICCI model bank (the "long list").
+pub const ICCI_MODELS: u32 = 10;
+/// Entries of a per-model eICCI short list.
+pub const ICCI_SHORT_LIST: u32 = 2;
+
+impl IcciHeader {
+    /// Tiles along one axis: `range(0, len - overlap, tile - overlap)`, or `range(0, len, tile)`
+    /// without overlap (`TileManager.setup_tiles_dec`).
+    fn axis_tiles(len: usize, t: SynthesisTiling) -> Result<usize> {
+        let (tile, overlap) = ((t.tile_size as usize).min(len), t.overlap as usize);
+        if tile <= overlap || len <= overlap {
+            return Err(Error::InvalidData(
+                "eICCI: tile not larger than its overlap",
+            ));
+        }
+        Ok((len - overlap).div_ceil(tile - overlap))
+    }
+
+    fn parse(r: &mut BitReader<'_>, pih: &PictureHeader) -> Result<Self> {
+        let tiling = if r.read_bit()? {
+            let tile_size = r.read_bits(8)? * 16;
+            let overlap = r.read_bits(5)? * 16;
+            if tile_size == 0 {
+                return Err(Error::InvalidData("eICCI: tile size is zero"));
+            }
+            Some(SynthesisTiling { tile_size, overlap })
+        } else {
+            None
+        };
+        let count = match tiling {
+            Some(t) => {
+                Self::axis_tiles(pih.height as usize, t)? * Self::axis_tiles(pih.width as usize, t)?
+            }
+            None => 1,
+        };
+        if count.saturating_mul(3) > r.bits_left() {
+            return Err(Error::UnexpectedEof);
+        }
+        let mut tiles = Vec::with_capacity(count);
+        for _ in 0..count {
+            let mut t = IcciTile {
+                use_yuv: [r.read_bit()?, r.read_bit()?, r.read_bit()?],
+                ..Default::default()
+            };
+            if t.use_yuv.iter().any(|&u| u) {
+                t.short_list = r.read_bit()?;
+                let count = if t.short_list {
+                    ICCI_SHORT_LIST
+                } else {
+                    ICCI_MODELS
+                };
+                for (used, idx) in [
+                    (t.use_yuv[0], &mut t.index_y),
+                    (t.use_yuv[1] || t.use_yuv[2], &mut t.index_uv),
+                ] {
+                    if used {
+                        let v = r.read_bounded(count)?;
+                        if v >= count {
+                            return Err(Error::InvalidData("eICCI: model index out of range"));
+                        }
+                        *idx = v as u8;
+                    }
+                }
+            }
+            tiles.push(t);
+        }
+        Ok(Self { tiling, tiles })
+    }
+
+    fn write(&self, w: &mut BitWriter, pih: &PictureHeader) -> Result<()> {
+        w.write_bit(self.tiling.is_some());
+        let mut count = 1;
+        if let Some(t) = self.tiling {
+            if t.tile_size % 16 != 0
+                || t.overlap % 16 != 0
+                || t.tile_size == 0
+                || t.tile_size / 16 > 255
+                || t.overlap / 16 > 31
+            {
+                return Err(Error::InvalidArgument("eICCI: tile size/overlap"));
+            }
+            w.write_bits(t.tile_size / 16, 8);
+            w.write_bits(t.overlap / 16, 5);
+            count = Self::axis_tiles(pih.height as usize, t)?
+                * Self::axis_tiles(pih.width as usize, t)?;
+        }
+        if self.tiles.len() != count {
+            return Err(Error::InvalidArgument(
+                "eICCI: tile count does not match the tiling",
+            ));
+        }
+        for t in &self.tiles {
+            for u in t.use_yuv {
+                w.write_bit(u);
+            }
+            if t.use_yuv.iter().any(|&u| u) {
+                w.write_bit(t.short_list);
+                let count = if t.short_list {
+                    ICCI_SHORT_LIST
+                } else {
+                    ICCI_MODELS
+                };
+                for (used, idx) in [
+                    (t.use_yuv[0], t.index_y),
+                    (t.use_yuv[1] || t.use_yuv[2], t.index_uv),
+                ] {
+                    if used {
+                        if idx as u32 >= count {
+                            return Err(Error::InvalidArgument("eICCI: model index out of range"));
+                        }
+                        w.write_bounded(idx as u32, count);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Decoded tool header. Absent substream == everything off.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ToolHeader {
-    /// Latent-space bias shift per component.
+    /// Latent scaling before synthesis, per component.
     pub lsbs_enabled: [bool; 2],
-    pub efe_linear_enabled: bool,
-    pub icci_enabled: bool,
-    pub efe_nonlinear_enabled: bool,
-    pub lef_enabled: bool,
+    pub efe_linear: Option<EfeLinearHeader>,
+    pub icci: Option<IcciHeader>,
+    pub efe_nonlinear: Option<EfeNonlinearHeader>,
+    /// `LEF_chIdx`: the latent channel whose scale map steers the LEF.
+    pub lef_channel: Option<u8>,
+}
+
+fn read_symbols(r: &mut BitReader<'_>, n: usize, max_symbol: u32) -> Result<Vec<u32>> {
+    // Refuse counts the payload cannot hold before allocating for them.
+    if n.saturating_mul(crate::bitio::bits_for_max(max_symbol) as usize) > r.bits_left() {
+        return Err(Error::UnexpectedEof);
+    }
+    (0..n).map(|_| r.read_bounded(max_symbol)).collect()
+}
+
+impl EfeLinearSet {
+    fn parse(r: &mut BitReader<'_>, coded_444: bool) -> Result<Self> {
+        let mut set = EfeLinearSet::default();
+        for c in &mut set.cand {
+            *c = (r.read_bounded(15)? as u8).checked_sub(1);
+        }
+        for p in 0..2 {
+            if let Some(c) = set.cand[p] {
+                if c as usize >= EFE_LINEAR_SPLITS.len() {
+                    return Err(Error::InvalidData("EFE linear: best_cand_idx out of range"));
+                }
+                set.filter_len[p] = r.read_bounded(9)? as u8;
+                if !(1..=4).contains(&set.filter_len[p]) {
+                    return Err(Error::InvalidData("EFE linear: filter length out of range"));
+                }
+            }
+        }
+        set.min_symbol = r.read_bounded(u16::MAX as u32)? as u16;
+        set.max_symbol = r.read_bounded(u16::MAX as u32)? as u16;
+        for p in 0..2 {
+            let Some(c) = set.cand[p] else { continue };
+            let taps = set.filter_len[p] as usize * set.filter_len[p] as usize;
+            let phases = if coded_444 { 1 } else { 4 };
+            let splits = EFE_LINEAR_SPLITS[c as usize];
+            for _ in 0..splits {
+                let w = read_symbols(r, phases * taps, set.max_symbol as u32)?;
+                set.chroma_weights[p].push(w);
+            }
+            for _ in 0..splits {
+                let w = read_symbols(r, taps, set.max_symbol as u32)?;
+                set.luma_weights[p].push(w);
+            }
+        }
+        Ok(set)
+    }
+
+    fn write(&self, w: &mut BitWriter, coded_444: bool) -> Result<()> {
+        for c in self.cand {
+            w.write_bounded(c.map_or(0, |c| c as u32 + 1), 15);
+        }
+        for p in 0..2 {
+            if self.cand[p].is_some() {
+                w.write_bounded(self.filter_len[p] as u32, 9);
+            }
+        }
+        w.write_bounded(self.min_symbol as u32, u16::MAX as u32);
+        w.write_bounded(self.max_symbol as u32, u16::MAX as u32);
+        for p in 0..2 {
+            let Some(c) = self.cand[p] else { continue };
+            let splits = *EFE_LINEAR_SPLITS
+                .get(c as usize)
+                .ok_or(Error::InvalidArgument(
+                    "EFE linear: best_cand_idx out of range",
+                ))?;
+            let taps = self.filter_len[p] as usize * self.filter_len[p] as usize;
+            let phases = if coded_444 { 1 } else { 4 };
+            for (list, len) in [
+                (&self.chroma_weights[p], phases * taps),
+                (&self.luma_weights[p], taps),
+            ] {
+                if list.len() != splits || list.iter().any(|f| f.len() != len) {
+                    return Err(Error::InvalidArgument("EFE linear: filter list shape"));
+                }
+                for f in list {
+                    for &v in f {
+                        if v > self.max_symbol as u32 {
+                            return Err(Error::InvalidArgument(
+                                "EFE linear: weight above maxSymbol",
+                            ));
+                        }
+                        w.write_bounded(v, self.max_symbol as u32);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl EfeNonlinearHeader {
+    fn parse(r: &mut BitReader<'_>) -> Result<Self> {
+        let mut h = EfeNonlinearHeader {
+            min_symbol: r.read_bounded(u16::MAX as u32)? as u16,
+            max_symbol: r.read_bounded(u16::MAX as u32)? as u16,
+            ..Default::default()
+        };
+        let on = [r.read_bit()?, r.read_bit()?];
+        if on[0] || on[1] {
+            let geom = (
+                r.read_bounded(1023)? as u16,
+                r.read_bounded(1023)? as u16,
+                r.read_bounded(1023)? as u16,
+            );
+            h.mask_geometry = Some(geom);
+            let n = geom.1 as usize * geom.2 as usize;
+            for (m, &enabled) in h.masks.iter_mut().zip(&on) {
+                if enabled {
+                    let v = read_symbols(r, n, 2)?;
+                    if v.iter().any(|&x| x > 2) {
+                        return Err(Error::InvalidData("EFE non-linear: mask value above 2"));
+                    }
+                    *m = Some(v.into_iter().map(|x| x as u8).collect());
+                }
+            }
+        }
+        let filt = [r.read_bit()?, r.read_bit()?];
+        if filt[0] || filt[1] {
+            let mut t = EfeNonlinearTiles {
+                tile_width: r.read_bounded(u16::MAX as u32)? as u16,
+                tile_height: r.read_bounded(u16::MAX as u32)? as u16,
+                ..Default::default()
+            };
+            let tiles = r.read_bounded(u16::MAX as u32)? as usize;
+            let to16 = |v: Vec<u32>| v.into_iter().map(|x| x as u16).collect::<Vec<u16>>();
+            t.luma_min = to16(read_symbols(r, tiles, u16::MAX as u32)?);
+            t.luma_max = to16(read_symbols(r, tiles, u16::MAX as u32)?);
+            for (wts, &enabled) in t.weights.iter_mut().zip(&filt) {
+                if enabled {
+                    let n = r.read_bounded(u16::MAX as u32)? as usize;
+                    *wts = Some(read_symbols(r, n, h.max_symbol as u32)?);
+                }
+            }
+            h.nonlinear = Some(t);
+        }
+        Ok(h)
+    }
+
+    fn write(&self, w: &mut BitWriter) -> Result<()> {
+        w.write_bounded(self.min_symbol as u32, u16::MAX as u32);
+        w.write_bounded(self.max_symbol as u32, u16::MAX as u32);
+        w.write_bit(self.masks[0].is_some());
+        w.write_bit(self.masks[1].is_some());
+        if self.masks.iter().any(Option::is_some) {
+            let (bs, my, mx) = self.mask_geometry.ok_or(Error::InvalidArgument(
+                "EFE non-linear: masks without geometry",
+            ))?;
+            if bs > 1023 || my > 1023 || mx > 1023 {
+                return Err(Error::InvalidArgument(
+                    "EFE non-linear: mask geometry out of range",
+                ));
+            }
+            for v in [bs, my, mx] {
+                w.write_bounded(v as u32, 1023);
+            }
+            for m in self.masks.iter().flatten() {
+                if m.len() != my as usize * mx as usize || m.iter().any(|&x| x > 2) {
+                    return Err(Error::InvalidArgument(
+                        "EFE non-linear: mask shape or value",
+                    ));
+                }
+                for &x in m {
+                    w.write_bounded(x as u32, 2);
+                }
+            }
+        }
+        let filt = self
+            .nonlinear
+            .as_ref()
+            .map(|t| [t.weights[0].is_some(), t.weights[1].is_some()]);
+        let filt = filt.unwrap_or([false; 2]);
+        w.write_bit(filt[0]);
+        w.write_bit(filt[1]);
+        if let Some(t) = self.nonlinear.as_ref().filter(|_| filt[0] || filt[1]) {
+            if t.luma_min.len() != t.luma_max.len() || t.luma_min.len() > u16::MAX as usize {
+                return Err(Error::InvalidArgument("EFE non-linear: tile list shape"));
+            }
+            w.write_bounded(t.tile_width as u32, u16::MAX as u32);
+            w.write_bounded(t.tile_height as u32, u16::MAX as u32);
+            w.write_bounded(t.luma_min.len() as u32, u16::MAX as u32);
+            for &v in t.luma_min.iter().chain(&t.luma_max) {
+                w.write_bounded(v as u32, u16::MAX as u32);
+            }
+            for wts in t.weights.iter().flatten() {
+                if wts.len() > u16::MAX as usize || wts.iter().any(|&x| x > self.max_symbol as u32)
+                {
+                    return Err(Error::InvalidArgument("EFE non-linear: weight list"));
+                }
+                w.write_bounded(wts.len() as u32, u16::MAX as u32);
+                for &x in wts {
+                    w.write_bounded(x, self.max_symbol as u32);
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 impl ToolHeader {
-    /// Parse the TON payload. The post-filter parameter syntax is not ported yet: a stream that
-    /// enables any of the four filters is rejected as unsupported rather than mis-decoded.
-    pub fn parse(payload: &[u8]) -> Result<Self> {
+    /// Parse the TON payload. The EFE linear filter codes one chroma filter instead of four when
+    /// the picture is coded without chroma subsampling, so the picture header is needed.
+    pub fn parse(payload: &[u8], pih: &PictureHeader) -> Result<Self> {
         let mut r = BitReader::new(payload);
         let lsbs_enabled = [r.read_bit()?, r.read_bit()?];
         let mut t = ToolHeader {
             lsbs_enabled,
             ..Default::default()
         };
-        t.efe_linear_enabled = r.read_bit()?;
-        if t.efe_linear_enabled {
-            return Err(Error::Unsupported("EFE linear post-filter"));
+        if r.read_bit()? {
+            let coded_444 = pih.efe_coded_444();
+            t.efe_linear = Some(EfeLinearHeader {
+                mean: [r.read_bounded(32767)? as u16, r.read_bounded(32767)? as u16],
+                upsample_set: EfeLinearSet::parse(&mut r, coded_444)?,
+                set: EfeLinearSet::parse(&mut r, coded_444)?,
+            });
         }
-        t.icci_enabled = r.read_bit()?;
-        if t.icci_enabled {
-            return Err(Error::Unsupported("eICCI post-filter"));
+        if r.read_bit()? {
+            t.icci = Some(IcciHeader::parse(&mut r, pih)?);
         }
-        t.efe_nonlinear_enabled = r.read_bit()?;
-        if t.efe_nonlinear_enabled {
-            return Err(Error::Unsupported("EFE non-linear post-filter"));
+        if r.read_bit()? {
+            t.efe_nonlinear = Some(EfeNonlinearHeader::parse(&mut r)?);
         }
-        t.lef_enabled = r.read_bit()?;
-        if t.lef_enabled {
-            return Err(Error::Unsupported("LEF post-filter"));
+        if r.read_bit()? {
+            t.lef_channel = Some(r.read_bounded(255)? as u8);
         }
         Ok(t)
     }
 
-    pub fn write(&self) -> Result<Vec<u8>> {
-        if self.efe_linear_enabled
-            || self.icci_enabled
-            || self.efe_nonlinear_enabled
-            || self.lef_enabled
-        {
-            return Err(Error::Unsupported("post-filter headers"));
-        }
+    pub fn write(&self, pih: &PictureHeader) -> Result<Vec<u8>> {
         let mut w = BitWriter::new();
         w.write_bit(self.lsbs_enabled[0]);
         w.write_bit(self.lsbs_enabled[1]);
-        for _ in 0..4 {
-            w.write_bit(false);
+        w.write_bit(self.efe_linear.is_some());
+        if let Some(e) = &self.efe_linear {
+            if e.mean.iter().any(|&m| m > 32767) {
+                return Err(Error::InvalidArgument("EFE linear: mean out of range"));
+            }
+            let coded_444 = pih.efe_coded_444();
+            w.write_bounded(e.mean[0] as u32, 32767);
+            w.write_bounded(e.mean[1] as u32, 32767);
+            e.upsample_set.write(&mut w, coded_444)?;
+            e.set.write(&mut w, coded_444)?;
+        }
+        w.write_bit(self.icci.is_some());
+        if let Some(i) = &self.icci {
+            i.write(&mut w, pih)?;
+        }
+        w.write_bit(self.efe_nonlinear.is_some());
+        if let Some(e) = &self.efe_nonlinear {
+            e.write(&mut w)?;
+        }
+        w.write_bit(self.lef_channel.is_some());
+        if let Some(ch) = self.lef_channel {
+            w.write_bounded(ch as u32, 255);
         }
         Ok(w.finish())
+    }
+
+    /// Whether any post-filter is switched on.
+    pub fn any_post_filter(&self) -> bool {
+        self.efe_linear.is_some()
+            || self.icci.is_some()
+            || self.efe_nonlinear.is_some()
+            || self.lef_channel.is_some()
     }
 }
 
@@ -911,19 +1336,34 @@ mod tests {
 
     #[test]
     fn ton_flags() {
-        assert_eq!(ToolHeader::parse(&[0x00]).unwrap(), ToolHeader::default());
-        assert_eq!(ToolHeader::default().write().unwrap(), [0x00]);
-        // lsbs on for both components, then EFE linear enabled: not ported yet.
-        let payload = hex(&TON_HIGH_TOOLS_ON.replace(char::is_whitespace, ""));
+        let pih = PictureHeader::parse(&hex(PIH_BASE_TOOLS_OFF)).unwrap();
         assert_eq!(
-            ToolHeader::parse(&payload),
-            Err(Error::Unsupported("EFE linear post-filter"))
+            ToolHeader::parse(&[0x00], &pih).unwrap(),
+            ToolHeader::default()
         );
+        assert_eq!(ToolHeader::default().write(&pih).unwrap(), [0x00]);
         let t = ToolHeader {
             lsbs_enabled: [true, true],
             ..Default::default()
         };
-        assert_eq!(ToolHeader::parse(&t.write().unwrap()).unwrap(), t);
+        assert_eq!(ToolHeader::parse(&t.write(&pih).unwrap(), &pih).unwrap(), t);
+    }
+
+    /// TON of a reference-encoder stream with every tool on: all four post-filters carry
+    /// parameters. Must parse to the end and re-serialise byte for byte.
+    #[test]
+    fn ton_all_filters_roundtrip() {
+        let pih = PictureHeader::parse(&hex(&PIH_HIGH_TOOLS_ON.replace(char::is_whitespace, "")))
+            .unwrap();
+        let payload = hex(&TON_HIGH_TOOLS_ON.replace(char::is_whitespace, ""));
+        let t = ToolHeader::parse(&payload, &pih).unwrap();
+        assert_eq!(t.lsbs_enabled, [true, true]);
+        let lin = t.efe_linear.as_ref().unwrap();
+        assert!(lin.set.cand.iter().any(Option::is_some));
+        assert_eq!(t.icci.as_ref().unwrap().tiles.len(), 1);
+        assert!(t.efe_nonlinear.is_some());
+        assert!(t.lef_channel.is_some());
+        assert_eq!(t.write(&pih).unwrap(), payload);
     }
 
     #[test]

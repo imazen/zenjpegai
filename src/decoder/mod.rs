@@ -32,7 +32,7 @@ pub fn read_headers(cs: &Codestream<'_>) -> Result<Headers> {
     picture.check_conformance()?;
     let tools = cs
         .find(Marker::Ton)
-        .map(ToolHeader::parse)
+        .map(|ton| ToolHeader::parse(ton, &picture))
         .transpose()?
         .unwrap_or_default();
     let rendering = cs

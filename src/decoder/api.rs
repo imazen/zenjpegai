@@ -123,6 +123,10 @@ impl Decoder {
                 "latent scaling before synthesis (LSBS)"
             )));
         }
+        if headers.tools.any_post_filter() {
+            // Their parameters parse (header::ToolHeader); the filters themselves are not ported.
+            return Err(at!(Error::Unsupported("enhancement post-filters")));
+        }
         if hdr.bit_depth != 8 {
             return Err(at!(Error::Unsupported("10-bit pictures")));
         }

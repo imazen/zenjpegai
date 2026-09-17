@@ -36,6 +36,12 @@ impl<'a> BitReader<'a> {
         self.pos
     }
 
+    /// Bits not read yet.
+    #[inline]
+    pub fn bits_left(&self) -> usize {
+        (self.data.len() * 8).saturating_sub(self.pos)
+    }
+
     /// Number of whole bytes touched so far (a partially read byte counts).
     #[inline]
     pub fn bytes_consumed(&self) -> usize {

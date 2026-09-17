@@ -2,7 +2,7 @@
 # Encode + decode a matrix of configurations with the reference software and dump the decoder's
 # intermediate tensors for the parity tests.
 #
-#   scripts/ref_vectors/make_reference_streams.sh [SET]      SET: smoke (default) | regions | tools | all
+#   scripts/ref_vectors/make_reference_streams.sh [SET]      SET: smoke (default) | regions | tools | filters | all
 #
 # Output: $OUT/<name>/{stream.bits,encoder.log,tensors.bin,manifest.txt,decoded.png,stdout.log}
 # with OUT=/mnt/v/output/zenjpegai/reference/vectors. Existing streams are kept (delete the
@@ -89,5 +89,14 @@ if [ "$SET" = tools ] || [ "$SET" = all ]; then
   one img30_base_rvsonly_bpp050 $IMG30 50 cfg/tools_off.json "$HERE/cfg/rvs_only.json" cfg/profiles/base.json
   one img30_base_grfsonly_bpp075 $IMG30 75 cfg/tools_off.json "$HERE/cfg/grfs_only.json" cfg/profiles/base.json
   one img30_simple_lsbs_rvs_bpp100 $IMG30 100 cfg/tools_off.json cfg/tools/LSBS.json cfg/tools/ResVarScale.json cfg/profiles/simple.json
+fi
+if [ "$SET" = filters ] || [ "$SET" = all ]; then
+  # The four enhancement post-filters, one at a time, then upstream's full tools_on set.
+  one img30_base_efelin_bpp050 $IMG30 50 cfg/tools_off.json cfg/tools/EFElinear.json cfg/profiles/base.json
+  one img30_base_eicci_bpp050 $IMG30 50 cfg/tools_off.json cfg/tools/eICCI.json cfg/profiles/base.json
+  one img30_base_efenl_bpp050 $IMG30 50 cfg/tools_off.json cfg/tools/EFEnonlinear.json cfg/profiles/base.json
+  one img30_base_lef_bpp050 $IMG30 50 cfg/tools_off.json cfg/tools/LEF.json cfg/profiles/base.json
+  one img30_base_on_bpp025 $IMG30 25 cfg/tools_on.json cfg/profiles/base.json
+  one img30_base_on_bpp100 $IMG30 100 cfg/tools_on.json cfg/profiles/base.json
 fi
 echo "== done ($(date -u +%H:%M:%S))"
