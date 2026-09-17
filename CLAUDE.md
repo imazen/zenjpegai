@@ -57,6 +57,43 @@ Gotchas, all hit for real:
 Baseline timing (560x888 test image 00030, BOP, tools off, 0.5 bpp, CPU, torch 1.10.2, 16 threads):
 decoder "TOTAL" 0.22 s, process wall 1.4 s (Python start + model load dominate).
 
+## Parallel agents (read this if you were spawned for one task)
+
+- **Work in your own sibling jj workspace**, never in `~/work/zen/zenjpegai` itself:
+  `cd ~/work/zen/zenjpegai && jj git fetch && jj workspace add --name <slug> ../zenjpegai--<slug> -r main@origin`,
+  then work in `~/work/zen/zenjpegai--<slug>`. Write `.workongoing` there and refresh it.
+- **Touch only the files your brief lists as yours.** Shared files (`Cargo.toml`, `src/lib.rs`,
+  `src/decoder/api.rs`, `PORTING.md`, `CHANGELOG.md`, `README.md`, `justfile`) get minimal,
+  additive edits (one line where possible), because other agents edit them too.
+- **Land small commits often:** `jj describe -m ...`, `jj git fetch`, `jj rebase -d main@origin`
+  (resolve conflicts if any), re-run the gates, `jj bookmark set main -r @`,
+  `jj git push --bookmark main`, then verify with
+  `git merge-base --is-ancestor $(jj log -r main --no-graph -T commit_id) origin/main`.
+  After a push jj opens a new empty change by itself. Never force-push, never
+  `--allow-backwards`. If you see other agents' commits, rebase onto them; never `jj op restore`
+  past them.
+- **Gates before every push:** `cargo fmt --check`,
+  `cargo clippy --all-targets --all-features -- -D warnings`,
+  `ZENJPEGAI_REF=~/work/zen/jpeg-ai-reference-software cargo test --lib --tests --all-features -- --skip tiers_and_threads`
+  (run the skipped test too if you touched `src/nn` or `src/model`). Prefix heavy commands
+  with `nice -n 19`, cap cargo at `-j 8`: the box is shared.
+- **Parity is measured against the reference software**, never against your own expectations.
+  Oracle data: `/mnt/v/output/zenjpegai/reference/vectors/<name>/` (stream, reference tensors
+  dump, decoded PNG; for region streams use `fixed_decoder/`). Generate more with
+  `scripts/ref_vectors/make_reference_streams.sh` (add a set; keep scripts committed). To dump
+  more intermediate tensors extend `scripts/ref_vectors/dump_decode.py` additively (new names
+  only) and re-run it into a **new** subdirectory of the vector (do not overwrite existing
+  dumps other agents read).
+- Integer / table-driven stages must match the reference exactly. Float stages: state the
+  measured max abs error in `PORTING.md`; whole-picture gate is "8-bit output differs by at most
+  1 in fewer than 1/5000 samples" (`tests/decode_ref.rs`). Never loosen an existing bound.
+- Scratch goes to `~/tmp`, never `/tmp`. Nothing above 30 KB and no binaries into git.
+- When done: update `PORTING.md` (status row + what is still missing, missing first),
+  `CHANGELOG.md`, push, then `cd ~/work/zen/zenjpegai && jj workspace forget <slug>` and
+  `rm -rf ~/work/zen/zenjpegai--<slug>`. If the task turns out larger than expected, land the
+  part that is proven, document the rest precisely in `PORTING.md`, and say so plainly in your
+  final report: an honest partial beats a claimed complete.
+
 ## Known Bugs
 
 (none recorded yet)
