@@ -12,6 +12,7 @@ use crate::model::mcm::upshuffle_psi;
 use crate::model::synthesis::{SynthesisPrimary, SynthesisSecondary};
 use crate::nn::fast::{BTensor, Engine};
 use crate::tensor::Tensor;
+use crate::tools::tiles::synthesis_tiles;
 
 /// Latent-domain result for one component.
 #[derive(Clone, Debug)]
@@ -52,7 +53,8 @@ pub struct Planes {
     pub v: Tensor<f32>,
 }
 
-/// Synthesis of both components for a picture that is a single synthesis tile.
+/// Synthesis of both components, tile by tile when the header enables synthesis tiling
+/// (`ccs_sgmm_tool.py::forward`, `common_modules.py::decompress_y_hat_to_image_tile`).
 pub fn synthesize(
     eng: &Engine,
     hdr: &PictureHeader,
@@ -60,9 +62,6 @@ pub fn synthesize(
     chroma: &SynthesisSecondary,
     y_hat: [&Tensor<f32>; 2],
 ) -> Result<Planes> {
-    if hdr.components.iter().any(|c| c.synthesis_tiling.is_some()) {
-        return Err(Error::Unsupported("synthesis tiling"));
-    }
     if hdr.regions.is_some() {
         return Err(Error::Unsupported(
             "region partitioning in the reconstruction stage",
@@ -72,13 +71,56 @@ pub fn synthesize(
     let out_h = h - hdr.diff_display_height as usize;
     let out_w = w - hdr.diff_display_width as usize;
 
+    // The reference looks the luma tile's y_hat up by the chroma tile's picture area, so both
+    // components must be tiled identically.
+    if hdr.components[0].synthesis_tiling != hdr.components[1].synthesis_tiling {
+        return Err(Error::Unsupported(
+            "different synthesis tiling for luma and chroma",
+        ));
+    }
+    if y_hat[0].h != y_hat[1].h || y_hat[0].w != y_hat[1].w {
+        return Err(Error::InvalidArgument("luma / chroma latent size mismatch"));
+    }
+    let tiles = synthesis_tiles(
+        h,
+        w,
+        y_hat[0].h,
+        y_hat[0].w,
+        hdr.components[0].synthesis_tiling,
+    )?;
+
     let v = eng.tier.block();
-    let (by, buv) = (
-        BTensor::from_planar(y_hat[0], v)?,
-        BTensor::from_planar(y_hat[1], v)?,
-    );
-    let rec_y = luma.forward(eng, &by, h, w)?.crop(out_h, out_w)?;
-    let rec_uv = chroma.forward(eng, &by, &buv, h, w)?;
+    let mut rec_y = Tensor::<f32>::zeros(1, h, w)?;
+    let mut rec_uv = Tensor::<f32>::zeros(2, h, w)?;
+    for tile in &tiles {
+        let (img, lat) = (tile.image, tile.latent);
+        let whole = lat.width == y_hat[0].w && lat.height == y_hat[0].h;
+        let (by, buv) = if whole {
+            (
+                BTensor::from_planar(y_hat[0], v)?,
+                BTensor::from_planar(y_hat[1], v)?,
+            )
+        } else {
+            let win = |t: &Tensor<f32>| t.window(lat.x, lat.y, lat.width, lat.height);
+            (
+                BTensor::from_planar(&win(y_hat[0])?, v)?,
+                BTensor::from_planar(&win(y_hat[1])?, v)?,
+            )
+        };
+        let ty = luma.forward(eng, &by, img.height, img.width)?;
+        let tuv = chroma.forward(eng, &by, &buv, img.height, img.width)?;
+        for (dst, src) in [(&mut rec_y, &ty), (&mut rec_uv, &tuv)] {
+            let (ox, oy) = tile.core_offset;
+            for c in 0..dst.c {
+                for y in 0..tile.core.height {
+                    let s = &src.plane(c)[(oy + y) * src.w + ox..][..tile.core.width];
+                    let d = (tile.core.y + y) * dst.w + tile.core.x;
+                    dst.plane_mut(c)[d..d + tile.core.width].copy_from_slice(s);
+                }
+            }
+        }
+    }
+    let rec_y = rec_y.crop(out_h, out_w)?;
 
     // rec_UV[:, :, :out_h:c_ver, :out_w:c_hor]
     let (sv, sh) = (hdr.c_ver as usize, hdr.c_hor as usize);

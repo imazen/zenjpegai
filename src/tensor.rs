@@ -75,4 +75,20 @@ impl<T: Copy + Default> Tensor<T> {
         }
         Ok(out)
     }
+
+    /// Copy of the window `x[:, y0..y0 + h, x0..x0 + w]`.
+    pub fn window(&self, x0: usize, y0: usize, w: usize, h: usize) -> Result<Self> {
+        if y0 + h > self.h || x0 + w > self.w {
+            return Err(Error::InvalidArgument("window outside tensor"));
+        }
+        let mut out = Self::zeros(self.c, h, w)?;
+        for ch in 0..self.c {
+            for y in 0..h {
+                let src = (ch * self.h + y0 + y) * self.w + x0;
+                let dst = (ch * h + y) * w;
+                out.data[dst..dst + w].copy_from_slice(&self.data[src..src + w]);
+            }
+        }
+        Ok(out)
+    }
 }

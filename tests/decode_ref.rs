@@ -133,6 +133,9 @@ vectors! {
     img30_base_off_bpp050 => "img30_base_off_bpp050",
     img30_base_off_bpp100 => "img30_base_off_bpp100",
     img30_simple_off_bpp050 => "img30_simple_off_bpp050",
+    // 2096x1400: six overlapping synthesis tiles.
+    img01_base_off_bpp050 => "img01_base_off_bpp050",
+    img01_base_off_threads8_bpp050 => "img01_base_off_threads8_bpp050",
 }
 
 /// Every SIMD tier, threaded or not, must decode a real stream to identical bits.

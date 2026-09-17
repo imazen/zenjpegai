@@ -28,7 +28,8 @@ against reference-produced data passes. "stub" and "partial" mean what they say.
 | `model::hyper_decoder` | `components/autoencoder_hyper/decoder/base.py` | ported | `tests/decode_ref.rs` (`psi` within 5e-4 abs of the reference) |
 | `model::mcm` | `components/contexts/{context,MCM_phases,fusion_pred_net,utils}.py` (decoder direction) | ported: 4-phase context model + the context-free chroma path | `tests/decode_ref.rs` (`y_hat` within 5e-4) |
 | `model::synthesis` | `components/autoencoder_data/decoder/{sop,bop}_{prim,sec}.py`, `activations/resau.py`, `base_layers/conv_layers.py` | ported: **SOP and BOP only. HOP (CAB + TAM attention) is missing** | `tests/decode_ref.rs` (planes within 3e-3 on a 0..255 scale) |
-| `decoder::reconstruct` | `ccs_sgmm_tool.py::forward/decompress`, `common_modules.py::hyper_decode_tile/_decompress_ar_scale/decompress_y_hat_to_image_tile` | partial: **one region, one synthesis tile only** (pictures up to 1 MP with default settings). Tiled / region reconstruction is rejected as `Unsupported` | `tests/decode_ref.rs` |
+| `tools::tiles` | `tiling/tiling.py::TileManager` (`_init_image_tiles_with_overlap`, `_get_latent_tile_from_image_tile`, picture-border branch of `_get_core_of_overlapping_tile`) | ported for streams without independent regions. **Missing: tiles grown / cut inside independent regions (`_add_overlap`, region branch of the core computation)** | unit test reproduces the layout the reference logs for 2096x1400 / tile 1024 / overlap 64; `tests/decode_ref.rs` img01 streams |
+| `decoder::reconstruct` | `ccs_sgmm_tool.py::forward/decompress`, `common_modules.py::hyper_decode_tile/_decompress_ar_scale/decompress_y_hat_to_image_tile` | partial: one region, any number of synthesis tiles (luma and chroma must be tiled identically, as the reference assumes). **Region-partitioned reconstruction is rejected as `Unsupported`** | `tests/decode_ref.rs` |
 | `decoder::output` | `common/image.py::to_RGB_/clip_data_`, `colorspace.py` (BT.709), `image_io.py::write_png` quantisation | partial: **4:4:4, BT.709 → RGB only.** Missing: 4:2:0 / 4:2:2 chroma upsampling (bicubic), custom colour transform, YUV output | `tests/decode_ref.rs`: 8-bit output differs from the reference decoder in 49..73 of 1,491,840 samples, each by 1 |
 
 ## Accuracy of the float path (measured, 560x888 test image 00030, upstream b9e573f, torch 1.10.2 CPU)
@@ -38,6 +39,7 @@ against reference-produced data passes. "stub" and "partial" mean what they say.
 | base profile (BOP), 0.12 bpp | < 5e-4 | < 5e-4 | < 3e-3 | 51, all by 1 |
 | base profile (BOP), 0.50 bpp | 8.9e-7 | 8.0e-5 | 4.7e-4 | 73, all by 1 |
 | base profile (BOP), 1.00 bpp | < 5e-4 | < 5e-4 | < 3e-3 | 67, all by 1 |
+| 2096x1400 image 00001, base profile, 0.50 bpp, 6 synthesis tiles | < 5e-4 | < 5e-4 | < 3e-3 | 398 of 8,803,200, all by 1 |
 | simple profile (SOP), 0.50 bpp | < 5e-4 | < 5e-4 | < 3e-3 | 49, all by 1 |
 
 Entries written `< x` are the bounds `tests/decode_ref.rs` asserts, not individually recorded
@@ -46,7 +48,7 @@ maxima; the other numbers were read off `examples/dbg_recon`.
 The differences come from convolution summation order (PyTorch/oneDNN vs this crate's fixed
 order); they land on 8-bit rounding boundaries in about 0.005 % of samples.
 
-Not started (decoder): RVS / GRFS, quality map, LSBS, tiled and region-partitioned
+Not started (decoder): RVS / GRFS, quality map, LSBS, region-partitioned
 reconstruction, HOP synthesis, the four post-filters (EFE linear, eICCI, EFE non-linear, LEF),
 chroma-subsampled and 10-bit output, custom colour transform, UDI, progressive (`num_decode_chs`)
 decode. Not started (everything else): the whole encoder

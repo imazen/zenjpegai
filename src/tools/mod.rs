@@ -3,3 +3,4 @@
 pub mod gain;
 pub mod regions;
 pub mod skip;
+pub mod tiles;
