@@ -2,7 +2,7 @@
 # Encode + decode a matrix of configurations with the reference software and dump the decoder's
 # intermediate tensors for the parity tests.
 #
-#   scripts/ref_vectors/make_reference_streams.sh [SET]      SET: smoke (default) | regions | tools | filters | qmap | all
+#   scripts/ref_vectors/make_reference_streams.sh [SET]      SET: smoke (default) | regions | tools | filters | efe | qmap | all
 #
 # Output: $OUT/<name>/{stream.bits,encoder.log,tensors.bin,manifest.txt,decoded.png,stdout.log}
 # with OUT=/mnt/v/output/zenjpegai/reference/vectors. Existing streams are kept (delete the
@@ -119,5 +119,70 @@ JSON
   one img30_base_qmap_bpp050 $IMG30 50 cfg/tools_off.json "$MASKS/qmap_img30.json" cfg/profiles/base.json
   one img30_base_qmap_rvs_bpp025 $IMG30 25 cfg/tools_off.json cfg/tools/ResVarScale.json "$MASKS/qmap_img30.json" cfg/profiles/base.json
   one img30_base_qmap_threads8_bpp100 $IMG30 100 cfg/tools_off.json cfg/tools/ECThread8.json "$MASKS/qmap_img30.json" cfg/profiles/base.json
+fi
+# Per-filter picture dumps (`<vector>/filters/`): the picture before and after every enabled
+# post-filter, for tests that run one filter in isolation (tests/filters_efe_ref.rs).
+filters_dump() { # name
+  local dir="$OUT/$1"
+  if [ -f "$dir/filters/manifest.txt" ]; then return; fi
+  echo "== $1: dumping the picture around each post-filter"
+  nice -n 19 python "$HERE/dump_filters.py" "$dir/stream.bits" "$dir/filters" > "$dir/dump_filters.log" 2>&1
+}
+
+# EFE filter streams with the encoder's EFE decisions forced (force_efe_encode.py): the stock
+# encoder nearly always picks a 1x1 filter, one region, non-linear filter off.
+efe() { # name input model_id beta_disp_log "force args" cfg... [-- encoder overrides...]
+  local name=$1 input=$2 tool=$3 beta=$4 force=$5; shift 5
+  local dir="$OUT/$name"
+  if [ ! -f "$dir/manifest.txt" ]; then
+    mkdir -p "$dir"
+    echo "== $name: encoding, EFE decisions forced: $force ($(date -u +%H:%M:%S))"
+    # shellcheck disable=SC2086
+    nice -n 19 python "$HERE/force_efe_encode.py" $force -- "$input" "$dir/stream.bits" \
+        --cfg "$@" -target_device cpu -model.bitrate_matcher.enabled 0 \
+        -model.bitrate_matcher.target_tool_idx "$tool" -model.bitrate_matcher.target_beta_disp_Y "$beta" \
+        > "$dir/encoder.log" 2>&1
+    echo "== $name: decoding + dumping"
+    nice -n 19 python "$HERE/dump_decode.py" "$dir/stream.bits" "$dir" > "$dir/dump.log" 2>&1
+    ls -la "$dir/stream.bits" | awk '{print "   stream bytes:", $5}'
+  fi
+  filters_dump "$name"
+}
+
+if [ "$SET" = efe ] || [ "$SET" = all ]; then
+  for v in img30_base_efelin_bpp050 img30_base_on_bpp025 img30_base_on_bpp100; do
+    [ -f "$OUT/$v/manifest.txt" ] && filters_dump "$v"
+  done
+  EFE="cfg/tools_off.json cfg/tools/EFElinear.json cfg/tools/EFEnonlinear.json cfg/profiles/base.json"
+  IN="$OUT/_inputs"; mkdir -p "$IN"
+  mk() { [ -f "$IN/$1" ] || python "$HERE/make_efe_inputs.py" "data/test/$IMG30" "$IN/$1" "$2" "$3"; }
+  mk crop_277x201_8bit_sRGB.png 277 201
+  mk crop_277x201_8bit_420.yuv 277 201
+  mk crop_277x201_8bit_422.yuv 277 201
+  mk crop_560x888_8bit_420.yuv 560 888
+  # 4:4:4 source coded 4:4:4: every filter length and every region split, non-linear filter on.
+  # shellcheck disable=SC2086
+  {
+  efe img30_efe_f2c1_f2c2_nl "data/test/$IMG30" 1 0 "--linear 2:1,2:2 --nonlinear" $EFE
+  efe img30_efe_f3c3_f3c4_nl "data/test/$IMG30" 1 0 "--linear 3:3,3:4 --nonlinear" $EFE
+  efe img30_efe_f3c5_f4c7_nl "data/test/$IMG30" 1 0 "--linear 3:5,4:7 --nonlinear" $EFE
+  efe img30_efe_f4c6_f1c5 "data/test/$IMG30" 2 0 "--linear 4:6,1:5" $EFE
+  efe crop277_efe_f4c5_f3c6_nl "$IN/crop_277x201_8bit_sRGB.png" 1 0 "--linear 4:5,3:6 --nonlinear" $EFE
+  # 2096x1400: four non-linear tiles.
+  efe img01_efe_f2c0_f3c0_nl "data/test/$IMG01" 1 0 "--linear 2:0,3:0 --nonlinear" $EFE
+  # 4:4:4 source coded 4:2:0 / 4:2:2: the 4x4 DCT-IF kernels, four coded phases.
+  efe img30_c420_efe_f1c0_f2c1 "data/test/$IMG30" 1 0 "--linear 1:0,2:1" $EFE -c_ver_value 2 -c_hor_value 2
+  efe img30_c420_efe_f3c5_f4c7_nl "data/test/$IMG30" 1 0 "--linear 3:5,4:7 --nonlinear" $EFE -c_ver_value 2 -c_hor_value 2
+  efe crop277_c420_efe_f4c6_f3c3_nl "$IN/crop_277x201_8bit_sRGB.png" 1 0 "--linear 4:6,3:3 --nonlinear" $EFE -c_ver_value 2 -c_hor_value 2
+  # DCTIF_only: no coded filters at all, the fixed DCT-IF taps alone.
+  efe img30_c420_efe_dctif "data/test/$IMG30" 1 0 "" $EFE -c_ver_value 2 -c_hor_value 2 -post_filters.EFElinear.DCTIF_only 1
+  # (vertical-only subsampling, c_ver = 2 with c_hor = 1, is not a format of the reference.)
+  efe img30_c422_efe_f3c2_f2c4 "data/test/$IMG30" 1 0 "--linear 3:2,2:4" $EFE -c_ver_value 1 -c_hor_value 2
+  # 4:2:0 and 4:2:2 sources.
+  efe crop277_s420_efe_f3c5_f4c7_nl "$IN/crop_277x201_8bit_420.yuv" 1 0 "--linear 3:5,4:7 --nonlinear" $EFE
+  efe img30_s420_efe_f1c0_f2c1_nl "$IN/crop_560x888_8bit_420.yuv" 1 0 "--linear 1:0,2:1 --nonlinear" $EFE
+  efe crop277_s422_efe_f3c6_f4c2_nl "$IN/crop_277x201_8bit_422.yuv" 1 0 "--linear 3:6,4:2 --nonlinear" $EFE
+  # (a 4:2:2 source coded 4:2:0 is not implemented in the reference encoder.)
+  }
 fi
 echo "== done ($(date -u +%H:%M:%S))"

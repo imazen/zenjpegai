@@ -156,6 +156,12 @@ impl PictureHeader {
         self.c_ver == self.s_ver && self.c_hor == self.s_hor
     }
 
+    /// Whether the tool header carries `icci_enable_flag`: not for 4:2:0 sources, where the
+    /// reference infers it as 0 (`s_ver != 1 and s_hor != 1`).
+    pub fn icci_flag_coded(&self) -> bool {
+        self.s_ver == 1 || self.s_hor == 1
+    }
+
     /// Size of component `ccs`'s picture as the core model sees it: the luma size for luma,
     /// half of it (rounded up) for chroma (`SepChannelsSGMMTool.get_processed_img_shape`).
     pub fn component_size(&self, ccs: usize) -> (u32, u32) {
@@ -1001,7 +1007,9 @@ impl ToolHeader {
                 set: EfeLinearSet::parse(&mut r, coded_444)?,
             });
         }
-        if r.read_bit()? {
+        // `icci_enable_flag` is not coded for 4:2:0 sources: the reference infers 0
+        // (`EfficientICCIFilter.auto_enableflag_detected_value`).
+        if pih.icci_flag_coded() && r.read_bit()? {
             t.icci = Some(IcciHeader::parse(&mut r, pih)?);
         }
         if r.read_bit()? {
@@ -1028,7 +1036,13 @@ impl ToolHeader {
             e.upsample_set.write(&mut w, coded_444)?;
             e.set.write(&mut w, coded_444)?;
         }
-        w.write_bit(self.icci.is_some());
+        if pih.icci_flag_coded() {
+            w.write_bit(self.icci.is_some());
+        } else if self.icci.is_some() {
+            return Err(Error::InvalidArgument(
+                "eICCI: not available for 4:2:0 sources",
+            ));
+        }
         if let Some(i) = &self.icci {
             i.write(&mut w, pih)?;
         }

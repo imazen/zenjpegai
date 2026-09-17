@@ -18,6 +18,7 @@ use zenjpegai::decoder::reconstruct::{
     Planes, post_process_latent, reconstruct_latent, synthesize,
 };
 use zenjpegai::decoder::{decode_entropy_stage, read_headers};
+use zenjpegai::filters::FilterContext;
 use zenjpegai::mans::AnsTables;
 use zenjpegai::model::ModelDir;
 use zenjpegai::nn::fast::{Engine, Tier};
@@ -35,6 +36,8 @@ struct Decoded {
     psi: [Tensor<f32>; 2],
     y_hat: [Tensor<f32>; 2],
     planes: Planes,
+    /// `planes` after the post-filters the stream enables.
+    filtered: Planes,
 }
 
 fn decode(stream: &[u8], eng: &Engine) -> (zenjpegai::header::PictureHeader, Decoded) {
@@ -56,6 +59,14 @@ fn decode(stream: &[u8], eng: &Engine) -> (zenjpegai::header::PictureHeader, Dec
     post_process_latent(&hdr, &headers.tools, 0, &ent[0], &mut ly).unwrap();
     post_process_latent(&hdr, &headers.tools, 1, &ent[1], &mut luv).unwrap();
     let planes = synthesize(eng, &hdr, &syn_y, &syn_uv, [&ly.y_hat, &luv.y_hat]).unwrap();
+    let ctx = FilterContext {
+        eng,
+        hdr: &hdr,
+        tools: &headers.tools,
+        luma_scale_log: &ent[0].scale_log,
+        models: &models,
+    };
+    let filtered = zenjpegai::filters::apply(&ctx, planes.clone()).unwrap();
     let psi = [ly.psi, luv.psi];
     (
         hdr,
@@ -63,6 +74,7 @@ fn decode(stream: &[u8], eng: &Engine) -> (zenjpegai::header::PictureHeader, Dec
             psi,
             y_hat: [ly.y_hat, luv.y_hat],
             planes,
+            filtered,
         },
     )
 }
@@ -100,7 +112,7 @@ fn check(name: &str) {
         );
     }
 
-    let rgb = to_rgb_planes(&hdr, &d.planes).unwrap();
+    let rgb = to_rgb_planes(&hdr, &d.filtered).unwrap();
     let theirs = RgbPlanes {
         width: rgb.width,
         height: rgb.height,
@@ -155,6 +167,15 @@ vectors! {
     img30_simple_lsbs_rvs_bpp100 => "img30_simple_lsbs_rvs_bpp100",
     // High profile: HOP synthesis (CAB + TAM attention).
     img30_high_off_bpp050 => "img30_high_off_bpp050",
+    // Post-filters: EFE linear, then EFE linear + non-linear with the encoder's filter choices
+    // forced (every filter length and region split; odd picture size; four non-linear tiles).
+    img30_base_efelin_bpp050 => "img30_base_efelin_bpp050",
+    img30_efe_f2c1_f2c2_nl => "img30_efe_f2c1_f2c2_nl",
+    img30_efe_f3c3_f3c4_nl => "img30_efe_f3c3_f3c4_nl",
+    img30_efe_f3c5_f4c7_nl => "img30_efe_f3c5_f4c7_nl",
+    img30_efe_f4c6_f1c5 => "img30_efe_f4c6_f1c5",
+    crop277_efe_f4c5_f3c6_nl => "crop277_efe_f4c5_f3c6_nl",
+    img01_efe_f2c0_f3c0_nl => "img01_efe_f2c0_f3c0_nl",
     // 2096x1400: six overlapping synthesis tiles.
     img01_base_off_bpp050 => "img01_base_off_bpp050",
     img01_base_off_threads8_bpp050 => "img01_base_off_threads8_bpp050",

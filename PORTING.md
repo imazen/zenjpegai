@@ -36,6 +36,8 @@ against reference-produced data passes. "stub" and "partial" mean what they say.
 | `tools::tiles` | `tiling/tiling.py::TileManager` (`_init_image_tiles_with_overlap`, `_init_image_tiles` + `_add_overlap`, `_get_latent_tile_from_image_tile`, both branches of `_get_core_of_overlapping_tile` for picture tiles) | ported. `minimum_tile_size` / `_adjust_boundary_tiles` is encoder/metric-side only and not ported | unit tests reproduce the layouts the reference logs (2096x1400: tile 1024 / overlap 64, and tile 640 / overlap 128 with two independent regions); `tests/decode_ref.rs` img01 streams |
 | `decoder::reconstruct` | `ccs_sgmm_tool.py::forward/decompress`, `common_modules.py::hyper_decode_tile/merge_psi_overlaps_of_tiles/extract_psi_for_mcm/decompress_ar_scale_tile/merge_y_hat_overlaps_of_tiles/extract_y_hat_for_synthesis_tiles/decompress_y_hat_to_image_tile` | ported: dependent and independent regions, synthesis tiling (luma and chroma must be tiled identically, as the reference assumes). Latent post-processing (LSBS) included | `tests/decode_ref.rs`: 16 streams incl. 3 region streams and 6 tool streams (oracle for those: the reference decoder run with a contiguous skip mask, see below) |
 | `decoder::output` | `common/image.py::to_RGB_/clip_data_`, `colorspace.py` (BT.709), `image_io.py::write_png` quantisation | partial: **4:4:4, BT.709 → RGB only.** Missing: 4:2:0 / 4:2:2 chroma upsampling (bicubic), custom colour transform, YUV output | `tests/decode_ref.rs`: 8-bit output differs from the reference decoder in 49..73 of 1,491,840 samples, each by 1 |
+| `filters::efe_linear` | `filters/EFElinear/EFElinear.py`: `decompress`, `SplitApply`, `LumaAidedUpsampler_apply`, `pixelUnshuffleGeneral`, `pixelShuffleGeneral`, `deinteger` | ported for every chroma format the reference can produce: 4:4:4 source coded 4:4:4 / 4:2:2 / 4:2:0 (the latter two with the 4x4 DCT-IF kernels and four coded phases, incl. `DCTIF_only` = no coded filters), 4:2:2 and 4:2:0 sources; filter lengths 1..4, all 8 region splits, odd picture sizes, the second ("up-sampled") picture for the non-linear filter's switch. **Rejected with `Error::Unsupported` (no oracle, the reference fails on them too):** a plane signalled as not filtered (`best_cand_idx = 0`) in a picture coded at the source's chroma resolution; vertical-only subsampling (`*_ver = 2, *_hor = 1`); 4:2:2 source coded 4:2:0. Note that the *decoder* around it still only outputs 4:4:4-coded 4:4:4 pictures (`decoder::output`, and the bicubic `to_format_` between synthesis and filters is not ported), so the subsampled branches are verified in isolation only | `tests/filters_efe_ref.rs`: 17 reference streams, filter run on the reference's own input planes, output within 2e-4 (0..255) of the reference's, measured max 9.2e-5; identical bits on every tier, threaded or not. `tests/decode_ref.rs`: 7 EFE streams through the whole decoder |
+| `filters::efe_nonlinear` | `filters/EFEnonlinear/EFEnonlinear.py`: `decompress`, `LumaAidedAdaptiveNonlinearFilter_apply`, `apply_OnoffSwitch`, `downsample`, `deinteger` | ported: per-tile two-layer 1x1 network (1 and 4 tiles checked), U-only / V-only / both, on/off masks with values 0, 1, 2 and block sizes 112 / 96, 4:4:4 / 4:2:2 / 4:2:0 sources, odd sizes. Same `Unsupported` formats as EFE linear | `tests/filters_efe_ref.rs`: **bit-identical** to the reference on all 16 streams that enable it (max abs error 0); `tests/decode_ref.rs` as above |
 
 ## Accuracy of the float path (measured, 560x888 test image 00030, upstream b9e573f, torch 1.10.2 CPU)
 
@@ -49,6 +51,8 @@ against reference-produced data passes. "stub" and "partial" mean what they say.
 | simple profile (SOP), 0.50 bpp | < 5e-4 | < 5e-4 | < 3e-3 | 49, all by 1 |
 | high profile (HOP), 0.50 bpp | < 5e-4 | < 5e-4 | < 3e-3 | 41, all by 1 |
 | base / simple profile with LSBS, RVS, GRFS in six combinations | < 5e-4 | < 5e-4 | < 3e-3 | 47 .. 57, all by 1 |
+| base profile + EFE linear (stock encoder), and 4 streams with EFE linear + non-linear forced to filter lengths 2..4 / every region split | < 5e-4 | < 5e-4 | < 3e-3 (before filters) | 47 .. 66, all by 1 (the two filters add at most 9.2e-5 of their own) |
+| 2096x1400 image 00001 with EFE linear + non-linear (4 tiles); 277x201 crop (odd size) | < 5e-4 | < 5e-4 | < 3e-3 | 384 of 8,803,200; 5 of 167,031, all by 1 |
 
 Entries written `< x` are the bounds `tests/decode_ref.rs` asserts, not individually recorded
 maxima; the other numbers were read off `examples/dbg_recon`.
@@ -56,7 +60,8 @@ maxima; the other numbers were read off `examples/dbg_recon`.
 The differences come from convolution summation order (PyTorch/oneDNN vs this crate's fixed
 order); they land on 8-bit rounding boundaries in about 0.005 % of samples.
 
-Not started (decoder): the four post-filters (in progress) (EFE linear, eICCI, EFE non-linear, LEF),
+Not started (decoder): two of the four post-filters (eICCI, LEF: in progress; see the table for
+EFE linear / non-linear),
 chroma-subsampled and 10-bit output, custom colour transform, UDI, progressive (`num_decode_chs`)
 decode. Not started (everything else): the whole encoder
 above the entropy coder (analysis transforms, hyper-encoder, quantisation/RDO tools, bitrate
@@ -124,6 +129,11 @@ three region streams (checked), so its psi / y_hat / reconstruction are what the
 
 ## Reference constants that are not in the bitstream
 
+- EFE linear: the eight region splits (`cands`, with `0.33` / `0.66` fractions and borders
+  rounded to multiples of 32 phase samples by Python's round-half-even), the DCT-IF 4-tap
+  kernels, the weight scale (`(code - 32767) / 2^11`). EFE non-linear: 8 luma bins per tile.
+  `filters::efe_linear` / `efe_nonlinear` carry copies.
+
 - RVS thresholds / scale lists and LSBS scale lists are per-model configuration
   (`cfg/pipeline.json`, `tools_N`), and the LSBS thresholds are the tool's Python defaults. A
   decoder has to know them; `tools::rvs` and `tools::lsbs` carry copies.
@@ -144,6 +154,41 @@ downscale a shape that is already latent-sized and crash in `quantize_scale`.
 `scripts/ref_vectors/dump_decode.py --fix-qmap-header` replaces that one method at runtime; with
 it the decoder's reconstruction MD5 equals the encoder's on all three quality-map vectors, so that
 patched decoder is the oracle for them (`<vector>/fixed_decoder/`).
+
+## EFE filters: reference behaviour worth knowing
+
+- **The on/off switch looks at the U mask only.** `EFElinear.decompress` builds the second
+  picture, and `EFEnonlinear.decompress` applies `apply_OnoffSwitch`, only when `mask1` (U) is
+  present. A stream with `mask1_enabled_flag = 0, mask2_enabled_flag = 1` decodes with the V mask
+  silently ignored. Ported as is (`efe_nonlinear::has_first_mask`).
+- **"Plane not filtered" crashes the reference at full chroma resolution.** With
+  `best_cand_idx = 0` `SplitApply` indexes `cands[-1]` and, when the picture is coded at the
+  source's chroma resolution, dereferences the missing luma weights (`self.weightsY_UV.device`).
+  The reference *encoder* dies the same way with `DCTIF_only = 1` on such a picture, so no such
+  stream exists. This crate returns `Error::Unsupported`. With chroma coded below the source's
+  resolution the same signalling works (DCT-IF taps only) and is ported + verified.
+- **Masks without the second picture crash the reference** (`img_alt` is `None` when EFE linear
+  is off or its first set filters neither plane): `Error::InvalidData` here. Likewise a mask whose
+  size is not `ceil(plane / bS)`, zero `bS`, zero tile size, fewer tile parameters than tiles.
+- **Empty regions.** On pictures below about 64 luma samples a three-way split leaves regions
+  empty; PyTorch rejects the empty convolution for kernels above 1x1. Skipped here (no oracle).
+- **`icci_enable_flag` is absent for 4:2:0 sources** (`auto_enableflag_detected_value`): the tool
+  header goes straight from the EFE linear data to `EFE_nonlinear_filter_enabled_flag`. Found
+  while making 4:2:0 vectors; `header::ToolHeader` follows it (`PictureHeader::icci_flag_coded`).
+- The shadowed loop variable `j` in `LumaAidedAdaptiveNonlinearFilter_apply` (plane index reused
+  as tile column index) is harmless: the plane is chosen before the inner loop runs.
+- Formats the header can spell but the reference cannot run: vertical-only subsampling
+  (`Image.get_format_from_subsampling` returns `None`), 4:2:2 source coded 4:2:0
+  (`to_420_` raises `NotImplementedError`).
+- The encoder's RDO nearly always lands on the smallest EFE choice (1x1 filter, one region,
+  non-linear filter off). `scripts/ref_vectors/force_efe_encode.py` overrides the *decisions*
+  (not the weights, syntax or decoder) to get streams for the other branches.
+
+Timing, 560x888, EFE linear (3x3 + 4x4 filters, 4 / 6 regions, two pictures) + EFE non-linear
+(U and V, masks), `examples/prof_filters_efe`, best of 40 on a busy box: 6.0 ms + 2.7 ms on one
+thread, 2.2 ms + 0.4 ms threaded; the reference's `decompress` calls take 10.6 ms + 10.6 ms
+(one torch thread, `dump_filters.py` `timing.txt`, one run). 2096x1400: 33 + 18 ms one thread,
+8.3 + 1.7 ms threaded, reference 159 + 94 ms.
 
 ## Deliberate divergences from the reference
 

@@ -6,11 +6,11 @@
 //! filter maps a [`FilterState`] to the next one; the state carries the picture and, for the EFE
 //! pair, the alternative up-sampled picture the linear filter prepares for the non-linear one.
 //!
-//! Status: the chain and its inputs are in place; **none of the four filters is ported yet**.
-//! A stream that enables one is rejected with `Error::Unsupported` naming the filter.
+//! Status: see `PORTING.md`. A stream that enables a filter that is not ported yet is rejected
+//! with `Error::Unsupported` naming the filter.
 
-mod efe_linear;
-mod efe_nonlinear;
+pub mod efe_linear;
+pub mod efe_nonlinear;
 mod icci;
 mod lef;
 

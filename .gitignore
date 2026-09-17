@@ -23,3 +23,6 @@ massif.out.*
 fuzz/target/
 fuzz/artifacts/
 fuzz/corpus/
+
+# Python bytecode of the reference-vector scripts
+__pycache__/
