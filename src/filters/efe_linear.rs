@@ -452,3 +452,133 @@ pub fn apply(
     let image = Planes { y: img.y, u, v };
     Ok(FilterState { image, upsampled })
 }
+
+#[cfg(test)]
+pub(super) mod tests {
+    use super::*;
+    use crate::header::{PictureHeader, ToolHeader};
+    use crate::model::ModelBundle;
+    use crate::nn::fast::Engine;
+
+    /// A reference-written 4:4:4 picture header (`header::tests::PIH_BASE_TOOLS_OFF`).
+    pub fn picture_header() -> PictureHeader {
+        let hex = "011103401f00338000008a32c5001800";
+        let bytes: Vec<u8> = (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+            .collect();
+        PictureHeader::parse(&bytes).unwrap()
+    }
+
+    /// Run `f` with a filter context for `hdr` / `tools`.
+    pub fn with_ctx<R>(
+        hdr: &PictureHeader,
+        tools: &ToolHeader,
+        f: impl FnOnce(&FilterContext<'_>) -> R,
+    ) -> R {
+        let eng = Engine::new();
+        let scale_log = Tensor::<i32>::zeros(1, 1, 1).unwrap();
+        let models = ModelBundle::new();
+        f(&FilterContext {
+            eng: &eng,
+            hdr,
+            tools,
+            luma_scale_log: &scale_log,
+            models: &models,
+            op: hdr.synthesis_transforms[0],
+            icci_nets: &Default::default(),
+        })
+    }
+
+    pub fn ramp(h: usize, w: usize, scale: f32, base: f32) -> Tensor<f32> {
+        let data = (0..h * w).map(|i| base + scale * i as f32).collect();
+        Tensor::from_vec(1, h, w, data).unwrap()
+    }
+
+    /// Code of a weight value (`integerize` without the clamp).
+    fn code(w: f32) -> u32 {
+        ((w * 2048.0).round() as i32 + 32767) as u32
+    }
+
+    #[test]
+    fn split_edges_round_half_to_even_like_python() {
+        // round(f * (s + 31) / 32) * 32 evaluated by CPython for f = 0.33, 0.5, 0.66, 1.
+        for (s, want) in [
+            (444, [160, 224, 320, 480]),
+            (280, [96, 160, 192, 320]),
+            (101, [32, 64, 96, 128]),
+            (50, [32, 32, 64, 96]),
+            (20, [32, 32, 32, 64]),
+            // 0.5 * 160 / 32 = 2.5 rounds to 2, not 3.
+            (129, [64, 64, 96, 160]),
+        ] {
+            let got = [0.33, 0.5, 0.66, 1.0].map(|f| split_edge(f, s));
+            assert_eq!(got, want, "s = {s}");
+        }
+    }
+
+    #[test]
+    fn one_tap_filter_matches_the_formula() {
+        // fL = 1: out = (1 + w) * (u - mean) + mean + wy * y, per sample, on an odd-sized picture.
+        let hdr = picture_header();
+        let (h, w) = (5, 7);
+        let y = ramp(h, w, 1.5, 16.0);
+        let mut set = EfeLinearSet {
+            cand: [Some(0), Some(0)],
+            filter_len: [1, 1],
+            ..Default::default()
+        };
+        set.chroma_weights = [vec![vec![code(0.5)]], vec![vec![code(-0.25)]]];
+        set.luma_weights = [vec![vec![code(0.25)]], vec![vec![code(0.0)]]];
+        let header = EfeLinearHeader {
+            mean: [12000, 13000],
+            upsample_set: EfeLinearSet::default(),
+            set,
+        };
+        let state = FilterState {
+            image: Planes {
+                y: y.clone(),
+                u: ramp(h, w, -0.5, 130.0),
+                v: ramp(h, w, 0.25, 110.0),
+            },
+            upsampled: None,
+        };
+        let input = state.image.clone();
+        let out = with_ctx(&hdr, &ToolHeader::default(), |ctx| {
+            apply(ctx, &header, state)
+        })
+        .unwrap();
+        assert!(out.upsampled.is_none());
+        assert_eq!(out.image.y.data, y.data);
+        for i in 0..h * w {
+            let u = (input.u.data[i] - 120.0) * 1.5 + 120.0 + 0.25 * y.data[i];
+            let v = (input.v.data[i] - 130.0) * 0.75 + 130.0 + 0.0;
+            assert_eq!(out.image.u.data[i], u, "U sample {i}");
+            assert_eq!(out.image.v.data[i], v, "V sample {i}");
+        }
+    }
+
+    #[test]
+    fn formats_without_an_oracle_are_rejected() {
+        let mut hdr = picture_header();
+        let header = EfeLinearHeader::default(); // both planes "not filtered"
+        let state = || FilterState {
+            image: Planes {
+                y: ramp(4, 4, 1.0, 0.0),
+                u: ramp(4, 4, 1.0, 0.0),
+                v: ramp(4, 4, 1.0, 0.0),
+            },
+            upsampled: None,
+        };
+        let run = |hdr: &PictureHeader| {
+            with_ctx(hdr, &ToolHeader::default(), |ctx| {
+                apply(ctx, &header, state()).map(|_| ())
+            })
+        };
+        assert!(matches!(run(&hdr), Err(Error::Unsupported(_))));
+        (hdr.s_ver, hdr.s_hor, hdr.c_ver, hdr.c_hor) = (2, 1, 2, 1);
+        assert!(matches!(run(&hdr), Err(Error::Unsupported(_))));
+        (hdr.s_ver, hdr.s_hor, hdr.c_ver, hdr.c_hor) = (1, 2, 2, 2);
+        assert!(matches!(run(&hdr), Err(Error::Unsupported(_))));
+    }
+}

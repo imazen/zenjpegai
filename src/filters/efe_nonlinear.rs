@@ -216,3 +216,97 @@ pub fn apply(
     }
     Ok(FilterState { image, upsampled })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::efe_linear::tests::{picture_header, ramp, with_ctx};
+    use super::*;
+    use crate::decoder::reconstruct::Planes;
+    use crate::header::ToolHeader;
+
+    fn planes(u: Tensor<f32>, v: Tensor<f32>) -> Planes {
+        Planes {
+            y: ramp(u.h, u.w, 1.0, 35.0),
+            u,
+            v,
+        }
+    }
+
+    #[test]
+    fn tile_network_matches_the_formula() {
+        // Luma range 10..90 in 8 bins of 10; w0 = 1, w2 = 0.5, everything else 0:
+        // out = relu((Y - 10) + C) + 0.5 * relu(Y - 30).
+        let code = |w: f32| (w * 2048.0) as u32 + 32767;
+        let mut w = vec![code(0.0); 8];
+        w[0] = code(1.0);
+        w[2] = code(0.5);
+        let h = EfeNonlinearHeader {
+            nonlinear: Some(EfeNonlinearTiles {
+                tile_width: 64,
+                tile_height: 64,
+                luma_min: vec![1000],
+                luma_max: vec![9000],
+                weights: [Some(w), None],
+            }),
+            ..Default::default()
+        };
+        let input = planes(ramp(3, 5, 2.0, 100.0), ramp(3, 5, 1.0, 50.0));
+        let state = FilterState {
+            image: input.clone(),
+            upsampled: None,
+        };
+        let hdr = picture_header();
+        let out = with_ctx(&hdr, &ToolHeader::default(), |ctx| apply(ctx, &h, state)).unwrap();
+        assert_eq!(out.image.v.data, input.v.data, "V is switched off");
+        for i in 0..15 {
+            let y = input.y.data[i];
+            let want = ((y - 10.0) + input.u.data[i]).max(0.0) + 0.5 * (y - 30.0).max(0.0);
+            assert_eq!(out.image.u.data[i], want, "U sample {i}");
+        }
+    }
+
+    #[test]
+    fn switch_takes_filtered_average_or_alternative() {
+        let hdr = picture_header();
+        let filt = planes(ramp(4, 6, 1.0, 10.0), ramp(4, 6, 1.0, 50.0));
+        let alt = planes(ramp(4, 6, -1.0, 200.0), ramp(4, 6, -1.0, 150.0));
+        let mut h = EfeNonlinearHeader {
+            mask_geometry: Some((2, 2, 3)),
+            masks: [Some(vec![0, 1, 2, 2, 1, 0]), None],
+            ..Default::default()
+        };
+        let run = |h: &EfeNonlinearHeader, alt: Option<Planes>| {
+            let state = FilterState {
+                image: filt.clone(),
+                upsampled: alt,
+            };
+            with_ctx(&hdr, &ToolHeader::default(), |ctx| apply(ctx, h, state))
+        };
+        let out = run(&h, Some(alt.clone())).unwrap().image;
+        assert_eq!(out.v.data, filt.v.data, "no V mask");
+        for y in 0..4 {
+            for x in 0..6 {
+                let (f, a) = (filt.u.at(0, y, x), alt.u.at(0, y, x));
+                let want = match [0, 1, 2, 2, 1, 0][(y / 2) * 3 + x / 2] {
+                    0 => f,
+                    1 => (a + f) / 2.0,
+                    _ => a,
+                };
+                assert_eq!(out.u.at(0, y, x), want, "({y}, {x})");
+            }
+        }
+        // Masks need the EFE linear filter's second picture.
+        assert!(matches!(run(&h, None), Err(Error::InvalidData(_))));
+        // A mask that does not cover the picture is what the reference fails on.
+        h.mask_geometry = Some((4, 2, 3));
+        assert!(matches!(
+            run(&h, Some(alt.clone())),
+            Err(Error::InvalidData(_))
+        ));
+        // The reference only ever looks at the U mask: a V mask alone does nothing.
+        h.mask_geometry = Some((2, 2, 3));
+        h.masks = [None, Some(vec![2; 6])];
+        let out = run(&h, None).unwrap().image;
+        assert_eq!(out.v.data, filt.v.data);
+    }
+}
