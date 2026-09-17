@@ -7,3 +7,12 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
 extern crate alloc;
+
+whereat::define_at_crate_info!();
+
+pub mod bitio;
+pub mod container;
+mod error;
+pub mod mans;
+
+pub use error::Error;

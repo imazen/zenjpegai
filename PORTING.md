@@ -9,7 +9,27 @@ against reference-produced data passes. "stub" and "partial" mean what they say.
 
 | Rust module | Upstream source | Status | Parity gate |
 | --- | --- | --- | --- |
-| (none yet) | | | |
+| `bitio` | `entropy_coding/bits_coders.py`, `binarizers.py`, `cpp_exts/direct/` | ported (reader + writer, ue/se) | unit tests (known codewords, round trips); exercised by every header test once headers land |
+| `container` | `bitstream_structure/{layouts_def,substream,bitstream_structure,aemem}.py` | ported: marker split, region split (independent + dependent), thread split, writer | unit round trips only so far; no reference-stream gate yet |
+| `mans::tables` | `lib_wrappers/mans/utils.py`, `ec_lib_mans.py::init_quant_params` | ported, integer-only | `mans::tables::tests::tables_match_reference` (FNV-1a of the reference-built encode/decode/state-map tables) |
+| `mans::decoder` | `cpp_exts/mans/decompressor.{h,cpp}` | ported: residual + z, 1..16 threads (threads run sequentially for now) | `tests/mans_vectors.rs`: decodes payloads written by the reference C++ `ANSEncoder` |
+| `mans::encoder` | `cpp_exts/mans/compressor.{h,cpp}` | ported: residual + z, 1..16 threads | `tests/mans_vectors.rs`: output bytes and thread sizes equal the reference's |
+
+Not started: headers, weight loading, z/residual substream decode, hyper-scale decoder, quantizer
+tools (gain unit, RVS, quality map), skip mode, tiling/regions, hyper decoder, MCM context model,
+synthesis transforms (SOP/BOP/HOP), post-filters (EFE linear/nonlinear, eICCI, LEF), colour
+processing, image IO, the whole encoder side above the entropy coder, CLI, benchmarks.
+
+## Deliberate divergences from the reference
+
+- **Sigma index above 31.** The reference clamps the sigma index to `[0, 34]`
+  (`sigma_quant_level = 35`) but its C++ coder only has 32 distributions and indexes past the end
+  of its tables for 32..34 (undefined behaviour). `mans` clamps to 31 instead. Whether real streams
+  ever reach 32 is not yet measured.
+- **Container strictness.** The reference reader skips unknown two-byte words and spins forever on
+  a truncated file. `container::Codestream::parse` requires SOC, known markers, PIH first, and EOC.
+- **Corrupt ANS payloads.** Where the C++ decoder would read in front of its buffer, `mans`
+  reports `Error::InvalidData`.
 
 ## Reference environment
 
