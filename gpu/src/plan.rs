@@ -415,21 +415,26 @@ impl<'a> Graph<'a> {
         Ok(y)
     }
 
-    /// In-place layer norm over channels.
-    pub fn layer_norm(&mut self, x: T, l: &GpuLayerNorm) -> Result<()> {
+    /// Layer norm over channels.
+    pub fn layer_norm(&mut self, x: T, l: &GpuLayerNorm) -> Result<T> {
         if x.c != l.ch {
             return Err(GpuError::Shape("layer norm: channel mismatch".into()));
         }
+        let y = self.tensor(x.c, x.h, x.w)?;
         let n = x.h * x.w;
         let (row, dispatch) = grid1(n, 1);
         self.push(
             "layer_norm",
             kernels::layer_norm,
             &[n as u32, row, x.c as u32, x.c4() as u32],
-            vec![Bind::Tensor(x.id), Bind::Buffer(l.wb.clone())],
+            vec![
+                Bind::Tensor(x.id),
+                Bind::Buffer(l.wb.clone()),
+                Bind::Tensor(y.id),
+            ],
             dispatch,
         );
-        Ok(())
+        Ok(y)
     }
 
     /// Channel attention of the transformer block: `qkv` holds q, k, v (each `dim` channels,

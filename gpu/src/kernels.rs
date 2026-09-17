@@ -368,13 +368,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{
     )
 }
 
-/// Layer norm over the channels of each pixel (`eps = 1e-5`), in place. `wb` holds the weight
+/// Layer norm over the channels of each pixel (`eps = 1e-5`). `wb` holds the weight
 /// blocks followed by the bias blocks. Params: `n row c c4`.
 pub fn layer_norm() -> String {
     format!(
         "{params}
-@group(0) @binding(1) var<storage, read_write> a: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read> a: array<vec4<f32>>;
 @group(0) @binding(2) var<storage, read> wb: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read_write> dst: array<vec4<f32>>;
 @compute @workgroup_size({WG1}, 1, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{
   let i = gid.y * p.row + gid.x;
@@ -393,7 +394,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{
   }}
   let inv = 1.0 / sqrt((q.x + q.y + q.z + q.w) / f32(p.c) + 1e-5);
   for (var c = 0u; c < p.c4; c++) {{
-    a[base + c] = (a[base + c] - vec4<f32>(mean)) * inv * wb[c] + wb[p.c4 + c];
+    dst[base + c] = (a[base + c] - vec4<f32>(mean)) * inv * wb[c] + wb[p.c4 + c];
   }}
 }}
 ",

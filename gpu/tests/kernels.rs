@@ -429,8 +429,7 @@ fn layer_norm_and_attention() {
         let got = run(
             |g, i| {
                 g.layer_norm(i[0], &GpuLayerNorm::new(context(), &w, &b).unwrap())
-                    .unwrap();
-                i[0]
+                    .unwrap()
             },
             &[&x],
         );

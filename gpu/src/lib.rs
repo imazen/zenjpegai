@@ -6,10 +6,14 @@
 #![forbid(unsafe_code)]
 
 mod context;
+mod decoder;
 mod error;
 pub mod kernels;
 pub mod layers;
 pub mod plan;
+mod synthesis;
 
 pub use context::{ContextOptions, GpuContext};
+pub use decoder::{GpuDecoded, GpuDecoder};
 pub use error::GpuError;
+pub use synthesis::{GpuPicture, GpuSynthesis, Timing, Workspace};
