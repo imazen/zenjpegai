@@ -71,6 +71,24 @@ pub fn decode_entropy_stage_with(
     let z_threads = split_threads(soz, hdr.num_threads_z as usize)?;
     let mut z_dec = tables.decoder(&z_threads)?;
 
+    // The quality map has its own substream and applies to both components.
+    let quality_map = match &hdr.quality_map {
+        Some(q) => {
+            let soq = cs
+                .find(Marker::Soq)
+                .ok_or(Error::InvalidData("no quality map substream"))?;
+            let (lh, lw) = hdr.latent_size(0);
+            Some(crate::tools::qualmap::QualityMap::decode(
+                tables,
+                soq,
+                q,
+                lh as usize,
+                lw as usize,
+            )?)
+        }
+        None => None,
+    };
+
     let layout = match hdr.regions {
         Some(r) if r.independent => RegionLayout::Independent,
         _ => RegionLayout::Dependent,
@@ -89,6 +107,7 @@ pub fn decode_entropy_stage_with(
             models[ccs],
             &mut z_dec,
             &regions,
+            quality_map.as_ref(),
             stop,
         )?);
     }

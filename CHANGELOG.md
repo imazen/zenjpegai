@@ -6,6 +6,7 @@
 <!-- Breaking changes that will ship together in the next major (or minor for 0.x) release. -->
 
 ### Added
+- Quality map (spatially varying quantisation), bit-exact on three reference streams.
 - Coding tools: residual variance scaling (RVS), channel gain flags (GRFS) and latent scaling before synthesis (LSBS), bit-exact in the entropy stage on six reference streams.
 - HOP synthesis (high operating point): residual blocks, CAB, TAM transformer blocks; depthwise convolution kernel and attention math that are bit-identical on every CPU tier.
 - Convolutions read their input in place (virtual zero padding) and tensors recycle their storage through a bounded pool; `Decoder::release_buffers`.

@@ -11,7 +11,7 @@
 #![cfg(feature = "reference-tests")]
 
 mod common;
-use common::{load_dump, ref_root, vector_dir};
+use common::{load_dump, load_fixed_decoder_dump, ref_root, vector_dir};
 use zenjpegai::container::Codestream;
 use zenjpegai::decoder::output::{RgbPlanes, quantize, to_rgb_planes};
 use zenjpegai::decoder::reconstruct::{
@@ -70,16 +70,10 @@ fn decode(stream: &[u8], eng: &Engine) -> (zenjpegai::header::PictureHeader, Dec
 fn check(name: &str) {
     let dir = vector_dir(name);
     let stream = std::fs::read(dir.join("stream.bits")).unwrap();
-    // Region streams: the stock reference decoder mis-decodes their residuals (PORTING.md), so
-    // the oracle is the dump taken with `dump_decode.py --contiguous-masks`.
-    let fixed = dir.join("fixed_decoder");
-    let dump = if name.contains("regions") {
-        assert!(
-            fixed.join("manifest.txt").is_file(),
-            "{} is missing: run scripts/ref_vectors/make_reference_streams.sh",
-            fixed.display()
-        );
-        load_dump(&fixed)
+    // The stock reference decoder mis-decodes region streams and cannot decode quality maps
+    // (PORTING.md); for those the oracle is the decoder with these defects patched.
+    let dump = if name.contains("regions") || name.contains("qmap") {
+        load_fixed_decoder_dump(&dir)
     } else {
         load_dump(&dir)
     };
@@ -152,6 +146,9 @@ vectors! {
     // Coding tools: latent scaling before synthesis, residual variance scaling + gain flags.
     img30_base_lsbs_bpp050 => "img30_base_lsbs_bpp050",
     img30_base_rvs_bpp050 => "img30_base_rvs_bpp050",
+    img30_base_qmap_bpp050 => "img30_base_qmap_bpp050",
+    img30_base_qmap_rvs_bpp025 => "img30_base_qmap_rvs_bpp025",
+    img30_base_qmap_threads8_bpp100 => "img30_base_qmap_threads8_bpp100",
     img30_base_rvsonly_bpp050 => "img30_base_rvsonly_bpp050",
     img30_base_grfsonly_bpp075 => "img30_base_grfsonly_bpp075",
     img30_base_lsbs_rvs_bpp025 => "img30_base_lsbs_rvs_bpp025",

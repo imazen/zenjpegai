@@ -2,7 +2,7 @@
 # Encode + decode a matrix of configurations with the reference software and dump the decoder's
 # intermediate tensors for the parity tests.
 #
-#   scripts/ref_vectors/make_reference_streams.sh [SET]      SET: smoke (default) | regions | tools | filters | all
+#   scripts/ref_vectors/make_reference_streams.sh [SET]      SET: smoke (default) | regions | tools | filters | qmap | all
 #
 # Output: $OUT/<name>/{stream.bits,encoder.log,tensors.bin,manifest.txt,decoded.png,stdout.log}
 # with OUT=/mnt/v/output/zenjpegai/reference/vectors. Existing streams are kept (delete the
@@ -22,18 +22,21 @@ mkdir -p "$OUT"
 one() { # name image bpp cfg...
   local name=$1 image=$2 bpp=$3; shift 3
   local dir="$OUT/$name"
-  if [ -f "$dir/manifest.txt" ]; then echo "== $name: exists"; return; fi
+  if [ -f "$dir/manifest.txt" ] || [ -f "$dir/fixed_decoder/manifest.txt" ]; then echo "== $name: exists"; return; fi
   mkdir -p "$dir"
   echo "== $name: encoding ($(date -u +%H:%M:%S))"
   nice -n 19 python -m src.reco.coders.encoder "data/test/$image" "$dir/stream.bits" \
       --set_target_bpp "$bpp" --cfg "$@" -target_device cpu > "$dir/encoder.log" 2>&1
   echo "== $name: decoding + dumping"
-  nice -n 19 python "$HERE/dump_decode.py" "$dir/stream.bits" "$dir" > "$dir/dump.log" 2>&1
-  # Same decode with the skip mask made contiguous (what the reference encoder does): the
-  # oracle for everything behind the entropy stage (tests/decode_ref.rs).
+  # The stock reference decoder cannot decode every stream its encoder writes (quality maps
+  # crash it, region streams are mis-decoded; PORTING.md). Its failure is recorded, not fatal.
+  nice -n 19 python "$HERE/dump_decode.py" "$dir/stream.bits" "$dir" > "$dir/dump.log" 2>&1 \
+      || echo "   stock reference decoder FAILED on this stream (see $dir/dump.log)"
+  # Same decode with those defects patched at runtime: the oracle for such streams.
   nice -n 19 python "$HERE/dump_decode.py" "$dir/stream.bits" "$dir/fixed_decoder" --contiguous-masks \
-      > "$dir/dump_fixed.log" 2>&1
-  grep -h "^MD5" "$dir/encoder.log" "$dir/stdout.log" | sort | uniq -c | sed 's/^/   /'
+      --fix-qmap-header > "$dir/dump_fixed.log" 2>&1
+  { grep -hs "^MD5" "$dir/encoder.log" "$dir/stdout.log" "$dir/fixed_decoder/stdout.log" || true; } \
+      | sort | uniq -c | sed 's/^/   /'
   ls -la "$dir/stream.bits" | awk '{print "   stream bytes:", $5}'
 }
 
@@ -58,7 +61,9 @@ one_fixed() { # name image model_id beta_disp_log cfg...
   nice -n 19 python "$HERE/dump_decode.py" "$dir/stream.bits" "$dir" > "$dir/dump.log" 2>&1
   nice -n 19 python "$HERE/dump_decode.py" "$dir/stream.bits" "$dir/fixed_decoder" --contiguous-masks \
       > "$dir/dump_fixed.log" 2>&1
-  grep -h "^MD5" "$dir/encoder.log" "$dir/stdout.log" | sort | uniq -c | sed 's/^/   /'
+  # Encoder and (patched) decoder print the MD5 of their reconstructions: one line = they agree.
+  { grep -hs "^MD5" "$dir/encoder.log" "$dir/stdout.log" "$dir/fixed_decoder/stdout.log" || true; } \
+      | sort | uniq -c | sed 's/^/   /'
   ls -la "$dir/stream.bits" | awk '{print "   stream bytes:", $5}'
 }
 
@@ -98,5 +103,21 @@ if [ "$SET" = filters ] || [ "$SET" = all ]; then
   one img30_base_lef_bpp050 $IMG30 50 cfg/tools_off.json cfg/tools/LEF.json cfg/profiles/base.json
   one img30_base_on_bpp025 $IMG30 25 cfg/tools_on.json cfg/profiles/base.json
   one img30_base_on_bpp100 $IMG30 100 cfg/tools_on.json cfg/profiles/base.json
+fi
+if [ "$SET" = qmap ] || [ "$SET" = all ]; then
+  # Quality map (spatially varying quantisation). Of upstream's map generators only the
+  # mask-file one (qp_map_type 3) works on this code path (the others downscale a shape that is
+  # already latent-sized and crash), and upstream does not ship its sample mask. The mask is
+  # drawn by examples/make_roi_mask.rs; the config is written here because it needs the path.
+  MASKS=$OUT/../masks; mkdir -p "$MASKS"
+  (cd "$HERE/../.." && nice -n 19 cargo run -q --release --features cli --example make_roi_mask -- \
+      560 888 "$MASKS/img30_roi.png" 96,160,208,304 352,560,128,160)
+  cat > "$MASKS/qmap_img30.json" <<JSON
+{ "model": { "tool": "CCS_SGMM", "CCS_SGMM": { "tools_common": { "qual_map": {
+  "enabled": 1, "qp_map_type": 3, "adjust_qp": 1, "ROI_map_in_file": "$MASKS/img30_roi.png" } } } } }
+JSON
+  one img30_base_qmap_bpp050 $IMG30 50 cfg/tools_off.json "$MASKS/qmap_img30.json" cfg/profiles/base.json
+  one img30_base_qmap_rvs_bpp025 $IMG30 25 cfg/tools_off.json cfg/tools/ResVarScale.json "$MASKS/qmap_img30.json" cfg/profiles/base.json
+  one img30_base_qmap_threads8_bpp100 $IMG30 100 cfg/tools_off.json cfg/tools/ECThread8.json "$MASKS/qmap_img30.json" cfg/profiles/base.json
 fi
 echo "== done ($(date -u +%H:%M:%S))"

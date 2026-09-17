@@ -38,11 +38,26 @@ pub fn vector_dir(name: &str) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/mnt/v/output/zenjpegai/reference/vectors"));
     let dir = root.join(name);
     assert!(
-        dir.join("manifest.txt").is_file(),
+        dir.join("stream.bits").is_file(),
         "{} is missing: run scripts/ref_vectors/make_reference_streams.sh",
         dir.display()
     );
     dir
+}
+
+/// Dump of the reference decoder run with its known defects patched at runtime
+/// (`dump_decode.py --contiguous-masks --fix-qmap-header`, in `<vector>/fixed_decoder/`): the
+/// oracle for streams the stock decoder mis-decodes (regions) or cannot decode (quality maps).
+pub fn load_fixed_decoder_dump(
+    dir: &std::path::Path,
+) -> std::collections::HashMap<String, RefTensor> {
+    let fixed = dir.join("fixed_decoder");
+    assert!(
+        fixed.join("manifest.txt").is_file(),
+        "{} is missing: run scripts/ref_vectors/make_reference_streams.sh",
+        fixed.display()
+    );
+    load_dump(&fixed)
 }
 
 /// One tensor of a reference dump.

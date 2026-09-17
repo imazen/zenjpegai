@@ -23,9 +23,10 @@ against reference-produced data passes. "stub" and "partial" mean what they say.
 | `tools::skip` | `skip_ls/skip_mode.py` (mask + cube-flag expansion) | ported (decoder side); cube flags exercised only by header round trips so far, no reference stream with `use_cube_flags = 1` yet | `tests/entropy_ref.rs` (threshold mask) |
 | `tools::log2lin` | `common/log2lin.py::Log2LinConvertion` | ported: the 4352-entry table is computed (`round(2^17 exp(i ln(100/0.11)/4352 + ln 0.11))`) instead of stored | unit test pins the FNV-1a hash of upstream's literal table |
 | `tools::rvs` | `quantization/rvs/res_var_scale.py` (`buildTables`, `analyze`, `quantize_scale`, `dequantize_resi`), constants from `cfg/pipeline.json` | ported (decoder side): block-wise "likely" map, RVS scale tables, GRFS ("cwg") per-channel variants | `tests/entropy_ref.rs` (scale map and residual exact) on RVS+GRFS, RVS-only and GRFS-only streams |
+| `tools::qualmap` | `quality_map/quality_map.py` (`decode`, `quantize_scale`, `dequantize_resi`) | ported (decoder side): ANS-coded delta plane, DPCM reconstruction, log-scale offset and residual step per position, shared by both components | `tests/entropy_ref.rs` + `tests/decode_ref.rs` on 3 quality-map streams (plain, with RVS, with 8 ANS threads); oracle = reference decoder with its header defect patched (below) |
 | `tools::lsbs` | `ls_processing/lsbs/lsbs_scale_mode.py` (`buildTables`, `post_processing`), constants from `cfg/pipeline.json` | ported | `tests/decode_ref.rs` LSBS streams (`y_hat` within 5e-4 of the reference after scaling) |
 | `tools::regions` | `tiling/tiling.py::TileManagerHyper` | ported: region grids for y / psi / z, with and without overlap extension | unit tests + `tests/entropy_ref.rs` region streams (latent grid only) |
-| `decoder::entropy` | `common_modules.py::decode/decode_z/decode_y/_ac_decode_y/_cal_step_size`, `gm.py::build_indexes` | ported for: all 4 models, 1..16 threads, no regions / dependent / independent regions, RVS and GRFS. **Missing: quality map, `num_decode_chs` (progressive decode)** — such streams are rejected as `Unsupported` | `tests/entropy_ref.rs`: 18 reference streams (6 with RVS and/or GRFS); z_hat, sigma, quantised residual exact, dequantised residual bit-identical |
+| `decoder::entropy` | `common_modules.py::decode/decode_z/decode_y/_ac_decode_y/_cal_step_size`, `gm.py::build_indexes` | ported for: all 4 models, 1..16 threads, no regions / dependent / independent regions, RVS, GRFS and the quality map. **Missing: `num_decode_chs` (progressive decode)** — such streams are rejected as `Unsupported` | `tests/entropy_ref.rs`: 21 reference streams (6 with RVS and/or GRFS, 3 with a quality map); z_hat, sigma, quantised residual exact, dequantised residual bit-identical |
 | `nn` + `nn::reference` | `torch.nn.functional` conv2d / conv_transpose2d / pixel_shuffle / ReLU / ReLU6 | ported as plain loops that *define* the crate's numeric contract (FMA accumulation in `(ic, ky, kx)` order). Kept as the oracle and as the fallback for geometries the fast engine does not cover (stride-2 convolutions) | `tests/nn_vectors.rs`: 11 tiny PyTorch-computed cases (groups, depthwise, stride 2, 2x2, 1x3/3x1, both transposed geometries) within 2e-6 relative; pixel shuffle exact |
 | `nn::fast` | (replaces oneDNN under PyTorch) | NCHWc blocked tensors (16 lanes on AVX-512, 8 on AVX2 / NEON / scalar); register-blocked FMA micro-kernel for stride-1 and stride-2 convolutions (any group count with block-aligned groups, up to 9 taps) reading the input in place with virtual zero padding; depthwise 3x3; stride-2 transposed convolution (k <= 4); int8 `madd` convolution for the HSD; ReLU/ReLU6/gate/sigmoid/ELU-gate, layer norm, channel attention, pixel shuffle on blocked data; rayon over output rows; bounded buffer pool. `exp` is one fixed algorithm (Cephes `expf`) and long sums run in `f64` with a fixed order, so every tier agrees bit for bit. **Not done: Winograd, int8 VNNI, padding-free transposed convolution** | `tests/fast_vs_reference.rs`: every tier, with and without threads, bit-identical to `nn::reference`; `tests/math_tiers.rs`; `tests/decode_ref.rs::tiers_and_threads_agree_bit_for_bit` on whole SOP / BOP / HOP decodes |
 | `model::hyper_decoder` | `components/autoencoder_hyper/decoder/base.py` | ported | `tests/decode_ref.rs` (`psi` within 5e-4 abs of the reference) |
@@ -55,7 +56,7 @@ maxima; the other numbers were read off `examples/dbg_recon`.
 The differences come from convolution summation order (PyTorch/oneDNN vs this crate's fixed
 order); they land on 8-bit rounding boundaries in about 0.005 % of samples.
 
-Not started (decoder): quality map, the four post-filters (EFE linear, eICCI, EFE non-linear, LEF),
+Not started (decoder): the four post-filters (in progress) (EFE linear, eICCI, EFE non-linear, LEF),
 chroma-subsampled and 10-bit output, custom colour transform, UDI, progressive (`num_decode_chs`)
 decode. Not started (everything else): the whole encoder
 above the entropy coder (analysis transforms, hyper-encoder, quantisation/RDO tools, bitrate
@@ -100,6 +101,17 @@ three region streams (checked), so its psi / y_hat / reconstruction are what the
   each other in raster order. The 48 is the default `numSamplesTileOverlap` of the reference's
   internal hyper-decoder / context tile managers; nothing signals it. `decoder::reconstruct`
   hard-codes it (`HD_MCM_TILE_OVERLAP`).
+
+## Reference decoder bug: quality maps
+
+The stock reference decoder cannot decode a stream with a quality map:
+`QualityMap.decode_header` calls `.item()` on a Python `int` and raises, and it reads
+`log2_num_threads_q_minus1` with 1 bit where the encoder writes 2. Of the encoder's map
+generators only the mask-file one (`qp_map_type = 3`) survives this code path; the others
+downscale a shape that is already latent-sized and crash in `quantize_scale`.
+`scripts/ref_vectors/dump_decode.py --fix-qmap-header` replaces that one method at runtime; with
+it the decoder's reconstruction MD5 equals the encoder's on all three quality-map vectors, so that
+patched decoder is the oracle for them (`<vector>/fixed_decoder/`).
 
 ## Deliberate divergences from the reference
 

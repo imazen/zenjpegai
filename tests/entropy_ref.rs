@@ -9,7 +9,7 @@
 #![cfg(feature = "reference-tests")]
 
 mod common;
-use common::{load_dump, load_encoder_dump, ref_root, vector_dir};
+use common::{load_dump, load_encoder_dump, load_fixed_decoder_dump, ref_root, vector_dir};
 use zenjpegai::container::Codestream;
 use zenjpegai::decoder::{decode_entropy_stage, read_headers};
 use zenjpegai::mans::AnsTables;
@@ -19,11 +19,17 @@ use zenjpegai::nn::fast::Engine;
 #[derive(Clone, Copy, PartialEq)]
 enum Oracle {
     Decoder,
+    /// The decoder with its quality-map header defect patched (`fixed_decoder/`).
+    FixedDecoder,
     Encoder,
 }
 
 fn check(name: &str) {
     check_against(name, Oracle::Decoder);
+}
+
+fn check_qmap(name: &str) {
+    check_against(name, Oracle::FixedDecoder);
 }
 
 fn check_regions(name: &str) {
@@ -33,10 +39,10 @@ fn check_regions(name: &str) {
 fn check_against(name: &str, oracle: Oracle) {
     let dir = vector_dir(name);
     let stream = std::fs::read(dir.join("stream.bits")).unwrap();
-    let dump = if oracle == Oracle::Decoder {
-        load_dump(&dir)
-    } else {
-        load_encoder_dump(&dir)
+    let dump = match oracle {
+        Oracle::Decoder => load_dump(&dir),
+        Oracle::FixedDecoder => load_fixed_decoder_dump(&dir),
+        Oracle::Encoder => load_encoder_dump(&dir),
     };
 
     let cs = Codestream::parse(&stream).unwrap();
@@ -124,6 +130,12 @@ vectors! { check:
     img30_simple_lsbs_rvs_bpp100 => "img30_simple_lsbs_rvs_bpp100",
     img01_base_off_bpp050 => "img01_base_off_bpp050",
     img01_base_off_threads8_bpp050 => "img01_base_off_threads8_bpp050",
+}
+
+vectors! { check_qmap:
+    img30_base_qmap_bpp050 => "img30_base_qmap_bpp050",
+    img30_base_qmap_rvs_bpp025 => "img30_base_qmap_rvs_bpp025",
+    img30_base_qmap_threads8_bpp100 => "img30_base_qmap_threads8_bpp100",
 }
 
 vectors! { check_regions:

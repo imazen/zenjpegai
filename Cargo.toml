@@ -41,6 +41,10 @@ imgref = { version = "1.12.3", optional = true }
 rgb = { version = "0.8.53", optional = true }
 enough = { version = "0.4.4", default-features = false }
 
+[[example]]
+name = "make_roi_mask"
+required-features = ["cli"]
+
 [[bin]]
 name = "zenjpegai"
 required-features = ["cli"]

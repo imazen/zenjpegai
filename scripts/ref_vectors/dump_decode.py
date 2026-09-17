@@ -71,8 +71,25 @@ def main():
         help="hand the C++ ANS decoder a contiguous skip mask, as the reference encoder does. "
         "Without it the reference decoder mis-decodes region streams (see PORTING.md).",
     )
+    ap.add_argument(
+        "--fix-qmap-header",
+        action="store_true",
+        help="replace QualityMap.decode_header: upstream's calls .item() on an int (crash) and "
+        "reads log2_num_threads_q_minus1 with 1 bit where its encoder writes 2 (see PORTING.md).",
+    )
     args = ap.parse_args()
     os.makedirs(args.out_dir, exist_ok=True)
+    if args.fix_qmap_header:
+        from src.codec.coding_tools.quality_map import quality_map as qm
+
+        def decode_header(self, ec):
+            if int(ec.decode([1], bits_count=1, name="multi_threading_q")):
+                log2m1 = int(ec.decode([1], bits_count=2, name="log2_num_threads_q_minus1"))
+                self.num_threads = 1 << (log2m1 + 1)
+            self.qp_ec_index = int(ec.decode([1], max_symbol_value=7, name="quality_map_entropy_index"))
+            self.set_ec_params()
+
+        qm.QualityMap.decode_header = decode_header
     if args.contiguous_masks:
         from src.codec.entropy_coding.lib_wrappers.mans import sgt_prob_wrapper as spw
 
@@ -125,6 +142,9 @@ def main():
         for name in ("z_hat", "scale_log", "skip_scale_log", "residual_quant", "residual", "psi", "y_hat"):
             if name in d:
                 dump.add(f"{comp}.{name}", d[name])
+        qmap = d.get("quantizer", {}).get("qual_map", {})
+        if comp == "y" and "qp_map" in qmap:
+            dump.add("qp_map", qmap["qp_map"])
     for c in "abc":
         dump.add(f"rec.{c}", captured[f"rec.{c}"])
         dump.add(f"out.{c}", coder.rec_image.get_component(c))

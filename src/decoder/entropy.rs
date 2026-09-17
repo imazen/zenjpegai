@@ -19,6 +19,7 @@ use crate::model::CommonModel;
 use crate::model::common::{SIGMA_IDX_MAX, SIGMA_LEVELS, SIGMA_PRECISION, Z_OFFSET};
 use crate::tensor::Tensor;
 use crate::tools::gain::GainUnit;
+use crate::tools::qualmap::QualityMap;
 use crate::tools::regions::{Plane, region_grid};
 use crate::tools::rvs::{self, Rvs};
 use crate::tools::skip::skip_mask;
@@ -83,12 +84,10 @@ pub fn decode_component(
     model: &CommonModel,
     z_dec: &mut AnsDecoder<'_>,
     region_payloads: &[Option<&[u8]>],
+    quality_map: Option<&QualityMap>,
     stop: &dyn enough::Stop,
 ) -> Result<ComponentEntropy> {
     stop.check()?;
-    if hdr.quality_map.is_some() {
-        return Err(Error::Unsupported("quality map"));
-    }
     let comp = &hdr.components[ccs];
     let chs = model.chs;
     let (lh, lw) = hdr.latent_size(ccs);
@@ -111,6 +110,9 @@ pub fn decode_component(
     }
     // quantizer.analyze + quantize_scale(incl rvs): the block-wise "likely" map is always built
     // (LSBS reads it too); RVS / GRFS shift the scales the residual was coded with.
+    if let Some(q) = quality_map {
+        q.adjust_scale(&mut skip_scale_log)?;
+    }
     let likely = rvs::likely(&skip_scale_log)?;
     let rvs = Rvs::new(
         hdr.model_id as usize,
@@ -186,15 +188,24 @@ pub fn decode_component(
 
     stop.check()?;
     let mut residual = Tensor::<f32>::zeros(chs, lh, lw)?;
-    // dequantize_resi runs the tools in reverse: RVS first, then the gain unit.
+    // dequantize_resi runs the tools in reverse: RVS, then the quality map, then the gain unit.
     for ch in 0..chs {
         let src = residual_q.plane(ch);
         let lk = likely.plane(ch);
-        for ((d, &q), &l) in residual.plane_mut(ch).iter_mut().zip(src).zip(lk) {
-            let x = match &rvs {
-                Some(r) => r.dequantize(ch, l, q as f32),
-                None => q as f32,
-            };
+        for (i, ((d, &q), &l)) in residual
+            .plane_mut(ch)
+            .iter_mut()
+            .zip(src)
+            .zip(lk)
+            .enumerate()
+        {
+            let mut x = q as f32;
+            if let Some(r) = &rvs {
+                x = r.dequantize(ch, l, x);
+            }
+            if let Some(m) = quality_map {
+                x = m.dequantize(i, x);
+            }
             *d = gain.dequantize(ch, x);
         }
     }

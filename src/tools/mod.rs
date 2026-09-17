@@ -3,6 +3,7 @@
 pub mod gain;
 pub mod log2lin;
 pub mod lsbs;
+pub mod qualmap;
 pub mod regions;
 pub mod rvs;
 pub mod skip;
