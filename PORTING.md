@@ -35,6 +35,8 @@ against reference-produced data passes. "stub" and "partial" mean what they say.
 | `model::synthesis` | `components/autoencoder_data/decoder/{sop,bop,hop}_{prim,sec}.py`, `activations/resau.py`, `base_layers/conv_layers.py` | ported: SOP, BOP and HOP, luma and chroma | `tests/decode_ref.rs` (planes within 3e-3 on a 0..255 scale) |
 | `model::attention` | `base_layers/{cab.py, tam.py}`, `conv_layers.py::ResidualBlock` | ported: residual block, CAB (sigmoid-gated trunk, mask at half resolution), TAM (two transformer blocks: layer norm, 1x1 + depthwise 3x3, 4-head channel attention with L2-normalised q/k and learned temperature, ELU-gated feed-forward; optional stride-2 / transposed resampling). The decoder never passes CAB's `gama`, so it is fixed at 1 | `tests/decode_ref.rs::img30_high_off_bpp050` (HOP stream end to end); `tests/math_tiers.rs` (attention math bit-identical across 11 CPU-feature permutations) |
 | `tools::tiles` | `tiling/tiling.py::TileManager` (`_init_image_tiles_with_overlap`, `_init_image_tiles` + `_add_overlap`, `_get_latent_tile_from_image_tile`, both branches of `_get_core_of_overlapping_tile` for picture tiles) | ported. `minimum_tile_size` / `_adjust_boundary_tiles` is encoder/metric-side only and not ported | unit tests reproduce the layouts the reference logs (2096x1400: tile 1024 / overlap 64, and tile 640 / overlap 128 with two independent regions); `tests/decode_ref.rs` img01 streams |
+| `model::analysis` | `components/autoencoder_data/encoder/{bop,hop}_{prim,sec}.py`, `base_layers/utils.py::normalize/padding_layer` | ported, **not called from any encoder yet (there is no encoder)**: BOP and HOP, luma and chroma (12-plane half-resolution input), replicate padding before every stride-2 convolution, TAM / CAB for HOP. `feature_clipping` not ported (no checkpoint has `clip_thres`; the reference runs `clipping_mode = 0`). Single tile only: analysis tiling is not written | `tests/encode_ref.rs` (oracle: `dump_encode.py --enc2`, 560x888): `y` max abs error BOP 4.6e-5 luma / 1.1e-5 chroma, HOP 1.1e-4 / 4.6e-5 (asserted < 5e-4); tiers and thread counts bit-identical |
+| `model::hyper_encoder` | `components/autoencoder_hyper/encoder/basic.py` (`abs_in_hyperprior = 1`, LeakyReLU 0.01), weights `hyper_encoder.*` in `VM_common_int` | ported, not called from any encoder yet | `tests/encode_ref.rs`: unrounded `z` within 3.3e-5 of the reference (asserted < 2e-4); after clamp + round-half-even every `z_hat` symbol equals the reference's on both vectors, both components |
 | `decoder::reconstruct` | `ccs_sgmm_tool.py::forward/decompress`, `common_modules.py::hyper_decode_tile/merge_psi_overlaps_of_tiles/extract_psi_for_mcm/decompress_ar_scale_tile/merge_y_hat_overlaps_of_tiles/extract_y_hat_for_synthesis_tiles/decompress_y_hat_to_image_tile` | ported: dependent and independent regions, synthesis tiling (luma and chroma must be tiled identically, as the reference assumes). Latent post-processing (LSBS) included | `tests/decode_ref.rs`: 16 streams incl. 3 region streams and 6 tool streams (oracle for those: the reference decoder run with a contiguous skip mask, see below) |
 | `decoder::output` | `ccs_sgmm_tool.py::decompress` (`to_format_`), `common/image.py::to_444_/to_RGB_/clip_data_/write_yuv`, `pytorch_ops.py::resize_tensor`, `colorspace.py` (BT.709), `image_io.py::write_png` quantisation | ported: coded → source chroma format (bicubic 4:2:0 / 4:2:2 → 4:4:4 with `align_corners=True`, reproducing PyTorch's compiled kernel including where its build fuses multiply-adds), BT.709 → RGB, YUV output for YUV sources (4:4:4 / 4:2:2 / 4:2:0), 8 and 10 bit, non-displayed border. **Not ported: the user-defined colour transform (`colour_transform_idx = 2`)**: upstream's inverse uses the first row of the inverse matrix for all three components, so there is no trustworthy oracle; such streams are rejected | `tests/nn_vectors.rs::bicubic_align_corners_matches_torch` (bit-identical to PyTorch on 6 shapes); `tests/decode_ref.rs`: 9 format streams (YUV 420/422/444, 10-bit 420/444, odd 203x301, RGB coded 4:2:0 and 4:2:2, display crop) |
 | `filters::efe_linear` | `filters/EFElinear/EFElinear.py`: `decompress`, `SplitApply`, `LumaAidedUpsampler_apply`, `pixelUnshuffleGeneral`, `pixelShuffleGeneral`, `deinteger` | ported for every chroma format the reference can produce: 4:4:4 source coded 4:4:4 / 4:2:2 / 4:2:0 (the latter two with the 4x4 DCT-IF kernels and four coded phases, incl. `DCTIF_only` = no coded filters), 4:2:2 and 4:2:0 sources; filter lengths 1..4, all 8 region splits, odd picture sizes, the second ("up-sampled") picture for the non-linear filter's switch. **Rejected with `Error::Unsupported` (no oracle, the reference fails on them too):** a plane signalled as not filtered (`best_cand_idx = 0`) in a picture coded at the source's chroma resolution; vertical-only subsampling (`*_ver = 2, *_hor = 1`); 4:2:2 source coded 4:2:0. Note that the *decoder* around it still only outputs 4:4:4-coded 4:4:4 pictures (`decoder::output`, and the bicubic `to_format_` between synthesis and filters is not ported), so the subsampled branches are verified in isolation only | `tests/filters_efe_ref.rs`: 17 reference streams, filter run on the reference's own input planes, output within 2e-4 (0..255) of the reference's, measured max 9.2e-5; identical bits on every tier, threaded or not. `tests/decode_ref.rs`: 7 EFE streams through the whole decoder, plus upstream's two `tools_on` streams (all four filters chained: the second picture travels EFE linear → eICCI → EFE non-linear) |
@@ -77,9 +79,9 @@ The differences come from convolution summation order (PyTorch/oneDNN vs this cr
 order); they land on 8-bit rounding boundaries in about 0.005 % of samples.
 
 Not started (decoder): eICCI on chroma-subsampled pictures,
-custom colour transform. Not started (everything else): the whole encoder
-above the entropy coder (analysis transforms, hyper-encoder, quantisation/RDO tools, bitrate
-matching, header/stream assembly), CI.
+custom colour transform. Encoder: only the analysis transforms and the hyper-encoder exist
+(Gate 1); quantisation, context model in the encode direction, skip/cube decisions, stream
+assembly, tiling, rate matching, CLI and benchmarks are not started (see "Work queue"). CI.
 
 ## WebAssembly numeric policy (measured 2026-09-17)
 
@@ -341,3 +343,52 @@ Appended by the GPU (`gpu`) agent, 2026-09-17, stopped early on a budget change:
   (`sudo usermod -aG render,video $USER`), run `just gpu-test` and `gpu_bench` on it, commit
   `benchmarks/gpu_decode_<date>.tsv` + `.meta`, report the CPU / GPU crossover size; then tune
   (list in `gpu/README.md` "Status"); then wire into `wasm/` / `web/` and run it in a browser.
+
+Appended by the encoder agent, 2026-09-17, stopped early on a budget change. **There is no
+encoder yet**: deliverable 1 of 7 landed (networks + Gate 1), nothing of 2..7.
+
+- Landed: `model::analysis` (BOP + HOP), `model::hyper_encoder`, loaders
+  (`model::{analysis_path, load_analysis_primary, load_analysis_secondary, load_hyper_encoder}`),
+  `tests/encode_ref.rs`, `dump_encode.py --enc2` (dumps `y`, `psi`, `cube_flag`, every analysis /
+  hyper-encoder call's input and output, the context model's four stage means), the `encoder` set
+  of `make_reference_streams.sh` (vectors `enc_img30_bop_m1_b0`, `enc_img30_hop_m2_b0`, dumps in
+  `<vector>/enc2/`). A fixed-model reference encode of the 560x888 picture takes 2.0 s of process
+  wall time on this box (16 torch threads): that is the speed to beat.
+- Verified against the reference while reading (560x888, model 1, beta 0):
+  - Colour pre-processing is bit-exact with plain f32 arithmetic: `r,g,b = v/255`;
+    `y = 0.2126 r + 0.7152 g + 0.0722 b` (left to right); `u = (b - y)/1.8556 + 0.5`;
+    `v = (r - y)/1.5748 + 0.5`; each `* 255`. Luma input = `[1,h,w]`; chroma input (4:4:4 coding) =
+    12 planes at half size: `pixel_unshuffle(Y,2)` (order (0,0),(0,1),(1,0),(1,1)), then U's
+    four phases, then V's. Odd sizes: replicate-pad by one first (`ccs_sgmm_tool.py::compress`).
+  - Stock `tools_off` streams carry `use_cube_flags = 0` here (all 48 flags true), level_idc 52,
+    `synthesis_transforms` `[Bop, Sop]` (base) / `[Hop, Bop, Sop]` (high), TON and RDI present
+    (RDI one zero byte). The residual substreams appear to precede SOZ in the file
+    (`reverse_encode_order`); confirm with `Codestream::parse` before relying on it.
+- Next steps, in order (each is small; sources named):
+  1. Factor the scale derivation out of `decoder::entropy::decode_component` (HSD + gain add +
+     quality map + `likely` + RVS + `skip_mask`) into one function and call it from both sides
+     (= `encoder_get_scales`); the decoder tests must stay bit-identical.
+  2. `ContextModel::compress` in `model/mcm.rs` (`context.py::forward/pred`): per stage
+     `diff = y_s - mean`; `q = diff * scaler[ch]` (f32, `tools::gain`; RVS / quality map multiply
+     in later); zero where the stage's mask is false; clamp to i16; `round_ties_even`;
+     `dq = q / (scaler + 1e-9)`; cube flag of the stage = `max |dq - diff|` over all channels and
+     an 8x8 block `<= skip_cube_thr (1)`, after zeroing the padded last row (stages 1, 3) /
+     column (stages 1, 2) of odd latents; where the flag is false OR the full mask in and
+     quantise again; `y_hat_s = dq + mean` feeds the next stages. Stage → flag channel:
+     0→0, 1→3, 2→1, 3→2 (already what `tools::skip::skip_mask` expects). Chroma has no context
+     model: mean = `upshuffle_psi`, cube flags from `skip_mode.py::gen_skip_cubeflag` on the
+     down-shuffled 4C tensor. Afterwards `residual_q[!mask] = 0`
+     (`encoder_skip_and_cubeflag_for_tiles`). Gate 2 oracle: `y.y`, `y.psi`, `mcm_y.0.mean*`,
+     `y.residual_quant`, `y.cube_flag` in the `enc2` dumps. Low rates (beta -300) are needed to
+     see a false cube flag; generate those vectors first.
+  3. Stream assembly: `PictureHeader::write` / `ToolHeader` / `RenderingInfo` exist; ANS:
+     one `AnsEncoder` per substream, `encode_residual` once over all `num_chs` channels of a
+     region in `[ch][y][x]` order (the decoder's channel chunks exist only so that chunk sizes
+     are multiples of `4 * threads`), SOZ = chroma `encode_z` first, then luma (the encoder runs
+     backwards). Sigma index per sample = `distribution_index(scale_log)` (private in
+     `decoder/entropy.rs`). Gate 3: decode with `zenjpegai::Decoder` and
+     `python -m src.reco.coders.decoder`.
+  4. Then CLI `encode`, analysis tiling (`tile_manager_enc`: 1024 / overlap 64 luma, 512 / 32
+     chroma; `z_hat` is also computed per tile and merged by core areas: see the tile log in
+     `img01_base_off_bpp050/encoder.log`), `bitrate_matcher/`, tools, benchmarks.
+  - `z`: clamp to `[-31, 31]`, round half to even, symbol = `z + 31` (checked exact).

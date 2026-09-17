@@ -1,9 +1,11 @@
 //! Trained model parameters and the networks that use them.
 
+pub mod analysis;
 mod attention;
 pub mod common;
 pub mod hsd;
 pub mod hyper_decoder;
+pub mod hyper_encoder;
 pub mod icci;
 pub(crate) mod load;
 pub mod mcm;
@@ -109,6 +111,61 @@ pub fn synthesis_path(
         COMPONENT_NAMES[ccs],
         beta(model_id)?
     ))
+}
+
+/// Relative path of the analysis (encoder-side) checkpoint of component `ccs`. `op` must be
+/// BOP or HOP; simple-profile streams are encoded with the BOP analysis transform.
+pub fn analysis_path(
+    model_id: usize,
+    ccs: usize,
+    op: crate::header::OperatingPoint,
+) -> crate::error::Result<alloc::string::String> {
+    use crate::header::OperatingPoint::*;
+    let dir = match op {
+        Sop | Bop => "VM_bop",
+        Hop => "VM_hop",
+    };
+    Ok(alloc::format!(
+        "{dir}/encoder_{}_{}.pth",
+        COMPONENT_NAMES[ccs],
+        beta(model_id)?
+    ))
+}
+
+/// Luma analysis transform of model `model_id` (`op`: BOP or HOP).
+pub fn load_analysis_primary(
+    src: &dyn ModelSource,
+    model_id: usize,
+    op: crate::header::OperatingPoint,
+    eng: &crate::nn::fast::Engine,
+) -> crate::error::Result<analysis::AnalysisPrimary> {
+    with_checkpoint(src, &analysis_path(model_id, 0, op)?, |ck| {
+        analysis::AnalysisPrimary::load(ck, op, eng)
+    })
+}
+
+/// Chroma analysis transform of model `model_id` (`op`: BOP or HOP).
+pub fn load_analysis_secondary(
+    src: &dyn ModelSource,
+    model_id: usize,
+    op: crate::header::OperatingPoint,
+    eng: &crate::nn::fast::Engine,
+) -> crate::error::Result<analysis::AnalysisSecondary> {
+    with_checkpoint(src, &analysis_path(model_id, 1, op)?, |ck| {
+        analysis::AnalysisSecondary::load(ck, op, eng)
+    })
+}
+
+/// Hyper-encoder of component `ccs` (stored in the common checkpoint).
+pub fn load_hyper_encoder(
+    src: &dyn ModelSource,
+    model_id: usize,
+    ccs: usize,
+    eng: &crate::nn::fast::Engine,
+) -> crate::error::Result<hyper_encoder::HyperEncoder> {
+    with_checkpoint(src, &common_path(model_id, ccs)?, |ck| {
+        hyper_encoder::HyperEncoder::load(ck, crate::header::LATENT_CHANNELS[ccs], eng)
+    })
 }
 
 /// Common modules of component `ccs` for model `model_id`, packed for `eng`.

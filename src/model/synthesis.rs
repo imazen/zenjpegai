@@ -23,13 +23,18 @@ use crate::weights::Checkpoint;
 
 /// `ResAU`: `y = x * (1 + conv1x1(conv3x3_grouped(relu6(x))))`, both convolutions bias-free.
 #[derive(Clone, Debug)]
-struct ResAu {
+pub(crate) struct ResAu {
     conv: ConvLayer,
     conv2: ConvLayer,
 }
 
 impl ResAu {
-    fn load(ck: &Checkpoint<'_>, prefix: &str, chs: usize, eng: &Engine) -> Result<Self> {
+    pub(crate) fn load(
+        ck: &Checkpoint<'_>,
+        prefix: &str,
+        chs: usize,
+        eng: &Engine,
+    ) -> Result<Self> {
         // The group count differs between transforms (16 channels per group in SOP / BOP, 4
         // groups in HOP); the checkpoint's weight shape `[chs, chs / groups, 3, 3]` decides.
         let name = format!("{prefix}.conv.weight");
@@ -53,7 +58,7 @@ impl ResAu {
         })
     }
 
-    fn forward(&self, eng: &Engine, x: BTensor) -> Result<BTensor> {
+    pub(crate) fn forward(&self, eng: &Engine, x: BTensor) -> Result<BTensor> {
         let mut act = x.clone();
         fast::relu6(&mut act);
         let mask = self.conv2.forward(eng, &self.conv.forward(eng, &act)?)?;

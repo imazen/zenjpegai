@@ -7,6 +7,7 @@
 
 ### Added
 - `gpu/` crate (`zenjpegai-gpu`): SOP / BOP / HOP synthesis as WGSL compute shaders through wgpu 30 (native + wasm32), `GpuDecoder`, readback-free RGBA presentation, `just gpu-test`, `gpu_bench` example. Parity gated on llvmpipe only; not yet run or timed on a hardware GPU (`gpu/README.md`).
+- Encoder groundwork only (no encoder yet): analysis transforms (`model::analysis`, BOP + HOP) and hyper-encoder (`model::hyper_encoder`) with loaders, within 1.1e-4 of the reference encoder's tensors and `z_hat` symbol-exact (`tests/encode_ref.rs`); `dump_encode.py --enc2` and the `encoder` reference-vector set.
 - `wasm/` crate (`zenjpegai-wasm`, wasm-bindgen: `addModels` / `info` / `decode`, single-thread SIMD128 build and a rayon `threads` build) and `web/scripts/build-wasm.sh`; `pkg-simd` is 389 KB (131 KB brotli). Polyfill, tests and demo are not written yet (`web/README.md`).
 - UDI (user-defined information) substream exposed as `Headers::user_data`.
 - Progressive decode: `Decoder::max_channels` / `--max-channels` read only a prefix of the latent channels, matching the reference's `num_decode_chs` on three settings.

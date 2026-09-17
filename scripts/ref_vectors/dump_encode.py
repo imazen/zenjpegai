@@ -3,7 +3,10 @@
 
 Run inside the reference venv, from the reference checkout:
 
-    python ~/work/zen/zenjpegai/scripts/ref_vectors/dump_encode.py OUT_DIR -- <encoder args...>
+    python ~/work/zen/zenjpegai/scripts/ref_vectors/dump_encode.py OUT_DIR [--enc2] -- <encoder args...>
+
+With `--enc2` (use a separate OUT_DIR such as `<vector>/enc2`) the dump also holds the latent `y`,
+`psi`, the cube flags and every analysis / hyper-encoder call's input and output.
 
 where <encoder args> are exactly what `python -m src.reco.coders.encoder` takes (input image,
 output .bits, --cfg ..., overrides). OUT_DIR receives `enc_tensors.bin` + `enc_manifest.txt` in the
@@ -28,9 +31,46 @@ DTYPES = {
 }
 
 
+def install_enc2_hooks(calls):
+    """`--enc2`: record what the analysis side computed, per network call, in call order.
+
+    Names: `<net>.<call index>.{in,out}` with net one of `analysis_y`, `analysis_uv`,
+    `hyper_y`, `hyper_uv`, and `mcm_y.<call>.mean<stage>` for the context model's per-stage means.
+    """
+    from torch.nn.modules.module import register_module_forward_hook
+
+    counters = {}
+
+    def hook(module, inputs, output):
+        cls = type(module).__name__
+        if cls.startswith("Encoder") and cls.endswith(("Prim", "Sec")):
+            net = "analysis_y" if cls.endswith("Prim") else "analysis_uv"
+        elif cls == "HyperEncoderBasic":
+            net = "hyper_y" if inputs[0].shape[1] == 160 else "hyper_uv"
+        elif cls.startswith("MCM_phase") and cls != "MCM_phase_base":
+            idx = counters.get("mcm_y", 0)
+            stage = int(cls[-1])
+            calls.append((f"mcm_y.{idx}.mean{stage}", output.detach().clone()))
+            if stage == 3:
+                counters["mcm_y"] = idx + 1
+            return
+        else:
+            return
+        idx = counters.get(net, 0)
+        counters[net] = idx + 1
+        calls.append((f"{net}.{idx}.in", inputs[0].detach().clone()))
+        calls.append((f"{net}.{idx}.out", output.detach().clone()))
+
+    register_module_forward_hook(hook)
+
+
 def main():
     sep = sys.argv.index("--")
     out_dir, enc_args = sys.argv[1], sys.argv[sep + 1:]
+    enc2 = "--enc2" in sys.argv[2:sep]
+    enc2_calls = []
+    if enc2:
+        install_enc2_hooks(enc2_calls)
     os.makedirs(out_dir, exist_ok=True)
     base_parser = enc_mod.def_base_parser()
     coder = RecoEncoder(base_parser, enc_mod.def_encoder_parser_decorator(base_parser))
@@ -57,7 +97,10 @@ def main():
     with open(os.path.join(out_dir, "enc_tensors.bin"), "wb") as blob:
         for comp, key in (("y", "model_y"), ("uv", "model_uv")):
             d = model[key]
-            for name in ("z_hat", "scale_log", "skip_scale_log", "residual_quant", "residual"):
+            names = ("z_hat", "scale_log", "skip_scale_log", "residual_quant", "residual")
+            if enc2:
+                names += ("y", "psi", "cube_flag")
+            for name in names:
                 t = d.get(name)
                 if not isinstance(t, torch.Tensor):
                     continue
@@ -68,6 +111,14 @@ def main():
                 lines.append(f"{comp}.{name} {tag} {t.dim()} {dims} {offset} {len(raw)}")
                 blob.write(raw)
                 offset += len(raw)
+        for name, t in enc2_calls:
+            t = t.cpu().contiguous()
+            tag, npdt = DTYPES[t.dtype]
+            raw = t.numpy().astype(npdt, copy=False).tobytes()
+            dims = " ".join(str(x) for x in t.shape)
+            lines.append(f"{name} {tag} {t.dim()} {dims} {offset} {len(raw)}")
+            blob.write(raw)
+            offset += len(raw)
     with open(os.path.join(out_dir, "enc_manifest.txt"), "w") as f:
         f.write("\n".join(lines) + "\n")
     print("\n".join(lines))

@@ -224,4 +224,24 @@ if [ "$SET" = formats ] || [ "$SET" = all ]; then
   one_fixed img30_base_off_udi_m1 $IMG30 1 100 cfg/tools_off.json cfg/profiles/base.json -udi.filepath "$IN/udi_payload.bin"
   one_fixed img30_base_off_display_m1 $IMG30 1 100 cfg/tools_off.json cfg/profiles/base.json -diff_display_img_width 37 -diff_display_img_height 5
 fi
+if [ "$SET" = encoder ] || [ "$SET" = all ]; then
+  # Oracles for the ENCODER port: fixed-model encodes whose analysis-side tensors are dumped
+  # into <vector>/enc2 (dump_encode.py --enc2). tests/encode_ref.rs reads the first two.
+  enc_fixed() { # name image model_id beta_disp_log cfg...
+    local name=$1 image=$2 tool=$3 beta=$4; shift 4
+    local dir="$OUT/$name"
+    if [ -f "$dir/enc2/enc_manifest.txt" ]; then echo "== $name: exists"; return; fi
+    mkdir -p "$dir/enc2"
+    echo "== $name: encoding + dumping analysis side, fixed model $tool beta_disp $beta"
+    nice -n 19 python "$HERE/dump_encode.py" "$dir/enc2" --enc2 -- "data/test/$image" "$dir/stream.bits" \
+        --cfg "$@" -target_device cpu -model.bitrate_matcher.enabled 0 \
+        -model.bitrate_matcher.target_tool_idx "$tool" -model.bitrate_matcher.target_beta_disp_Y "$beta" \
+        > "$dir/encoder.log" 2>&1
+  }
+  enc_fixed enc_img30_bop_m1_b0 $IMG30 1 0 cfg/tools_off.json cfg/profiles/base.json
+  enc_fixed enc_img30_hop_m2_b0 $IMG30 2 0 cfg/tools_off.json cfg/profiles/high.json
+  # Not generated yet (next steps of the encoder port, see PORTING.md "Work queue"): the other
+  # models, beta displacements (e.g. -300, -100, 150, 400: low rates exercise the cube flags) and
+  # the 2096x1400 picture (analysis tiling).
+fi
 echo "== done ($(date -u +%H:%M:%S))"
