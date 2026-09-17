@@ -1,0 +1,19 @@
+{
+  "name": "zenjpegai-web",
+  "version": "0.0.1",
+  "private": true,
+  "description": "JPEG AI <img> polyfill: zenjpegai compiled to WebAssembly, decoded in Web Workers",
+  "license": "AGPL-3.0-only OR LicenseRef-Imazen-Commercial",
+  "type": "module",
+  "scripts": {
+    "build:wasm": "scripts/build-wasm.sh",
+    "build:site": "node scripts/build-site.mjs",
+    "build": "scripts/build-wasm.sh && node scripts/build-site.mjs",
+    "serve": "node scripts/serve.mjs",
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0",
+    "binaryen": "132.0.0"
+  }
+}

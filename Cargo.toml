@@ -17,7 +17,7 @@ autobenches = false
 include = ["/src", "LICENSE-AGPL3", "LICENSE-COMMERCIAL", "upstream-notices", "README.md", "CHANGELOG.md"]
 
 [workspace]
-members = [".", "gpu"]
+members = [".", "gpu", "wasm"]
 
 [features]
 default = ["std", "parallel", "avx512"]
@@ -72,3 +72,13 @@ incremental = true
 
 [profile.bench]
 debug = "line-tables-only"
+
+# The browser builds (`wasm/`, built by `web/scripts/build-wasm.sh`): speed first, no unwinding.
+[profile.wasm-release]
+inherits = "release"
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+debug = false
+incremental = false

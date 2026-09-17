@@ -278,3 +278,15 @@ their own open items below when they stop.
    `cube flags` stream vector; exhaustive check of `tools::gain::scaler_from_log` vs `torch.exp`.
 5. **Speed**: Winograd / int8-VNNI kernels, padding-free transposed convolution, SIMD `exp` for
    HOP's ELU gate; re-run `scripts/bench/decode_end_to_end.sh` after each and commit the TSV.
+
+Appended by the browser (`wasm`) agent, 2026-09-17, stopped early on a budget change:
+
+- Landed: wasm32 numeric policy + `Wasm128` tier, packed model bundles + `pack-models`, the
+  `wasm/` crate and `web/scripts/build-wasm.sh` (sizes and timings in `web/README.md`).
+- Open, nothing started: worker pool + `<img>` polyfill (`web/src/`), Playwright suite, demo page
+  with imazen-26 images, `demo-assets-v1` release, `.github/workflows/pages.yml`, GPU wiring into
+  the web build. The threads package builds but has never run. Exact next commands:
+  `web/README.md` "Next steps".
+- Post-filter weight loaders must call `model::with_checkpoint` or `pack-models` cannot see
+  their tensors (bundles hold no post-filter checkpoints today).
+

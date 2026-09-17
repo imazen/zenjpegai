@@ -26,3 +26,11 @@ fuzz/corpus/
 
 # Python bytecode of the reference-vector scripts
 __pycache__/
+
+# web build
+web/node_modules/
+web/dist/
+web/.tools/
+web/test-results/
+web/playwright-report/
+web/assets/
