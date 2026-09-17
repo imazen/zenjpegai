@@ -1,0 +1,63 @@
+//! Enhancement post-filters, applied to the reconstructed YUV picture before the colour
+//! transform.
+//!
+//! Ports the chain of `ref/src/codec/coding_tools/filters/` (`FiltersComposite.decompress`,
+//! order from `cfg/pipeline.json`): EFE linear → eICCI → EFE non-linear → LEF. Each enabled
+//! filter maps a [`FilterState`] to the next one; the state carries the picture and, for the EFE
+//! pair, the alternative up-sampled picture the linear filter prepares for the non-linear one.
+//!
+//! Status: the chain and its inputs are in place; **none of the four filters is ported yet**.
+//! A stream that enables one is rejected with `Error::Unsupported` naming the filter.
+
+mod efe_linear;
+mod efe_nonlinear;
+mod icci;
+mod lef;
+
+use super::decoder::reconstruct::Planes;
+use crate::error::Result;
+use crate::header::{PictureHeader, ToolHeader};
+use crate::model::ModelSource;
+use crate::nn::fast::Engine;
+use crate::tensor::Tensor;
+
+/// Everything a filter may read besides the picture.
+pub struct FilterContext<'a> {
+    pub eng: &'a Engine,
+    pub hdr: &'a PictureHeader,
+    pub tools: &'a ToolHeader,
+    /// Luma sigma indices the residual was coded with (`decisions['model_y']['scale_log']`,
+    /// RVS included): the LEF steers its sharpening with one channel of it.
+    pub luma_scale_log: &'a Tensor<i32>,
+    /// Source of the eICCI network checkpoints.
+    pub models: &'a dyn ModelSource,
+}
+
+/// What one filter hands to the next (`[img, upsampled_img]` in the reference).
+pub struct FilterState {
+    /// The picture: planes in `[0, 255]`, chroma in the source's subsampling format.
+    pub image: Planes,
+    /// EFE linear's second output, consumed by EFE non-linear.
+    pub upsampled: Option<Planes>,
+}
+
+/// Run the enabled filters in the normative order.
+pub fn apply(ctx: &FilterContext<'_>, image: Planes) -> Result<Planes> {
+    let mut state = FilterState {
+        image,
+        upsampled: None,
+    };
+    if let Some(h) = &ctx.tools.efe_linear {
+        state = efe_linear::apply(ctx, h, state)?;
+    }
+    if let Some(h) = &ctx.tools.icci {
+        state = icci::apply(ctx, h, state)?;
+    }
+    if let Some(h) = &ctx.tools.efe_nonlinear {
+        state = efe_nonlinear::apply(ctx, h, state)?;
+    }
+    if let Some(channel) = ctx.tools.lef_channel {
+        state = lef::apply(ctx, channel, state)?;
+    }
+    Ok(state.image)
+}

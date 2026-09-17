@@ -10,10 +10,11 @@ use super::reconstruct::{post_process_latent, reconstruct_latent, synthesize};
 use super::{Headers, decode_entropy_stage, read_headers};
 use crate::container::Codestream;
 use crate::error::Error;
+use crate::filters::{self, FilterContext};
 use crate::header::OperatingPoint;
 use crate::mans::AnsTables;
 use crate::model::synthesis::{SynthesisPrimary, SynthesisSecondary};
-use crate::model::{CommonModel, ModelDir};
+use crate::model::{self, CommonModel, ModelDir, ModelSource};
 use crate::nn::fast::Engine;
 
 /// Networks of one (model, operating point) pair, packed for the decoder's engine.
@@ -29,7 +30,7 @@ struct ModelSet {
 /// model load once per (model, operating point). Large intermediate buffers are kept between
 /// decodes too; see [`Decoder::release_buffers`]. `Decoder` is `Sync`; share it between threads.
 pub struct Decoder {
-    models: ModelDir,
+    models: Box<dyn ModelSource + Send + Sync>,
     engine: Engine,
     tables: AnsTables,
     operating_point: Option<OperatingPoint>,
@@ -50,8 +51,13 @@ impl Decoder {
     }
 
     pub fn with_engine(models_dir: impl Into<std::path::PathBuf>, engine: Engine) -> Self {
+        Self::with_source(Box::new(ModelDir::new(models_dir)), engine)
+    }
+
+    /// Decoder over any checkpoint source, e.g. a [`crate::model::ModelBundle`] held in memory.
+    pub fn with_source(models: Box<dyn ModelSource + Send + Sync>, engine: Engine) -> Self {
         Self {
-            models: ModelDir::new(models_dir),
+            models,
             engine,
             tables: AnsTables::new(),
             operating_point: None,
@@ -82,11 +88,11 @@ impl Decoder {
         let eng = &self.engine;
         let set = Arc::new(ModelSet {
             common: [
-                self.models.load_common(id, 0, eng)?,
-                self.models.load_common(id, 1, eng)?,
+                model::load_common(&*self.models, id, 0, eng)?,
+                model::load_common(&*self.models, id, 1, eng)?,
             ],
-            luma: self.models.load_synthesis_primary(id, op, eng)?,
-            chroma: self.models.load_synthesis_secondary(id, op, eng)?,
+            luma: model::load_synthesis_primary(&*self.models, id, op, eng)?,
+            chroma: model::load_synthesis_secondary(&*self.models, id, op, eng)?,
         });
         if let Ok(mut c) = self.cache.lock() {
             c.insert((id, op), set.clone());
@@ -123,10 +129,6 @@ impl Decoder {
                 "latent scaling before synthesis (LSBS)"
             )));
         }
-        if headers.tools.any_post_filter() {
-            // Their parameters parse (header::ToolHeader); the filters themselves are not ported.
-            return Err(at!(Error::Unsupported("enhancement post-filters")));
-        }
         if hdr.bit_depth != 8 {
             return Err(at!(Error::Unsupported("10-bit pictures")));
         }
@@ -153,7 +155,8 @@ impl Decoder {
         let [ent_y, ent_uv] = ent;
         let mut ly = reconstruct_latent(eng, hdr, 0, &set.common[0], &ent_y).map_err(|e| at!(e))?;
         post_process_latent(hdr, &headers.tools, 0, &ent_y, &mut ly).map_err(|e| at!(e))?;
-        drop(ent_y);
+        // The LEF reads the luma scale map; everything else of the entropy stage can go.
+        let luma_scale_log = ent_y.scale_log;
         let mut luv =
             reconstruct_latent(eng, hdr, 1, &set.common[1], &ent_uv).map_err(|e| at!(e))?;
         post_process_latent(hdr, &headers.tools, 1, &ent_uv, &mut luv).map_err(|e| at!(e))?;
@@ -161,6 +164,18 @@ impl Decoder {
         let planes = synthesize(eng, hdr, &set.luma, &set.chroma, [&ly.y_hat, &luv.y_hat])
             .map_err(|e| at!(e))?;
         drop((ly, luv));
+        let planes = if headers.tools.any_post_filter() {
+            let ctx = FilterContext {
+                eng,
+                hdr,
+                tools: &headers.tools,
+                luma_scale_log: &luma_scale_log,
+                models: &*self.models,
+            };
+            filters::apply(&ctx, planes).map_err(|e| at!(e))?
+        } else {
+            planes
+        };
         let rgb = to_rgb_planes(hdr, &planes).map_err(|e| at!(e))?;
         drop(planes);
         quantize(&rgb, hdr.bit_depth).map_err(|e| at!(e))

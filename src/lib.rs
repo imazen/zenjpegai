@@ -14,6 +14,7 @@ pub mod bitio;
 pub mod container;
 pub mod decoder;
 mod error;
+pub mod filters;
 pub mod header;
 pub mod mans;
 pub mod model;

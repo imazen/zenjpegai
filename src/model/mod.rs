@@ -20,13 +20,126 @@ pub const MODEL_BETAS: [&str; 4] = ["0.002", "0.012", "0.075", "0.5"];
 /// Checkpoint file-name prefix per component.
 pub const COMPONENT_NAMES: [&str; 2] = ["Y", "UV"];
 
-/// Locates the upstream checkpoints under a `models/` directory laid out like the reference
-/// repository (`VM_common_int/`, `VM_bop/`, ...). Models are packed for the engine's SIMD tier
-/// at load time.
+/// Where checkpoint files come from. Paths are relative to a `models/` directory laid out like
+/// the reference repository (`VM_common_int/Y_0.012.pth`, `VM_bop/decoder_UV_0.5.pth`, ...).
+pub trait ModelSource {
+    fn read(&self, rel: &str) -> crate::error::Result<alloc::borrow::Cow<'_, [u8]>>;
+}
+
+/// Checkpoints held in memory (for targets without a file system, such as the browser).
+#[derive(Clone, Debug, Default)]
+pub struct ModelBundle {
+    files: alloc::collections::BTreeMap<alloc::string::String, alloc::vec::Vec<u8>>,
+}
+
+impl ModelBundle {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add (or replace) the file at `rel`, e.g. `"VM_common_int/Y_0.012.pth"`.
+    pub fn insert(&mut self, rel: impl Into<alloc::string::String>, bytes: alloc::vec::Vec<u8>) {
+        self.files.insert(rel.into(), bytes);
+    }
+
+    pub fn contains(&self, rel: &str) -> bool {
+        self.files.contains_key(rel)
+    }
+}
+
+impl ModelSource for ModelBundle {
+    fn read(&self, rel: &str) -> crate::error::Result<alloc::borrow::Cow<'_, [u8]>> {
+        self.files
+            .get(rel)
+            .map(|b| alloc::borrow::Cow::Borrowed(b.as_slice()))
+            .ok_or_else(|| crate::Error::Model(alloc::format!("{rel}: not in the model bundle")))
+    }
+}
+
+fn beta(model_id: usize) -> crate::error::Result<&'static str> {
+    MODEL_BETAS
+        .get(model_id)
+        .copied()
+        .ok_or(crate::Error::InvalidData("model_id out of range"))
+}
+
+/// Relative path of the common (entropy-stage and latent) checkpoint of component `ccs`.
+pub fn common_path(model_id: usize, ccs: usize) -> crate::error::Result<alloc::string::String> {
+    Ok(alloc::format!(
+        "VM_common_int/{}_{}.pth",
+        COMPONENT_NAMES[ccs],
+        beta(model_id)?
+    ))
+}
+
+/// Relative path of the synthesis checkpoint of component `ccs` at operating point `op`.
+pub fn synthesis_path(
+    model_id: usize,
+    ccs: usize,
+    op: crate::header::OperatingPoint,
+) -> crate::error::Result<alloc::string::String> {
+    use crate::header::OperatingPoint::*;
+    let dir = match op {
+        Sop => "VM_sop",
+        Bop => "VM_bop",
+        Hop => "VM_hop",
+    };
+    Ok(alloc::format!(
+        "{dir}/decoder_{}_{}.pth",
+        COMPONENT_NAMES[ccs],
+        beta(model_id)?
+    ))
+}
+
+/// Common modules of component `ccs` for model `model_id`, packed for `eng`.
+pub fn load_common(
+    src: &dyn ModelSource,
+    model_id: usize,
+    ccs: usize,
+    eng: &crate::nn::fast::Engine,
+) -> crate::error::Result<CommonModel> {
+    let file = src.read(&common_path(model_id, ccs)?)?;
+    let ck = crate::weights::Checkpoint::parse(&file)?;
+    CommonModel::load(&ck, crate::header::LATENT_CHANNELS[ccs], eng)
+}
+
+/// Luma synthesis transform of model `model_id` at operating point `op`.
+pub fn load_synthesis_primary(
+    src: &dyn ModelSource,
+    model_id: usize,
+    op: crate::header::OperatingPoint,
+    eng: &crate::nn::fast::Engine,
+) -> crate::error::Result<synthesis::SynthesisPrimary> {
+    let file = src.read(&synthesis_path(model_id, 0, op)?)?;
+    synthesis::SynthesisPrimary::load(&crate::weights::Checkpoint::parse(&file)?, op, eng)
+}
+
+/// Chroma synthesis transform of model `model_id` at operating point `op`.
+pub fn load_synthesis_secondary(
+    src: &dyn ModelSource,
+    model_id: usize,
+    op: crate::header::OperatingPoint,
+    eng: &crate::nn::fast::Engine,
+) -> crate::error::Result<synthesis::SynthesisSecondary> {
+    let file = src.read(&synthesis_path(model_id, 1, op)?)?;
+    synthesis::SynthesisSecondary::load(&crate::weights::Checkpoint::parse(&file)?, op, eng)
+}
+
+/// Checkpoints in a directory on disk.
 #[cfg(feature = "std")]
 #[derive(Clone, Debug)]
 pub struct ModelDir {
     root: std::path::PathBuf,
+}
+
+#[cfg(feature = "std")]
+impl ModelSource for ModelDir {
+    fn read(&self, rel: &str) -> crate::error::Result<alloc::borrow::Cow<'_, [u8]>> {
+        let path = self.root.join(rel);
+        std::fs::read(&path)
+            .map(alloc::borrow::Cow::Owned)
+            .map_err(|e| crate::Error::Model(alloc::format!("{}: {e}", path.display())))
+    }
 }
 
 #[cfg(feature = "std")]
@@ -35,72 +148,33 @@ impl ModelDir {
         Self { root: root.into() }
     }
 
-    fn read(&self, rel: &str) -> crate::error::Result<alloc::vec::Vec<u8>> {
-        let path = self.root.join(rel);
-        std::fs::read(&path)
-            .map_err(|e| crate::Error::Model(alloc::format!("{}: {e}", path.display())))
-    }
-
-    fn beta(model_id: usize) -> crate::error::Result<&'static str> {
-        MODEL_BETAS
-            .get(model_id)
-            .copied()
-            .ok_or(crate::Error::InvalidData("model_id out of range"))
-    }
-
-    /// Common (entropy-stage and latent) modules of component `ccs` for model `model_id`.
+    /// See [`load_common`].
     pub fn load_common(
         &self,
         model_id: usize,
         ccs: usize,
         eng: &Engine,
     ) -> crate::error::Result<CommonModel> {
-        let file = self.read(&alloc::format!(
-            "VM_common_int/{}_{}.pth",
-            COMPONENT_NAMES[ccs],
-            Self::beta(model_id)?
-        ))?;
-        let ck = crate::weights::Checkpoint::parse(&file)?;
-        CommonModel::load(&ck, crate::header::LATENT_CHANNELS[ccs], eng)
+        load_common(self, model_id, ccs, eng)
     }
 
-    fn synthesis_file(
-        &self,
-        model_id: usize,
-        ccs: usize,
-        op: OperatingPoint,
-    ) -> crate::error::Result<alloc::vec::Vec<u8>> {
-        let dir = match op {
-            OperatingPoint::Sop => "VM_sop",
-            OperatingPoint::Bop => "VM_bop",
-            OperatingPoint::Hop => "VM_hop",
-        };
-        self.read(&alloc::format!(
-            "{dir}/decoder_{}_{}.pth",
-            COMPONENT_NAMES[ccs],
-            Self::beta(model_id)?
-        ))
-    }
-
-    /// Luma synthesis transform of model `model_id` at operating point `op`.
+    /// See [`load_synthesis_primary`].
     pub fn load_synthesis_primary(
         &self,
         model_id: usize,
         op: OperatingPoint,
         eng: &Engine,
     ) -> crate::error::Result<synthesis::SynthesisPrimary> {
-        let file = self.synthesis_file(model_id, 0, op)?;
-        synthesis::SynthesisPrimary::load(&crate::weights::Checkpoint::parse(&file)?, op, eng)
+        load_synthesis_primary(self, model_id, op, eng)
     }
 
-    /// Chroma synthesis transform of model `model_id` at operating point `op`.
+    /// See [`load_synthesis_secondary`].
     pub fn load_synthesis_secondary(
         &self,
         model_id: usize,
         op: OperatingPoint,
         eng: &Engine,
     ) -> crate::error::Result<synthesis::SynthesisSecondary> {
-        let file = self.synthesis_file(model_id, 1, op)?;
-        synthesis::SynthesisSecondary::load(&crate::weights::Checkpoint::parse(&file)?, op, eng)
+        load_synthesis_secondary(self, model_id, op, eng)
     }
 }
