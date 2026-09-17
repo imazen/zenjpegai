@@ -7,7 +7,7 @@ use whereat::{At, at};
 
 use super::output::{Picture, RgbImage, finish, to_source_format};
 use super::reconstruct::{post_process_latent, reconstruct_latent_with, synthesize_with};
-use super::{Headers, decode_entropy_stage_with, read_headers};
+use super::{Headers, decode_entropy_stage_progressive, read_headers};
 use crate::container::Codestream;
 use crate::error::Error;
 use crate::filters::{self, FilterContext};
@@ -34,6 +34,7 @@ pub struct Decoder {
     engine: Engine,
     tables: AnsTables,
     operating_point: Option<OperatingPoint>,
+    max_channels: [Option<u16>; 2],
     cache: Mutex<HashMap<(usize, OperatingPoint), Arc<ModelSet>>>,
     icci_nets: filters::icci::NetCache,
 }
@@ -62,6 +63,7 @@ impl Decoder {
             engine,
             tables: AnsTables::new(),
             operating_point: None,
+            max_channels: [None, None],
             cache: Mutex::new(HashMap::new()),
             icci_nets: Default::default(),
         }
@@ -71,6 +73,14 @@ impl Decoder {
     /// one). Decoding fails if the stream does not list it.
     pub fn operating_point(mut self, op: Option<OperatingPoint>) -> Self {
         self.operating_point = op;
+        self
+    }
+
+    /// Progressive decode: read only the first `luma` / `chroma` latent channels (the
+    /// reference's `num_decode_chs`). Channels are coded in order of importance, so a prefix
+    /// gives a coarser picture for less entropy-decoding work. `None` decodes all of them.
+    pub fn max_channels(mut self, luma: Option<u16>, chroma: Option<u16>) -> Self {
+        self.max_channels = [luma, chroma];
         self
     }
 
@@ -181,11 +191,12 @@ impl Decoder {
             .map_err(|e| at!(e))?;
         let eng = &self.engine;
 
-        let ent = decode_entropy_stage_with(
+        let ent = decode_entropy_stage_progressive(
             &self.tables,
             &cs,
             hdr,
             [&set.common[0], &set.common[1]],
+            self.max_channels,
             stop,
         )
         .map_err(|e| at!(e))?;

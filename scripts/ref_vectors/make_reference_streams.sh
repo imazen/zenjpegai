@@ -77,6 +77,13 @@ if [ "$SET" = smoke ] || [ "$SET" = all ]; then
   done
   one img30_simple_off_bpp050 $IMG30 50 cfg/tools_off.json cfg/profiles/simple.json
   one img30_high_off_bpp050 $IMG30 50 cfg/tools_off.json cfg/profiles/high.json
+  # Progressive decode oracles: the same stream decoded with a channel limit (num_decode_chs).
+  P=-model.CCS_SGMM.tools_common
+  for lim in "64 32" "1 1" "37 0"; do
+    set -- $lim; dir="$OUT/img30_base_off_bpp050/progressive_y$1_uv$2"
+    [ -f "$dir/manifest.txt" ] || nice -n 19 python "$HERE/dump_decode.py" "$OUT/img30_base_off_bpp050/stream.bits" "$dir" \
+        --decoder-args "$P.model_y.common_modules.num_decode_chs $1 $P.model_uv.common_modules.num_decode_chs $2" > "$dir.log" 2>&1
+  done
 fi
 
 if [ "$SET" = regions ] || [ "$SET" = all ]; then

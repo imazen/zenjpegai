@@ -72,6 +72,12 @@ def main():
         "Without it the reference decoder mis-decodes region streams (see PORTING.md).",
     )
     ap.add_argument(
+        "--decoder-args",
+        default="",
+        help="extra reference-decoder options, space separated, e.g. progressive decode: "
+        "'-model.CCS_SGMM.tools_common.model_y.common_modules.num_decode_chs 64'",
+    )
+    ap.add_argument(
         "--fix-qmap-header",
         action="store_true",
         help="replace QualityMap.decode_header: upstream's calls .item() on an int (crash) and "
@@ -130,7 +136,7 @@ def main():
     png = os.path.join(args.out_dir, "decoded.png")
     log = io.StringIO()
     with contextlib.redirect_stdout(log):
-        process_decoder(coder, [args.bits, png, "-target_device", "cpu"])
+        process_decoder(coder, [args.bits, png, "-target_device", "cpu"] + args.decoder_args.split())
     with open(os.path.join(args.out_dir, "stdout.log"), "w") as f:
         f.write(log.getvalue())
 

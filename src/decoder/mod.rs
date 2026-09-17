@@ -65,6 +65,20 @@ pub fn decode_entropy_stage_with(
     models: [&CommonModel; 2],
     stop: &dyn enough::Stop,
 ) -> Result<[entropy::ComponentEntropy; 2]> {
+    decode_entropy_stage_progressive(tables, cs, hdr, models, [None, None], stop)
+}
+
+/// Progressive decode: read only the first `max_channels[ccs]` latent channels of each component
+/// (`num_decode_chs` in the reference); the remaining channels decode as zero residual. `None`
+/// reads every coded channel.
+pub fn decode_entropy_stage_progressive(
+    tables: &AnsTables,
+    cs: &Codestream<'_>,
+    hdr: &PictureHeader,
+    models: [&CommonModel; 2],
+    max_channels: [Option<u16>; 2],
+    stop: &dyn enough::Stop,
+) -> Result<[entropy::ComponentEntropy; 2]> {
     let soz = cs
         .find(Marker::Soz)
         .ok_or(Error::InvalidData("no z substream"))?;
@@ -108,6 +122,7 @@ pub fn decode_entropy_stage_with(
             &mut z_dec,
             &regions,
             quality_map.as_ref(),
+            max_channels[ccs],
             stop,
         )?);
     }

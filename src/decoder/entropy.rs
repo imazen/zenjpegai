@@ -86,6 +86,7 @@ pub fn decode_component(
     z_dec: &mut AnsDecoder<'_>,
     region_payloads: &[Option<&[u8]>],
     quality_map: Option<&QualityMap>,
+    max_channels: Option<u16>,
     stop: &dyn enough::Stop,
 ) -> Result<ComponentEntropy> {
     stop.check()?;
@@ -129,6 +130,9 @@ pub fn decode_component(
 
     // decode_y: region by region, channel chunk by channel chunk.
     let num_chs = (comp.num_chs as usize).min(chs);
+    // Progressive decode (`num_decode_chs`): stop after the first channels. The chunking is
+    // computed from the reduced count, like the reference does; a chunk may still end past it.
+    let num_decode = max_channels.map_or(num_chs, |m| (m as usize).min(num_chs));
     let num_threads = comp.num_threads_r as usize;
     let grid = region_grid(hdr, ccs, Plane::Latent);
     if region_payloads.len() != grid.core.len() {
@@ -147,13 +151,13 @@ pub fn decode_component(
             area.height.min(lh - area.y.min(lh)),
             area.width.min(lw - area.x.min(lw)),
         );
-        if rh == 0 || rw == 0 || num_chs == 0 {
+        if rh == 0 || rw == 0 || num_decode == 0 {
             continue;
         }
         let threads = crate::container::split_threads(payload, num_threads)?;
         let mut dec = tables.decoder(&threads)?;
-        let step = channel_step(rh, rw, num_chs, num_threads);
-        for c0 in (0..num_chs).step_by(step) {
+        let step = channel_step(rh, rw, num_decode, num_threads);
+        for c0 in (0..num_decode).step_by(step) {
             stop.check()?;
             let c1 = (c0 + step).min(num_chs);
             let n = (c1 - c0) * rh * rw;

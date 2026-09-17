@@ -32,6 +32,7 @@ OPTIONS:
     --models <path>    directory of upstream checkpoints (the reference software's models/), or a
                        packed bundle written by `pack-models`; default: $ZENJPEGAI_MODELS
     --op <sop|bop|hop> synthesis transform (default: the stream's first listed one)
+    --max-channels <y,uv>  progressive decode: read only the first latent channels
     --single-thread    do not use the thread pool
     --scalar           no SIMD (for debugging; every tier produces identical pixels)
     --repeat <n>       decode n times and print per-run timing (models stay loaded)
@@ -49,6 +50,7 @@ struct Args {
     positional: Vec<String>,
     models: Option<PathBuf>,
     op: Option<OperatingPoint>,
+    max_channels: (Option<u16>, Option<u16>),
     ops: Vec<OperatingPoint>,
     model_ids: Vec<usize>,
     out: Option<PathBuf>,
@@ -64,6 +66,7 @@ fn parse_args() -> Result<Args, String> {
         positional: Vec::new(),
         models: std::env::var_os("ZENJPEGAI_MODELS").map(PathBuf::from),
         op: None,
+        max_channels: (None, None),
         ops: Vec::new(),
         model_ids: Vec::new(),
         out: None,
@@ -105,6 +108,12 @@ fn parse_args() -> Result<Args, String> {
                 a.only = Some(v);
             }
             "--out" => a.out = Some(PathBuf::from(value("--out")?)),
+            "--max-channels" => {
+                let v = value("--max-channels")?;
+                let (y, uv) = v.split_once(',').ok_or("--max-channels wants <y,uv>")?;
+                let parse = |s: &str| s.parse::<u16>().map_err(|e| format!("--max-channels: {e}"));
+                a.max_channels = (Some(parse(y)?), Some(parse(uv)?));
+            }
             "--single-thread" => a.single_thread = true,
             "--scalar" => a.scalar = true,
             "--repeat" => {
@@ -209,7 +218,8 @@ fn run() -> Result<(), String> {
             } else {
                 Decoder::with_engine(models, engine)
             }
-            .operating_point(args.op);
+            .operating_point(args.op)
+            .max_channels(args.max_channels.0, args.max_channels.1);
             let mut image = None;
             for run in 0..args.repeat.max(1) {
                 let t = Instant::now();

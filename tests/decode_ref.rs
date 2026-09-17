@@ -171,6 +171,51 @@ fn check(name: &str) {
     );
 }
 
+/// Progressive decode (`num_decode_chs`): only a prefix of the latent channels is read. The
+/// oracle is the reference decoder run with the same limits (`<vector>/progressive_y*_uv*/`).
+#[test]
+fn progressive_decode_matches_reference() {
+    let dir = vector_dir("img30_base_off_bpp050");
+    let stream = std::fs::read(dir.join("stream.bits")).unwrap();
+    for (luma, chroma) in [(64u16, 32u16), (1, 1), (37, 0)] {
+        let sub = dir.join(format!("progressive_y{luma}_uv{chroma}"));
+        assert!(
+            sub.join("manifest.txt").is_file(),
+            "{} is missing: see scripts/ref_vectors/dump_decode.py --decoder-args",
+            sub.display()
+        );
+        let dump = load_dump(&sub);
+        let decoder = zenjpegai::Decoder::new(ref_root().join("models"))
+            .max_channels(Some(luma), Some(chroma));
+        let Picture::Rgb(img) = decoder.decode_picture(&stream).unwrap() else {
+            panic!("RGB stream");
+        };
+        let theirs: Vec<Vec<u16>> = ["out.a", "out.b", "out.c"]
+            .iter()
+            .map(|k| quantize_plane(&dump[*k].f32(), 8))
+            .collect();
+        let theirs: Vec<u16> = theirs[0]
+            .iter()
+            .zip(&theirs[1])
+            .zip(&theirs[2])
+            .flat_map(|((&r, &g), &b)| [r, g, b])
+            .collect();
+        let differing = img.data.iter().zip(&theirs).filter(|(a, b)| a != b).count();
+        let worst = img
+            .data
+            .iter()
+            .zip(&theirs)
+            .map(|(a, b)| (*a as i32 - *b as i32).abs())
+            .max()
+            .unwrap();
+        println!(
+            "progressive y{luma} uv{chroma}: {differing} of {} samples differ, worst by {worst}",
+            theirs.len()
+        );
+        assert!(worst <= 1 && differing * 5000 < theirs.len());
+    }
+}
+
 macro_rules! vectors {
     ($($fn_name:ident => $dir:literal),* $(,)?) => { $( #[test] fn $fn_name() { check($dir); } )* };
 }

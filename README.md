@@ -6,7 +6,7 @@ with `#![forbid(unsafe_code)]`, SIMD through [archmage](https://lib.rs/crates/ar
 [magetypes](https://lib.rs/crates/magetypes), and no Python or PyTorch at runtime.
 
 **Status: work in progress — a partial decoder, no encoder.** Missing first: two of the four post-filters (eICCI, LEF),
-custom colour transforms, progressive decode, and the
+custom colour transforms, and the
 entire encoder above the entropy coder. Streams that need any of these are rejected with
 `Error::Unsupported`; nothing is silently approximated.
 
