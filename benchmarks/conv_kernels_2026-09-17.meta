@@ -1,0 +1,6 @@
+command: cargo bench --bench conv_kernels   (no -C target-cpu=native; runtime dispatch)
+source: working copy on top of 75809b6 (the commit that adds this file)
+host: dev workstation, AMD Ryzen 9 9950X3D (16c/32T), Linux 7.0, rustc 1.98.1
+date: 2026-09-17
+notes: layer shapes of the BOP luma synthesis at a 560x888 picture; throughput unit = multiply-accumulates.
+       Box was shared with other sessions; treat MT numbers as lower bounds.

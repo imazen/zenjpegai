@@ -19,6 +19,7 @@
 //! so kernels are free to do that. They may not reassociate, and they may not replace the fused
 //! multiply-add by a separate multiply and add.
 
+pub mod fast;
 pub mod reference;
 
 use alloc::vec::Vec;

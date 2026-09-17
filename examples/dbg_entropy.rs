@@ -48,8 +48,9 @@ fn main() {
         hdr.model_id, hdr.beta_displacement_log, hdr.regions
     );
     let models = ModelDir::new(std::env::var("ZENJPEGAI_REF").unwrap() + "/models");
-    let y = models.load_common(hdr.model_id as usize, 0).unwrap();
-    let uv = models.load_common(hdr.model_id as usize, 1).unwrap();
+    let eng = zenjpegai::nn::fast::Engine::new();
+    let y = models.load_common(hdr.model_id as usize, 0, &eng).unwrap();
+    let uv = models.load_common(hdr.model_id as usize, 1, &eng).unwrap();
     let out = decode_entropy_stage(&AnsTables::new(), &cs, hdr, [&y, &uv]).unwrap();
     for (comp, e) in [("y", &out[0]), ("uv", &out[1])] {
         let report = |what: &str, want: Vec<i32>, got: Vec<i32>| {

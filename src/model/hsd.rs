@@ -18,6 +18,7 @@ use alloc::format;
 use alloc::vec::Vec;
 
 use crate::error::{Error, Result};
+use crate::nn::fast::{Engine, PackedIntConv};
 use crate::tensor::Tensor;
 use crate::weights::Checkpoint;
 
@@ -30,6 +31,7 @@ struct QuantConv {
     weight: Vec<i8>,
     bias: Vec<i32>,
     shift: Vec<u8>,
+    packed: PackedIntConv,
 }
 
 impl QuantConv {
@@ -39,6 +41,7 @@ impl QuantConv {
         out_ch: usize,
         in_ch: usize,
         k: usize,
+        eng: &Engine,
     ) -> Result<Self> {
         let quantized = ck.bool(&format!("{prefix}.is_quantized"))?;
         if quantized.data != [true] {
@@ -65,18 +68,30 @@ impl QuantConv {
                 "{prefix}: per-channel shift out of range"
             )));
         }
+        let shift: Vec<u8> = shifts.data.iter().map(|&s| s as u8).collect();
+        let packed = PackedIntConv::new(
+            out_ch,
+            in_ch,
+            k,
+            &weight.data,
+            &bias.data,
+            &shift,
+            eng.tier.block(),
+        )?;
         Ok(Self {
             out_ch,
             in_ch,
             k,
             weight: weight.data,
             bias: bias.data,
-            shift: shifts.data.iter().map(|&s| s as u8).collect(),
+            shift,
+            packed,
         })
     }
 
     /// Stride-1 convolution with zero padding `k / 2`. Input values are clamped to int8 range.
-    fn forward(&self, x: &Tensor<i32>, relu: bool) -> Result<Tensor<i32>> {
+    /// Plain scalar loops: the oracle the SIMD path ([`PackedIntConv`]) is tested against.
+    fn forward_reference(&self, x: &Tensor<i32>, relu: bool) -> Result<Tensor<i32>> {
         debug_assert_eq!(x.c, self.in_ch);
         let (h, w, k) = (x.h, x.w, self.k);
         let pad = k / 2;
@@ -128,19 +143,21 @@ impl QuantConv {
 #[derive(Clone, Debug)]
 pub struct HyperScaleDecoder {
     chs: usize,
+    eng: Engine,
     conv1: QuantConv,
     depthwise: QuantConv,
     pointwise: QuantConv,
 }
 
 impl HyperScaleDecoder {
-    pub fn load(ck: &Checkpoint<'_>, chs: usize) -> Result<Self> {
+    pub fn load(ck: &Checkpoint<'_>, chs: usize, eng: &Engine) -> Result<Self> {
         Ok(Self {
             chs,
-            conv1: QuantConv::load(ck, "hyper_scale_decoder.conv1", chs, chs, 1)?,
+            eng: *eng,
+            conv1: QuantConv::load(ck, "hyper_scale_decoder.conv1", chs, chs, 1, eng)?,
             // Named "depthwise" upstream, but it is a full (groups = 1) 3x3 convolution.
-            depthwise: QuantConv::load(ck, "hyper_scale_decoder.depthwise", chs, chs, 3)?,
-            pointwise: QuantConv::load(ck, "hyper_scale_decoder.pointwise", chs * 16, chs, 1)?,
+            depthwise: QuantConv::load(ck, "hyper_scale_decoder.depthwise", chs, chs, 3, eng)?,
+            pointwise: QuantConv::load(ck, "hyper_scale_decoder.pointwise", chs * 16, chs, 1, eng)?,
         })
     }
 
@@ -152,6 +169,28 @@ impl HyperScaleDecoder {
         out_h: usize,
         out_w: usize,
         sigma_idx_max: i32,
+    ) -> Result<Tensor<i32>> {
+        self.run(z_hat, out_h, out_w, sigma_idx_max, false)
+    }
+
+    /// Same network through the plain scalar convolution; must equal [`Self::forward`] exactly.
+    pub fn forward_reference(
+        &self,
+        z_hat: &Tensor<i8>,
+        out_h: usize,
+        out_w: usize,
+        sigma_idx_max: i32,
+    ) -> Result<Tensor<i32>> {
+        self.run(z_hat, out_h, out_w, sigma_idx_max, true)
+    }
+
+    fn run(
+        &self,
+        z_hat: &Tensor<i8>,
+        out_h: usize,
+        out_w: usize,
+        sigma_idx_max: i32,
+        reference: bool,
     ) -> Result<Tensor<i32>> {
         if z_hat.c != self.chs {
             return Err(Error::InvalidArgument(
@@ -169,9 +208,18 @@ impl HyperScaleDecoder {
             z_hat.w,
             z_hat.data.iter().map(|&v| v as i32).collect(),
         )?;
-        let x = self.conv1.forward(&x, true)?;
-        let x = self.depthwise.forward(&x, true)?;
-        let x = self.pointwise.forward(&x, false)?;
+        let mut x = x;
+        for (conv, relu) in [
+            (&self.conv1, true),
+            (&self.depthwise, true),
+            (&self.pointwise, false),
+        ] {
+            x = if reference {
+                conv.forward_reference(&x, relu)?
+            } else {
+                conv.packed.forward(&self.eng, &x, relu)?
+            };
+        }
 
         // PixelShuffle(4) + crop + abs + clamp in one pass.
         let (hz, wz) = (z_hat.h, z_hat.w);

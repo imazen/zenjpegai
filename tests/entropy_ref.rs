@@ -14,6 +14,7 @@ use zenjpegai::container::Codestream;
 use zenjpegai::decoder::{decode_entropy_stage, read_headers};
 use zenjpegai::mans::AnsTables;
 use zenjpegai::model::ModelDir;
+use zenjpegai::nn::fast::Engine;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Oracle {
@@ -42,8 +43,9 @@ fn check_against(name: &str, oracle: Oracle) {
     let headers = read_headers(&cs).unwrap();
     let hdr = &headers.picture;
     let models = ModelDir::new(ref_root().join("models"));
-    let y_model = models.load_common(hdr.model_id as usize, 0).unwrap();
-    let uv_model = models.load_common(hdr.model_id as usize, 1).unwrap();
+    let eng = Engine::new();
+    let y_model = models.load_common(hdr.model_id as usize, 0, &eng).unwrap();
+    let uv_model = models.load_common(hdr.model_id as usize, 1, &eng).unwrap();
     let tables = AnsTables::new();
     let out = decode_entropy_stage(&tables, &cs, hdr, [&y_model, &uv_model]).unwrap();
 

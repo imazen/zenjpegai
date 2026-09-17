@@ -1,0 +1,183 @@
+run-heavy: mem-cap=16G (cgroup, hard) jobs=28/32 avail=47900MiB :: cargo bench --bench conv_kernels
+    Updating crates.io index
+     Locking 51 packages to latest Rust 1.89 compatible versions
+      Adding anstream v1.0.0
+      Adding anstyle v1.0.14
+      Adding anstyle-parse v1.0.0
+      Adding anstyle-query v1.1.5
+      Adding anstyle-wincon v3.0.11
+      Adding bitflags v2.13.2
+      Adding clap v4.6.7
+      Adding clap_builder v4.6.7
+      Adding clap_derive v4.6.7
+      Adding clap_lex v1.1.1
+      Adding colorchoice v1.0.5
+      Adding errno v0.3.14
+      Adding fs4 v1.1.0
+      Adding heck v0.5.0
+      Adding is_terminal_polyfill v1.70.2
+      Adding itoa v1.0.18
+      Adding libc v0.2.189
+      Adding linux-raw-sys v0.12.1
+      Adding memchr v2.8.3
+      Adding ntapi v0.4.3
+      Adding objc2-core-foundation v0.3.2
+      Adding objc2-io-kit v0.3.2
+      Adding once_cell_polyfill v1.70.2
+      Adding rustix v1.1.5
+      Adding serde v1.0.229
+      Adding serde_core v1.0.229
+      Adding serde_derive v1.0.229
+      Adding serde_json v1.0.151
+      Adding strsim v0.11.1
+      Adding syn v2.0.119
+      Adding sysinfo v0.36.1
+      Adding terminal_size v0.4.4
+      Adding utf8parse v0.2.2
+      Adding winapi v0.3.9
+      Adding winapi-i686-pc-windows-gnu v0.4.0
+      Adding winapi-x86_64-pc-windows-gnu v0.4.0
+      Adding windows v0.61.3
+      Adding windows-collections v0.2.0
+      Adding windows-core v0.61.2
+      Adding windows-future v0.2.1
+      Adding windows-implement v0.60.2
+      Adding windows-interface v0.59.3
+      Adding windows-link v0.1.3
+      Adding windows-link v0.2.1
+      Adding windows-numerics v0.2.0
+      Adding windows-result v0.3.4
+      Adding windows-strings v0.4.2
+      Adding windows-sys v0.61.2
+      Adding windows-threading v0.1.0
+      Adding zenbench v0.1.9
+      Adding zmij v1.0.23
+ Downloading crates ...
+  Downloaded clap_lex v1.1.1
+  Downloaded clap v4.6.7
+  Downloaded clap_derive v4.6.7
+  Downloaded clap_builder v4.6.7
+  Downloaded rustix v1.1.5
+warning: methods `add`, `mul`, `max`, and `min` are never used
+  --> src/nn/fast/simd.rs:18:8
+   |
+11 | pub(crate) trait SimdF32<const V: usize>: Copy {
+   |                  ------- methods in this trait
+...
+18 |     fn add(self, o: Self) -> Self;
+   |        ^^^
+19 |     fn mul(self, o: Self) -> Self;
+   |        ^^^
+20 |     fn max(self, o: Self) -> Self;
+   |        ^^^
+21 |     fn min(self, o: Self) -> Self;
+   |        ^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `zenjpegai` (lib) generated 1 warning
+[zenbench] calibration: int=0.18ns/iter mem_bw=110.3GiB/s mem_lat=8.8ns
+[zenbench] timer resolution: 10ns, loop overhead: 0.18ns/iter, TSC: 4.299 ticks/ns (invariant)
+[zenbench] results → /tmp/zenbench/zenbench-1789682104-3be6a7.txt
+
+═══════════════════════════════════════════════════════════════
+  zenbench  1789682104-3be6a7
+  git: 75809b690d9c1cf3a5164d037b1df8af8733054b
+═══════════════════════════════════════════════════════════════
+
+  res_conv3x3_160_160@1/16  4 rounds × 1 calls ⚠ only 4 rounds
+            mean ±mad ms  95% CI vs base      ops/s
+  ├─ v4_1t   27.3 ±1.3ms  [24.4–29.4]ms       97.3G
+  ├─ v4_mt    2.9 ±0.5ms  [-97.7%–-78.5%]      925G [1]
+  ├─ v3_1t   53.2 ±9.5ms  [+73.5%–+116.4%]    49.9G
+  ╰─ v3_mt    4.9 ±0.2ms  [-90.5%–-70.5%]      541G
+
+  v4_mt  ███████████████████████████████████████████████████████████ 925 Gops/s
+  v3_mt  ███████████████████████████████████ 541 Gops/s
+  v4_1t  ██████ 97.3 Gops/s
+  v3_1t  ███ 49.9 Gops/s
+  [1] drift r=0.60 — later rounds slower
+
+  up1_convT4x4_160_64@1/16  4 rounds × 1 calls ⚠ only 4 rounds
+            mean ±mad ms  95% CI vs base       ops/s
+  ├─ v4_1t   18.4 ±0.9ms  [17.2–20.1]ms         102G
+  ├─ v4_mt    2.5 ±0.4ms  [-97.7%–-77.4%]       763G [1]
+  ├─ v3_1t   41.5 ±2.3ms  [+105.5%–+142.3%]    45.5G
+  ╰─ v3_mt    4.0 ±0.3ms  [-87.9%–-71.1%]       478G [2]
+
+  v4_mt  ███████████████████████████████████████████████████████████ 763 Gops/s
+  v3_mt  █████████████████████████████████████ 478 Gops/s
+  v4_1t  ████████ 102 Gops/s
+  v3_1t  ████ 45.5 Gops/s
+  [1] drift r=1.00 — later rounds slower
+  [2] drift r=1.00 — later rounds slower
+
+  resau_conv3x3_g4_64@1/8  4 rounds × 1 calls ⚠ only 4 rounds
+            mean ±mad ms  95% CI vs base       ops/s
+  ├─ v4_1t    5.4 ±0.6ms  [4.8–6.0]ms          78.7G
+  ├─ v4_mt    1.3 ±0.1ms  [-85.7%–-64.2%]       327G
+  ├─ v3_1t   10.6 ±0.5ms  [+105.0%–+110.8%]    40.3G
+  ╰─ v3_mt    2.1 ±0.1ms  [-71.4%–-48.8%]       201G
+
+  v4_mt  ███████████████████████████████████████████████████████████ 327 Gops/s
+  v3_mt  ████████████████████████████████████ 201 Gops/s
+  v4_1t  ██████████████ 78.7 Gops/s
+  v3_1t  ███████ 40.3 Gops/s
+
+  resau_conv1x1_64_64@1/8  4 rounds × 1 calls ⚠ only 4 rounds
+            mean ±mad ms  95% CI vs base      ops/s
+  ├─ v4_1t   3.1 ±0.1ms  [3.0–3.2]ms         60.6G
+  ├─ v4_mt   0.8 ±0.1ms  [-77.4%–-66.7%]      225G [1]
+  ├─ v3_1t   6.5 ±0.0ms  [+89.0%–+141.3%]    29.2G
+  ╰─ v3_mt   1.1 ±0.2ms  [-65.8%–-61.6%]      167G
+
+  v4_mt  ███████████████████████████████████████████████████████████ 225 Gops/s
+  v3_mt  ████████████████████████████████████████████ 167 Gops/s
+  v4_1t  ████████████████ 60.6 Gops/s
+  v3_1t  ████████ 29.2 Gops/s
+  [1] drift r=1.00 — later rounds slower
+
+  up2_convT4x4_64_64@1/8  4 rounds × 1 calls ⚠ only 4 rounds
+            mean ±mad ms  95% CI vs base       ops/s
+  ├─ v4_1t   36.8 ±1.1ms  [33.8–41.9]ms        82.0G
+  ├─ v4_mt   11.1 ±1.4ms  [-73.3%–-59.0%]       271G [1]
+  ├─ v3_1t   76.0 ±1.9ms  [+113.5%–+129.0%]    39.8G
+  ╰─ v3_mt   14.5 ±0.3ms  [-59.4%–-54.8%]       209G
+
+  v4_mt  ███████████████████████████████████████████████████████████ 271 Gops/s
+  v3_mt  █████████████████████████████████████████████ 209 Gops/s
+  v4_1t  ██████████████████ 82.0 Gops/s
+  v3_1t  █████████ 39.8 Gops/s
+  [1] drift r=1.00 — later rounds slower
+
+  conv3_3x3_64_96@1/4  4 rounds × 1 calls ⚠ only 4 rounds
+             mean ±mad ms  95% CI vs base     ops/s
+  ├─ v4_1t   104.3 ±0.3ms  [104.1–104.5]ms    97.8G
+  ├─ v4_mt    30.4 ±1.3ms  [-72.6%–-68.8%]     335G [1]
+  ├─ v3_1t   192.7 ±2.1ms  [+81.2%–+90.5%]    52.9G [2]
+  ╰─ v3_mt    38.0 ±1.8ms  [-64.7%–-62.3%]     268G
+
+  v4_mt  ███████████████████████████████████████████████████████████ 335 Gops/s
+  v3_mt  ███████████████████████████████████████████████ 268 Gops/s
+  v4_1t  █████████████████ 97.8 Gops/s
+  v3_1t  █████████ 52.9 Gops/s
+  [1] drift r=0.80 — later rounds slower
+  [2] drift r=0.80 — later rounds slower
+
+  conv4_1x1_96_16@1/4  4 rounds × 1 calls ⚠ only 4 rounds
+            mean ±mad ms  95% CI vs base     ops/s
+  ├─ v4_1t    6.1 ±0.1ms  [5.8–6.2]ms        46.7G
+  ├─ v4_mt    1.7 ±0.0ms  [-74.4%–-70.1%]     168G
+  ├─ v3_1t   10.3 ±0.0ms  [+71.6%–+74.1%]    27.5G
+  ╰─ v3_mt    2.2 ±0.1ms  [-67.4%–-58.1%]     127G [1]
+
+  v4_mt  ███████████████████████████████████████████████████████████ 168 Gops/s
+  v3_mt  ████████████████████████████████████████████ 127 Gops/s
+  v4_1t  ████████████████ 46.7 Gops/s
+  v3_1t  ██████████ 27.5 Gops/s
+  [1] drift r=-0.80 — later rounds faster
+
+  total: 887.3s  (856 noisy rounds)
+═══════════════════════════════════════════════════════════════
+  filter: cargo bench -- --group=NAME  format: --format=llm|csv|md|json
+run-heavy: done rc=0 892s | peak-RSS 0.80GiB | min-avail 43823MiB | peak-load 3.41

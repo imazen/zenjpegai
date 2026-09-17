@@ -46,7 +46,7 @@ pub struct CommonModel {
 }
 
 impl CommonModel {
-    pub fn load(ck: &Checkpoint<'_>, chs: usize) -> Result<Self> {
+    pub fn load(ck: &Checkpoint<'_>, chs: usize, eng: &crate::nn::fast::Engine) -> Result<Self> {
         if ck.bool("hyper_entropy.is_quantized")?.data != [true] {
             return Err(Error::Model(
                 "hyper_entropy is not quantised (need VM_common_int)".into(),
@@ -116,16 +116,16 @@ impl CommonModel {
             .collect();
 
         let context = if ck.contains("context.MCM.0.fusion_pred_net.conv1.weight") {
-            Some(ContextModel::load(ck, chs)?)
+            Some(ContextModel::load(ck, chs, eng)?)
         } else {
             None
         };
         Ok(Self {
             chs,
             z_cdfs,
-            hsd: HyperScaleDecoder::load(ck, chs)?,
+            hsd: HyperScaleDecoder::load(ck, chs, eng)?,
             gain_vector_log,
-            hyper_decoder: HyperDecoder::load(ck, chs)?,
+            hyper_decoder: HyperDecoder::load(ck, chs, eng)?,
             context,
         })
     }

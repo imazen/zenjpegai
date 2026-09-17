@@ -5,16 +5,21 @@
 //! few times the measured worst case on these vectors (see `PORTING.md`), tight enough that a
 //! wrong layer, weight or crop fails by orders of magnitude. Do not loosen them to make a change
 //! pass.
+//!
+//! Between this crate's own SIMD tiers and thread counts the output must be *identical*; that is
+//! checked here too, on real streams.
 #![cfg(feature = "reference-tests")]
 
 mod common;
 use common::{load_dump, ref_root, vector_dir};
 use zenjpegai::container::Codestream;
 use zenjpegai::decoder::output::{RgbPlanes, quantize, to_rgb_planes};
-use zenjpegai::decoder::reconstruct::{reconstruct_latent, synthesize};
+use zenjpegai::decoder::reconstruct::{Planes, reconstruct_latent, synthesize};
 use zenjpegai::decoder::{decode_entropy_stage, read_headers};
 use zenjpegai::mans::AnsTables;
 use zenjpegai::model::ModelDir;
+use zenjpegai::nn::fast::{Engine, Tier};
+use zenjpegai::tensor::Tensor;
 
 fn max_abs_diff(want: &[f32], got: &[f32]) -> f32 {
     assert_eq!(want.len(), got.len());
@@ -24,47 +29,68 @@ fn max_abs_diff(want: &[f32], got: &[f32]) -> f32 {
         .fold(0.0, f32::max)
 }
 
-fn check(name: &str) {
-    let dir = vector_dir(name);
-    let stream = std::fs::read(dir.join("stream.bits")).unwrap();
-    let dump = load_dump(&dir);
-    let cs = Codestream::parse(&stream).unwrap();
+struct Decoded {
+    psi: [Tensor<f32>; 2],
+    y_hat: [Tensor<f32>; 2],
+    planes: Planes,
+}
+
+fn decode(stream: &[u8], eng: &Engine) -> (zenjpegai::header::PictureHeader, Decoded) {
+    let cs = Codestream::parse(stream).unwrap();
     let headers = read_headers(&cs).unwrap();
-    let hdr = &headers.picture;
+    let hdr = headers.picture;
     let models = ModelDir::new(ref_root().join("models"));
     let id = hdr.model_id as usize;
     let op = hdr.synthesis_transforms[0];
     let (ym, uvm) = (
-        models.load_common(id, 0).unwrap(),
-        models.load_common(id, 1).unwrap(),
+        models.load_common(id, 0, eng).unwrap(),
+        models.load_common(id, 1, eng).unwrap(),
     );
-    let syn_y = models.load_synthesis_primary(id, op).unwrap();
-    let syn_uv = models.load_synthesis_secondary(id, op).unwrap();
+    let syn_y = models.load_synthesis_primary(id, op, eng).unwrap();
+    let syn_uv = models.load_synthesis_secondary(id, op, eng).unwrap();
+    let ent = decode_entropy_stage(&AnsTables::new(), &cs, &hdr, [&ym, &uvm]).unwrap();
+    let ly = reconstruct_latent(eng, &ym, &ent[0]).unwrap();
+    let luv = reconstruct_latent(eng, &uvm, &ent[1]).unwrap();
+    let planes = synthesize(eng, &hdr, &syn_y, &syn_uv, [&ly.y_hat, &luv.y_hat]).unwrap();
+    let psi = [ly.psi.to_planar().unwrap(), luv.psi.to_planar().unwrap()];
+    (
+        hdr,
+        Decoded {
+            psi,
+            y_hat: [ly.y_hat, luv.y_hat],
+            planes,
+        },
+    )
+}
 
-    let ent = decode_entropy_stage(&AnsTables::new(), &cs, hdr, [&ym, &uvm]).unwrap();
-    let ly = reconstruct_latent(&ym, &ent[0]).unwrap();
-    let luv = reconstruct_latent(&uvm, &ent[1]).unwrap();
+fn check(name: &str) {
+    let dir = vector_dir(name);
+    let stream = std::fs::read(dir.join("stream.bits")).unwrap();
+    let dump = load_dump(&dir);
+    let (hdr, d) = decode(&stream, &Engine::new());
+
     for (key, got) in [
-        ("y.psi", &ly.psi),
-        ("y.y_hat", &ly.y_hat),
-        ("uv.psi", &luv.psi),
-        ("uv.y_hat", &luv.y_hat),
+        ("y.psi", &d.psi[0]),
+        ("y.y_hat", &d.y_hat[0]),
+        ("uv.psi", &d.psi[1]),
+        ("uv.y_hat", &d.y_hat[1]),
     ] {
-        let d = max_abs_diff(&dump[key].f32(), &got.data);
-        assert!(d < 5e-4, "{name} {key}: max abs diff {d:e}");
+        let diff = max_abs_diff(&dump[key].f32(), &got.data);
+        assert!(diff < 5e-4, "{name} {key}: max abs diff {diff:e}");
+    }
+    for (key, got) in [
+        ("rec.a", &d.planes.y),
+        ("rec.b", &d.planes.u),
+        ("rec.c", &d.planes.v),
+    ] {
+        let diff = max_abs_diff(&dump[key].f32(), &got.data);
+        assert!(
+            diff < 3e-3,
+            "{name} {key}: max abs diff {diff:e} (range 0..255)"
+        );
     }
 
-    let planes = synthesize(hdr, &syn_y, &syn_uv, [&ly.y_hat, &luv.y_hat]).unwrap();
-    for (key, got) in [
-        ("rec.a", &planes.y),
-        ("rec.b", &planes.u),
-        ("rec.c", &planes.v),
-    ] {
-        let d = max_abs_diff(&dump[key].f32(), &got.data);
-        assert!(d < 3e-3, "{name} {key}: max abs diff {d:e} (range 0..255)");
-    }
-
-    let rgb = to_rgb_planes(hdr, &planes).unwrap();
+    let rgb = to_rgb_planes(&hdr, &d.planes).unwrap();
     let theirs = RgbPlanes {
         width: rgb.width,
         height: rgb.height,
@@ -107,4 +133,49 @@ vectors! {
     img30_base_off_bpp050 => "img30_base_off_bpp050",
     img30_base_off_bpp100 => "img30_base_off_bpp100",
     img30_simple_off_bpp050 => "img30_simple_off_bpp050",
+}
+
+/// Every SIMD tier, threaded or not, must decode a real stream to identical bits.
+#[test]
+fn tiers_and_threads_agree_bit_for_bit() {
+    for name in ["img30_base_off_bpp050", "img30_simple_off_bpp050"] {
+        let stream = std::fs::read(vector_dir(name).join("stream.bits")).unwrap();
+        let mut baseline: Option<(String, Decoded)> = None;
+        for tier in Tier::available() {
+            for parallel in [false, true] {
+                // The scalar tier emulates FMA in software on CPUs without it; once is enough.
+                if matches!(tier, Tier::Scalar) && parallel {
+                    continue;
+                }
+                let eng = Engine::with(tier, parallel);
+                let (_, d) = decode(&stream, &eng);
+                let label = format!("{eng:?}");
+                match &baseline {
+                    None => baseline = Some((label, d)),
+                    Some((base_label, b)) => {
+                        let pairs = [
+                            ("psi[y]", &b.psi[0], &d.psi[0]),
+                            ("y_hat[y]", &b.y_hat[0], &d.y_hat[0]),
+                            ("y_hat[uv]", &b.y_hat[1], &d.y_hat[1]),
+                            ("Y", &b.planes.y, &d.planes.y),
+                            ("U", &b.planes.u, &d.planes.u),
+                            ("V", &b.planes.v, &d.planes.v),
+                        ];
+                        for (what, want, got) in pairs {
+                            let bad = want
+                                .data
+                                .iter()
+                                .zip(&got.data)
+                                .filter(|(a, b)| a.to_bits() != b.to_bits())
+                                .count();
+                            assert_eq!(
+                                bad, 0,
+                                "{name} {what}: {label} differs from {base_label} in {bad} values"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
 }

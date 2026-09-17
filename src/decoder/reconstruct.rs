@@ -10,23 +10,28 @@ use crate::header::PictureHeader;
 use crate::model::CommonModel;
 use crate::model::mcm::upshuffle_psi;
 use crate::model::synthesis::{SynthesisPrimary, SynthesisSecondary};
+use crate::nn::fast::{BTensor, Engine};
 use crate::tensor::Tensor;
 
 /// Latent-domain result for one component.
 #[derive(Clone, Debug)]
 pub struct Latent {
-    pub psi: Tensor<f32>,
+    pub psi: BTensor,
     pub y_hat: Tensor<f32>,
 }
 
 /// `hyper_decode_tile` + `decompress_ar_scale_tile` for a single tile covering the component.
-pub fn reconstruct_latent(model: &CommonModel, e: &ComponentEntropy) -> Result<Latent> {
+pub fn reconstruct_latent(
+    eng: &Engine,
+    model: &CommonModel,
+    e: &ComponentEntropy,
+) -> Result<Latent> {
     let (h, w) = (e.residual.h, e.residual.w);
     let psi = model
         .hyper_decoder
-        .forward(&e.z_hat, h.div_ceil(2), w.div_ceil(2))?;
+        .forward(eng, &e.z_hat, h.div_ceil(2), w.div_ceil(2))?;
     let y_hat = match &model.context {
-        Some(ctx) => ctx.decompress(&e.residual, &psi)?,
+        Some(ctx) => ctx.decompress(eng, &e.residual, &psi)?,
         None => {
             let mut y = upshuffle_psi(&psi, h, w)?;
             for (v, &r) in y.data.iter_mut().zip(&e.residual.data) {
@@ -49,6 +54,7 @@ pub struct Planes {
 
 /// Synthesis of both components for a picture that is a single synthesis tile.
 pub fn synthesize(
+    eng: &Engine,
     hdr: &PictureHeader,
     luma: &SynthesisPrimary,
     chroma: &SynthesisSecondary,
@@ -66,8 +72,13 @@ pub fn synthesize(
     let out_h = h - hdr.diff_display_height as usize;
     let out_w = w - hdr.diff_display_width as usize;
 
-    let rec_y = luma.forward(y_hat[0], h, w)?.crop(out_h, out_w)?;
-    let rec_uv = chroma.forward(y_hat[0], y_hat[1], h, w)?;
+    let v = eng.tier.block();
+    let (by, buv) = (
+        BTensor::from_planar(y_hat[0], v)?,
+        BTensor::from_planar(y_hat[1], v)?,
+    );
+    let rec_y = luma.forward(eng, &by, h, w)?.crop(out_h, out_w)?;
+    let rec_uv = chroma.forward(eng, &by, &buv, h, w)?;
 
     // rec_UV[:, :, :out_h:c_ver, :out_w:c_hor]
     let (sv, sh) = (hdr.c_ver as usize, hdr.c_hor as usize);

@@ -10,11 +10,11 @@ check:
 ref := env_var_or_default("ZENJPEGAI_REF", env_var("HOME") / "work/zen/jpeg-ai-reference-software")
 
 test:
-    cargo test --all-targets 2>&1 | tee ~/tmp/zenjpegai-test.log
+    cargo test --lib --tests --examples 2>&1 | tee ~/tmp/zenjpegai-test.log
 
 # Tests that read the upstream checkpoints / reference vectors. Missing data fails loudly.
 test-ref:
-    ZENJPEGAI_REF={{ref}} cargo test --all-targets --features reference-tests 2>&1 | tee ~/tmp/zenjpegai-test-ref.log
+    ZENJPEGAI_REF={{ref}} cargo test --lib --tests --examples --features reference-tests 2>&1 | tee ~/tmp/zenjpegai-test-ref.log
 
 build-release:
     ~/work/zen/scripts/run-heavy -- cargo build --release 2>&1 | tee ~/tmp/zenjpegai-build.log
