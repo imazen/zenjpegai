@@ -209,6 +209,46 @@ fn conv_geometries() {
     );
 }
 
+/// Two convolutions that share every pipeline-key field but the baked output group size —
+/// a regression test for the cache collision that ran the second with the first's shader.
+#[test]
+fn conv_grouped_pipeline_keys() {
+    let mut rng = Rng::new("conv pipeline keys");
+    let a = Conv2d::new(
+        32,
+        32,
+        (1, 1),
+        1,
+        (0, 0),
+        1,
+        rng.vec(32 * 32, 0.5),
+        Some(rng.vec(32, 1.0)),
+    )
+    .unwrap();
+    // Same icg4, different ocg4 (32 -> 8 out blocks vs 32 -> 32 out blocks).
+    let b = Conv2d::new(
+        32,
+        128,
+        (1, 1),
+        1,
+        (0, 0),
+        1,
+        rng.vec(128 * 32, 0.5),
+        Some(rng.vec(128, 1.0)),
+    )
+    .unwrap();
+    let x = rng.tensor(32, 11, 13);
+    let want = reference::conv2d(&b, &reference::conv2d(&a, &x).unwrap()).unwrap();
+    let got = run(
+        |g, i| {
+            let y = g.conv(i[0], &GpuConv::new(context(), &a).unwrap()).unwrap();
+            g.conv(y, &GpuConv::new(context(), &b).unwrap()).unwrap()
+        },
+        &[&x],
+    );
+    check("conv1x1 icg4 8 -> ocg4 8 then 32", &want, &got, 2e-6);
+}
+
 /// `F.pad(x, (0, 1, 0, 1))` + 2x2 convolution (SOP upsampling), and the fused ReLU / ReLU6.
 #[test]
 fn conv_extra_pad_and_fused_activations() {

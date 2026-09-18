@@ -68,47 +68,75 @@ pub struct ConvVariant {
     /// invocations, which pays off exactly when the weights are the bulk of the traffic (many
     /// input blocks) and costs edge lanes when they are not; [`crate::plan`] picks it per layer.
     pub wg: u32,
+    /// Output pixels per invocation along x (1 or 2). Each weight `mat4x4` is loaded once per
+    /// tap and applied to all `PX` pixels — on the 1x1 layers of HOP that weight stream is the
+    /// bulk of the instruction count, so this halves it. Accumulators grow `ob * px` vec4; the
+    /// accumulation order of every single output element is unchanged.
+    pub px: u32,
     pub act: Act,
     /// Apply ReLU6 to every input sample as it is loaded (the ResAU gate's first step).
     pub pre_relu6: bool,
     /// Fused second operand (applied after `act`).
     pub res: Option<Res>,
+    /// Input blocks per group, baked in as a constant: a runtime-bound `for ic` loop cannot
+    /// unroll, so each iteration serialises its loads on the latency chain.
+    pub icg4: u32,
+    /// Output blocks per group, likewise baked (it divides `oc4` for the group base).
+    pub ocg4: u32,
+    /// Channel blocks of the input halo staged in workgroup memory per chunk
+    /// ([`conv_tiled`]); 0 = the direct kernel.
+    pub tile_ich: u32,
 }
 
 impl ConvVariant {
     pub fn key(&self) -> String {
         format!(
-            "conv_k{}x{}_s{}_ob{}_wg{}_{:?}_{}_{:?}",
-            self.kh, self.kw, self.stride, self.ob, self.wg, self.act, self.pre_relu6, self.res
+            "conv_k{}x{}_s{}_ob{}_wg{}_px{}_ic{}_oc{}_t{}_{:?}_{}_{:?}",
+            self.kh,
+            self.kw,
+            self.stride,
+            self.ob,
+            self.wg,
+            self.px,
+            self.icg4,
+            self.ocg4,
+            self.tile_ich,
+            self.act,
+            self.pre_relu6,
+            self.res
         )
     }
 }
 
-fn acc_decl(ob: u32, bias_index: &str) -> String {
-    (0..ob)
-        .map(|i| format!("  var a{i} = bias[{bias_index} + {i}u];\n"))
+fn acc_decl(ob: u32, px: u32, bias_index: &str) -> String {
+    (0..px)
+        .flat_map(|p| (0..ob).map(move |i| (p, i)))
+        .map(|(p, i)| format!("  var a{p}_{i} = bias[{bias_index} + {i}u];\n"))
         .collect()
 }
 
-fn acc_step(ob: u32) -> String {
-    (0..ob)
-        .map(|i| format!("        a{i} += wt[w + {i}u] * v;\n"))
-        .collect()
-}
-
-fn acc_store(ob: u32, act: Act, res: Option<Res>) -> String {
-    (0..ob)
-        .map(|i| {
+fn acc_store(ob: u32, px: u32, act: Act, res: Option<Res>) -> String {
+    (0..px)
+        .flat_map(|p| (0..ob).map(move |i| (p, i)))
+        .map(|(p, i)| {
             let v = match act {
-                Act::None => format!("a{i}"),
-                Act::Relu => format!("max(a{i}, vec4<f32>(0.0))"),
+                Act::None => format!("a{p}_{i}"),
+                Act::Relu => format!("max(a{p}_{i}, vec4<f32>(0.0))"),
             };
-            match res {
-                None => format!("  dst[o + {i}u] = {v};\n"),
-                Some(Res::Add) => format!("  dst[o + {i}u] = {v} + res[o + {i}u];\n"),
-                Some(Res::Gate) => {
-                    format!("  dst[o + {i}u] = res[o + {i}u] * (vec4<f32>(1.0) + {v});\n")
+            let st = match res {
+                None => format!("dst[o + {p}u * p.out_c4 + {i}u] = {v};"),
+                Some(Res::Add) => {
+                    format!(
+                        "dst[o + {p}u * p.out_c4 + {i}u] = {v} + res[o + {p}u * p.out_c4 + {i}u];"
+                    )
                 }
+                Some(Res::Gate) => format!(
+                    "dst[o + {p}u * p.out_c4 + {i}u] = res[o + {p}u * p.out_c4 + {i}u] * (vec4<f32>(1.0) + {v});"
+                ),
+            };
+            match p {
+                0 => format!("  {st}\n"),
+                _ => format!("  if (ox0 + {p}u < p.out_w) {{ {st} }}\n"),
             }
         })
         .collect()
@@ -122,50 +150,75 @@ const CONV_BINDINGS: &str = "
 ";
 
 /// Direct convolution, zero padding by bounds check, any group count whose groups are whole
-/// blocks. One invocation computes `ob` output blocks of one pixel.
+/// blocks. One invocation computes `ob` output blocks of `px` adjacent output pixels.
 ///
-/// Register tiling over *pixels* (2x2 and 2x1 outputs per invocation, which amortises the
-/// `4 * ob` weight loads of every tap over that many products) was implemented and measured on
-/// an RTX 2080: it helps SOP (1024 x 1024 synthesis 8.48 -> 7.23 ms device) and loses on the
-/// operating points that matter more (BOP 22.4 -> 26.3 ms, HOP 555 -> 711 ms), so the kernel
-/// computes one pixel per invocation. The loss tracks register pressure — `ob * px * py`
-/// accumulators — not the load count, so the lever to try next is fewer channel blocks per
-/// invocation together with a pixel tile, not a larger tile.
+/// Register tiling over *pixels* (2x2 and 2x1 outputs per invocation at `ob = 4`, which
+/// amortises the `4 * ob` weight loads of every tap over that many products) was implemented
+/// and measured on an RTX 2080: it helps SOP (1024 x 1024 synthesis 8.48 -> 7.23 ms device)
+/// and loses on the operating points that matter more (BOP 22.4 -> 26.3 ms, HOP 555 -> 711
+/// ms) because `ob * px * py` accumulators spill. The measured winner is the smaller tile the
+/// doc above already pointed at: `px = 2` keeps `ob * px <= 8` accumulators while still
+/// halving each lane's weight-load stream; [`crate::plan`] enables it on the layers whose
+/// `icg4` makes the weight stream the bottleneck.
 /// Params: `in_h in_w in_c4 out_h out_w out_c4 pad_y pad_x icg4 ocg4`.
 pub fn conv(v: &ConvVariant) -> String {
-    let load = if v.pre_relu6 {
-        "clamp(src[sb + ic], vec4<f32>(0.0), vec4<f32>(6.0))"
-    } else {
-        "src[sb + ic]"
+    let load = |e: &str| {
+        if v.pre_relu6 {
+            format!("clamp({e}, vec4<f32>(0.0), vec4<f32>(6.0))")
+        } else {
+            e.to_string()
+        }
     };
     let res_binding = match v.res {
         None => "",
         Some(_) => "@group(0) @binding(5) var<storage, read> res: array<vec4<f32>>;\n",
     };
+    // Per pixel of the tile: its input column and bounds flag (recomputed per tap).
+    let coords: String = (0..v.px)
+        .map(|p| {
+            format!(
+                "      let ix{p} = ix + i32({p}u * STRIDE);\n      let ok{p} = ix{p} >= 0 && ix{p} < i32(p.in_w);\n"
+            )
+        })
+        .collect();
+    let mut step = String::new();
+    for i in 0..v.ob {
+        step.push_str(&format!("        let w{i} = wt[w + {i}u];\n"));
+    }
+    for p in 0..v.px {
+        step.push_str(&format!(
+            "        if (ok{p}) {{\n          let s{p} = (u32(iy) * p.in_w + u32(ix{p})) * p.in_c4 + icb;\n          let v = {};\n",
+            load(&format!("src[s{p} + ic]"))
+        ));
+        for i in 0..v.ob {
+            step.push_str(&format!("          a{p}_{i} += w{i} * v;\n"));
+        }
+        step.push_str("        }\n");
+    }
     format!(
         "{params}{CONV_BINDINGS}{res_binding}
-const KH: u32 = {kh}u; const KW: u32 = {kw}u; const STRIDE: u32 = {stride}u; const OB: u32 = {ob}u;
+const KH: u32 = {kh}u; const KW: u32 = {kw}u; const STRIDE: u32 = {stride}u; const OB: u32 = {ob}u; const PX: u32 = {px}u;
+const ICG4: u32 = {icg4}u; const OCG4: u32 = {ocg4}u;
 @compute @workgroup_size({wg}, {wg}, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{
-  if (gid.x >= p.out_w || gid.y >= p.out_h) {{ return; }}
+  let ox0 = gid.x * PX;
+  if (ox0 >= p.out_w || gid.y >= p.out_h) {{ return; }}
   let og = gid.z;
   let oc4 = og * OB;
-  let icb = (oc4 / p.ocg4) * p.icg4;
+  let icb = (oc4 / OCG4) * ICG4;
 {decl}  for (var ky = 0u; ky < KH; ky++) {{
     let iy = i32(gid.y * STRIDE + ky) - i32(p.pad_y);
     if (iy < 0 || iy >= i32(p.in_h)) {{ continue; }}
     for (var kx = 0u; kx < KW; kx++) {{
-      let ix = i32(gid.x * STRIDE + kx) - i32(p.pad_x);
-      if (ix < 0 || ix >= i32(p.in_w)) {{ continue; }}
-      let sb = (u32(iy) * p.in_w + u32(ix)) * p.in_c4 + icb;
-      let wb = ((og * KH + ky) * KW + kx) * p.icg4 * OB;
-      for (var ic = 0u; ic < p.icg4; ic++) {{
-        let v = {load};
+      let ix = i32(ox0 * STRIDE + kx) - i32(p.pad_x);
+{coords}      if (!({all_ok})) {{ continue; }}
+      let wb = ((og * KH + ky) * KW + kx) * ICG4 * OB;
+      for (var ic = 0u; ic < ICG4; ic++) {{
         let w = wb + ic * OB;
 {step}      }}
     }}
   }}
-  let o = (gid.y * p.out_w + gid.x) * p.out_c4 + oc4;
+  let o = (gid.y * p.out_w + ox0) * p.out_c4 + oc4;
 {store}}}
 ",
         params = params(&[
@@ -175,10 +228,145 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{
         kw = v.kw,
         stride = v.stride,
         ob = v.ob,
+        px = v.px,
+        icg4 = v.icg4,
+        ocg4 = v.ocg4,
         wg = v.wg,
-        decl = acc_decl(v.ob, "oc4"),
-        step = acc_step(v.ob),
-        store = acc_store(v.ob, v.act, v.res),
+        decl = acc_decl(v.ob, v.px, "oc4"),
+        coords = coords,
+        all_ok = (0..v.px)
+            .map(|p| format!("ok{p}"))
+            .collect::<Vec<_>>()
+            .join(" || "),
+        step = step,
+        store = acc_store(v.ob, v.px, v.act, v.res),
+    )
+}
+
+/// Direct convolution with the workgroup's input halo staged in workgroup memory: the
+/// `((WG - 1) * stride + KH)²` pixels load once — coalesced — per `ICH`-block chunk instead of
+/// every lane walking its own `KH x KW` window of scattered `vec4` loads. Each output element's
+/// accumulation order (ky, kx, ic ascending, one multiply-add at a time) is the direct
+/// kernel's exactly. `px` is always 1 here.
+/// Params: `in_h in_w in_c4 out_h out_w out_c4 pad_y pad_x icg4 ocg4` (same as [`conv`]).
+pub fn conv_tiled(v: &ConvVariant, ich: u32) -> String {
+    debug_assert!(v.px == 1 && v.icg4.is_multiple_of(ich));
+    let wg = v.wg;
+    let tw = (wg - 1) * v.stride + v.kh;
+    let st = v.stride;
+    let load = if v.pre_relu6 {
+        "clamp(t, vec4<f32>(0.0), vec4<f32>(6.0))"
+    } else {
+        "t"
+    };
+    let res_binding = match v.res {
+        None => "",
+        Some(_) => "@group(0) @binding(5) var<storage, read> res: array<vec4<f32>>;\n",
+    };
+    // One tap: in-bounds check like the direct kernel, then ICH channel blocks of it. K > 1
+    // reads weights from the workgroup-staged chunk (`wtile`, loaded once per workgroup instead
+    // of per lane); K = 1 keeps direct `wt` reads — its chunk is 4 matrices, and leaving it
+    // unstaged keeps ICH = 4 under the 16 KiB storage limit (measured: k1 + wtile regresses).
+    let wtap = v.kh > 1;
+    let tap = |ky: u32, kx: u32| {
+        let mut s = format!(
+            "      {{\n        let iy = i32(oy * {st}u + {ky}u) - i32(p.pad_y);\n        if (iy >= 0 && iy < i32(p.in_h)) {{\n        let ix = i32(ox * {st}u + {kx}u) - i32(p.pad_x);\n        if (ix >= 0 && ix < i32(p.in_w)) {{\n          for (var j = 0u; j < ICH; j++) {{\n            let t = tile[((lid.y * {st}u + {ky}u) * TW + lid.x * {st}u + {kx}u) * ICH + j];\n"
+        );
+        if wtap {
+            s.push_str(&format!(
+                "            let w = ({ky}u * KW + {kx}u) * ICH * OB + j * OB;\n"
+            ));
+        } else {
+            s.push_str(&format!(
+                "            let w = ((og * KH + {ky}u) * KW + {kx}u) * ICG4 * OB + (ic0 + j) * OB;\n"
+            ));
+        }
+        let wsrc = if wtap { "wtile" } else { "wt" };
+        for i in 0..v.ob {
+            s.push_str(&format!(
+                "            a0_{i} += {wsrc}[w + {i}u] * {load};\n"
+            ));
+        }
+        s.push_str("          }\n        }\n        }\n      }\n");
+        s
+    };
+    let taps: String = (0..v.kh)
+        .flat_map(|ky| (0..v.kw).map(move |kx| (ky, kx)))
+        .map(|(ky, kx)| tap(ky, kx))
+        .collect();
+    format!(
+        "{params}{CONV_BINDINGS}{res_binding}
+const KH: u32 = {kh}u; const KW: u32 = {kw}u; const OB: u32 = {ob}u;
+const ICG4: u32 = {icg4}u; const OCG4: u32 = {ocg4}u; const ICH: u32 = {ich}u; const TW: u32 = {tw}u;
+var<workgroup> tile: array<vec4<f32>, {tile_n}u>;
+{wtile_decl}
+@compute @workgroup_size({wg}, {wg}, 1)
+fn main(
+  @builtin(global_invocation_id) gid: vec3<u32>,
+  @builtin(local_invocation_id) lid: vec3<u32>,
+  @builtin(workgroup_id) wid: vec3<u32>,
+) {{
+  let og = gid.z;
+  let oc4 = og * OB;
+  let icb = (oc4 / OCG4) * ICG4;
+  let ox = wid.x * {wg}u + lid.x;
+  let oy = wid.y * {wg}u + lid.y;
+{decl}  let tx0 = i32(wid.x * {wg}u) * {st} - i32(p.pad_x);
+  let ty0 = i32(wid.y * {wg}u) * {st} - i32(p.pad_y);
+  let tid = lid.y * {wg}u + lid.x;
+  for (var ic0 = 0u; ic0 < ICG4; ic0 += ICH) {{
+    for (var i = tid; i < {tile_n}u; i += {lanes}u) {{
+      let pl = i / ICH;
+      let j = i % ICH;
+      let gy = ty0 + i32(pl / TW);
+      let gx = tx0 + i32(pl % TW);
+      var tv = vec4<f32>(0.0);
+      if (gy >= 0 && gy < i32(p.in_h) && gx >= 0 && gx < i32(p.in_w)) {{
+        tv = src[(u32(gy) * p.in_w + u32(gx)) * p.in_c4 + icb + ic0 + j];
+      }}
+      tile[i] = tv;
+    }}
+{wtile_stage}    workgroupBarrier();
+{taps}    workgroupBarrier();
+  }}
+  if (ox >= p.out_w || oy >= p.out_h) {{ return; }}
+  let o = (oy * p.out_w + ox) * p.out_c4 + oc4;
+{store}}}
+",
+        params = params(&[
+            "in_h", "in_w", "in_c4", "out_h", "out_w", "out_c4", "pad_y", "pad_x", "icg4", "ocg4"
+        ]),
+        kh = v.kh,
+        kw = v.kw,
+        ob = v.ob,
+        icg4 = v.icg4,
+        ocg4 = v.ocg4,
+        ich = ich,
+        tw = tw,
+        st = st,
+        tile_n = tw * tw * ich,
+        wtile_decl = if v.kh > 1 {
+            format!(
+                "var<workgroup> wtile: array<mat4x4<f32>, {}u>;",
+                v.kh * v.kw * ich * v.ob
+            )
+        } else {
+            String::new()
+        },
+        wtile_stage = if v.kh > 1 {
+            format!(
+                "    for (var i = tid; i < {}u; i += {}u) {{\n      let tp = i / (ICH * OB);\n      let r = i % (ICH * OB);\n      wtile[i] = wt[((og * KH + tp / KW) * KW + tp % KW) * ICG4 * OB + (ic0 + r / OB) * OB + r % OB];\n    }}\n",
+                v.kh * v.kw * ich * v.ob,
+                wg * wg,
+            )
+        } else {
+            String::new()
+        },
+        lanes = wg * wg,
+        wg = wg,
+        decl = acc_decl(v.ob, 1, "oc4"),
+        taps = taps,
+        store = acc_store(v.ob, 1, v.act, v.res),
     )
 }
 
@@ -187,11 +375,15 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{
 /// `(oy + pad) mod stride` and steps by `stride`, which is exactly the set the divisibility
 /// test used to select, in the same ascending order, so the sum is bit-identical to testing all
 /// `K * K` of them. At stride 2 that is 4 taps of 16 for `K = 4` and at most 4 of 9 for `K = 3`.
+/// `ic4` is baked in (see [`ConvVariant::icg4`] — the constant bound lets the tap loop unroll).
 /// Params: `in_h in_w in_c4 out_h out_w out_c4 pad`.
-pub fn conv_transpose(k: u32, stride: u32, ob: u32) -> String {
+pub fn conv_transpose(k: u32, stride: u32, ob: u32, ic4: u32) -> String {
+    let acc_step: String = (0..ob)
+        .map(|i| format!("        a0_{i} += wt[w + {i}u] * v;\n"))
+        .collect();
     format!(
         "{params}{CONV_BINDINGS}
-const K: u32 = {k}u; const STRIDE: u32 = {stride}u; const OB: u32 = {ob}u;
+const K: u32 = {k}u; const STRIDE: u32 = {stride}u; const OB: u32 = {ob}u; const IC4: u32 = {ic4}u;
 @compute @workgroup_size({WG}, {WG}, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{
   if (gid.x >= p.out_w || gid.y >= p.out_h) {{ return; }}
@@ -208,8 +400,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{
       let ix = (bx - kx) / STRIDE;
       if (ix >= p.in_w) {{ continue; }}
       let sb = (iy * p.in_w + ix) * p.in_c4;
-      let wb = ((og * K + ky) * K + kx) * p.in_c4 * OB;
-      for (var ic = 0u; ic < p.in_c4; ic++) {{
+      let wb = ((og * K + ky) * K + kx) * IC4 * OB;
+      for (var ic = 0u; ic < IC4; ic++) {{
         let v = src[sb + ic];
         let w = wb + ic * OB;
 {step}      }}
@@ -219,9 +411,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{
 {store}}}
 ",
         params = params(&["in_h", "in_w", "in_c4", "out_h", "out_w", "out_c4", "pad"]),
-        decl = acc_decl(ob, "oc4"),
-        step = acc_step(ob),
-        store = acc_store(ob, Act::None, None),
+        decl = acc_decl(ob, 1, "oc4"),
+        step = acc_step,
+        store = acc_store(ob, 1, Act::None, None),
     )
 }
 
@@ -234,7 +426,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{
 /// so it is bound by nothing else. Out-of-picture halo samples are stored as zero and their taps
 /// still added, which is bit-identical to skipping them: adding an exact `w * 0.0` changes no
 /// finite accumulator.
-pub fn depthwise3x3() -> String {
+pub fn depthwise3x3(zc: u32) -> String {
     let halo = WG + 2;
     format!(
         "{params}
@@ -242,38 +434,51 @@ pub fn depthwise3x3() -> String {
 @group(0) @binding(2) var<storage, read_write> dst: array<vec4<f32>>;
 @group(0) @binding(3) var<storage, read> wt: array<vec4<f32>>;
 const HALO: u32 = {halo}u;
-var<workgroup> tile: array<vec4<f32>, {halo_sq}u>;
-@compute @workgroup_size({WG}, {WG}, 1)
+const ZC: u32 = {zc}u;
+// lid.x is the channel block within the workgroup's ZC-group — the fastest-varying lane
+// coordinate — so staging loads and stores run ZC*16B contiguous instead of striding c4*16B
+// per lane.
+var<workgroup> tile: array<vec4<f32>, {tile_sq}u>;
+@compute @workgroup_size({zc}, {WG}, {WG})
 fn main(
   @builtin(global_invocation_id) gid: vec3<u32>,
   @builtin(local_invocation_id) lid: vec3<u32>,
   @builtin(workgroup_id) wid: vec3<u32>,
 ) {{
-  let c = gid.z;
+  let cb = wid.z * ZC + lid.x;
   let x0 = i32(wid.x * {WG}u) - 1;
   let y0 = i32(wid.y * {WG}u) - 1;
-  for (var i = lid.y * {WG}u + lid.x; i < HALO * HALO; i += {WG}u * {WG}u) {{
-    let sy = y0 + i32(i / HALO);
-    let sx = x0 + i32(i % HALO);
+  for (var i = lid.x + ZC * (lid.y + {WG}u * lid.z); i < HALO * HALO * ZC; i += {lanes}u) {{
+    let cs = i % ZC;
+    let pl = i / ZC;
+    let sy = y0 + i32(pl / HALO);
+    let sx = x0 + i32(pl % HALO);
     var v = vec4<f32>(0.0);
     if (sy >= 0 && sy < i32(p.h) && sx >= 0 && sx < i32(p.w)) {{
-      v = src[(u32(sy) * p.w + u32(sx)) * p.c4 + c];
+      v = src[(u32(sy) * p.w + u32(sx)) * p.c4 + wid.z * ZC + cs];
     }}
     tile[i] = v;
   }}
   workgroupBarrier();
-  if (gid.x >= p.w || gid.y >= p.h) {{ return; }}
+  // px rides lid.y (second-fastest after the channel lid.x) so a warp stores ZC*WG/…
+  // contiguous vec4 runs; py is lid.z.
+  let px = wid.x * {WG}u + lid.y;
+  let py = wid.y * {WG}u + lid.z;
+  if (px >= p.w || py >= p.h) {{ return; }}
   var acc = vec4<f32>(0.0);
   for (var ky = 0u; ky < 3u; ky++) {{
     for (var kx = 0u; kx < 3u; kx++) {{
-      acc += wt[c * 9u + ky * 3u + kx] * tile[(lid.y + ky) * HALO + lid.x + kx];
+      acc += wt[cb * 9u + ky * 3u + kx] * tile[((lid.z + ky) * HALO + lid.y + kx) * ZC + lid.x];
     }}
   }}
-  dst[(gid.y * p.w + gid.x) * p.c4 + c] = acc;
+  dst[(py * p.w + px) * p.c4 + cb] = acc;
 }}
 ",
         params = params(&["h", "w", "c4"]),
-        halo_sq = halo * halo,
+        halo = halo,
+        zc = zc,
+        tile_sq = halo * halo * zc,
+        lanes = WG * WG * zc,
     )
 }
 
@@ -375,15 +580,16 @@ pub fn elu_gate() -> String {
 @group(0) @binding(3) var<storage, read_write> dst: array<vec4<f32>>;
 @compute @workgroup_size({WG1}, 1, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{
-  let i = gid.y * p.row + gid.x;
-  if (gid.x >= p.row || i >= p.n) {{ return; }}
-  for (var c = 0u; c < p.n4; c++) {{
-    let x = a[i * p.a_c4 + p.a_off + c];
-    let e = select(exp(min(x, vec4<f32>(0.0))) - vec4<f32>(1.0), x, x > vec4<f32>(0.0));
-    dst[i * p.dst_c4 + p.dst_off + c] = e * b[i * p.b_c4 + p.b_off + c];
-  }}
-}}
-",
+  // One lane per (pixel, channel block): consecutive lanes walk consecutive channel
+  // blocks of one pixel, so warps read and write contiguous `vec4` runs.
+  let t = gid.y * p.row + gid.x;
+  if (gid.x >= p.row || t >= p.n * p.n4) {{ return; }}
+  let i = t / p.n4;
+  let c = t % p.n4;
+  let x = a[i * p.a_c4 + p.a_off + c];
+  let e = select(exp(min(x, vec4<f32>(0.0))) - vec4<f32>(1.0), x, x > vec4<f32>(0.0));
+  dst[i * p.dst_c4 + p.dst_off + c] = e * b[i * p.b_c4 + p.b_off + c];
+}}",
         params = params(&[
             "n", "row", "n4", "a_c4", "a_off", "b_c4", "b_off", "dst_c4", "dst_off"
         ]),
@@ -705,4 +911,29 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{
         gu = (0.0722f64 * 1.8556 / 0.7152) as f32,
         gv = (0.2126f64 * 1.5748 / 0.7152) as f32,
     )
+}
+
+#[cfg(test)]
+mod dump {
+    use super::*;
+
+    #[test]
+    fn print_conv() {
+        let v = ConvVariant {
+            kh: 3,
+            kw: 3,
+            stride: 1,
+            ob: 4,
+            wg: 8,
+            px: 1,
+            act: Act::None,
+            pre_relu6: true,
+            res: None,
+            icg4: 4,
+            ocg4: 4,
+            tile_ich: 0,
+        };
+        println!("{}", conv(&v));
+        println!("{}", conv_transpose(4, 2, 4, 16));
+    }
 }

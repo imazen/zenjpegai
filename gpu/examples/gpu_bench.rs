@@ -147,7 +147,7 @@ fn profile(a: &Args, models: &ModelDir, template: &PictureHeader, model_id: usiz
     );
     assert!(ctx.has_timestamps(), "adapter has no timestamp queries");
     let mut tsv = String::from(
-        "kind\tadapter\top\twidth\theight\tindex\tkernel\tgrid\tns\tpct\tdispatch_ms_total\tsingle_pass_ms\n",
+        "kind\tadapter\top\twidth\theight\tindex\tkernel\tgrid\tns\tpct\tdispatch_ms_total\tsingle_pass_ms\tparams\n",
     );
     for &op in &a.ops {
         let syn = GpuSynthesis::load(ctx.clone(), models, model_id, op).expect("load");
@@ -199,11 +199,12 @@ fn profile(a: &Args, models: &ModelDir, template: &PictureHeader, model_id: usiz
                 .collect();
             let total: f64 = med.iter().sum();
             for (idx, (label, &ns)) in labels.iter().zip(&med).enumerate() {
-                let (kernel, grid) = label.split_once(" [").unwrap_or((label, ""));
+                // `key [gx x gy x gz] p1 p2 ...` — params feed the roofline analysis.
+                let (kernel, rest) = label.split_once(" [").unwrap_or((label, ""));
+                let (grid, params) = rest.split_once("] ").unwrap_or((rest, ""));
                 writeln!(
                     tsv,
-                    "profile\t{adapter}\t{op:?}\t{w}\t{h}\t{idx}\t{kernel}\t{}\t{ns:.0}\t{:.2}\t{:.3}\t{single_pass:.3}",
-                    grid.trim_end_matches(']'),
+                    "profile\t{adapter}\t{op:?}\t{w}\t{h}\t{idx}\t{kernel}\t{grid}\t{ns:.0}\t{:.2}\t{:.3}\t{single_pass:.3}\t{params}",
                     100.0 * ns / total,
                     total / 1e6,
                 )

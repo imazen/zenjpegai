@@ -1,0 +1,44 @@
+kind	adapter	op	width	height	tiles	dispatches	gpu_wall_ms	gpu_device_ms	gpu_submit_ms	gpu_first_ms	cpu_mt_ms	cpu_1t_ms	gpu_mem_mb	largest_map_mb	note
+cold	NVIDIA GeForce RTX 2080 [Vulkan DiscreteGpu; NVIDIA 580.178.04]	Sop	560	888	1	30	229.56			24.24					context 203.4 ms + checkpoint parse/upload 1.9 ms + first picture 24.2 ms, of which plan build (pipeline compilation + bind groups) 9.4 ms (15 pipelines)
+synthesis	NVIDIA GeForce RTX 2080 [Vulkan DiscreteGpu; NVIDIA 580.178.04]	Sop	64	64	1	28	0.98	0.86	0.07	1.33	0.67	0.84	24.7	0.0	
+synthesis	NVIDIA GeForce RTX 2080 [Vulkan DiscreteGpu; NVIDIA 580.178.04]	Sop	128	128	1	28	1.08	0.93	0.07	1.20	0.99	2.16	24.7	0.1	
+synthesis	NVIDIA GeForce RTX 2080 [Vulkan DiscreteGpu; NVIDIA 580.178.04]	Sop	256	256	1	28	1.36	1.09	0.10	1.56	1.75	5.36	24.7	0.5	
+synthesis	NVIDIA GeForce RTX 2080 [Vulkan DiscreteGpu; NVIDIA 580.178.04]	Sop	384	384	1	28	1.89	1.38	0.19	2.17	2.90	9.87	24.7	1.1	
+synthesis	NVIDIA GeForce RTX 2080 [Vulkan DiscreteGpu; NVIDIA 580.178.04]	Sop	512	512	1	28	2.76	1.80	0.30	2.88	4.89	16.24	24.7	2.0	
+synthesis	NVIDIA GeForce RTX 2080 [Vulkan DiscreteGpu; NVIDIA 580.178.04]	Sop	768	768	1	28	5.61	3.61	0.77	6.55	8.89	29.88	29.2	4.5	
+synthesis	NVIDIA GeForce RTX 2080 [Vulkan DiscreteGpu; NVIDIA 580.178.04]	Sop	1024	1024	1	28	9.80	6.46	1.26	12.63	15.61	54.41	52.0	8.0	
+synthesis	NVIDIA GeForce RTX 2080 [Vulkan DiscreteGpu; NVIDIA 580.178.04]	Sop	1536	1536	4	120	24.36	16.30	2.55	27.00	42.96	133.04	103.0	8.0	
+synthesis	NVIDIA GeForce RTX 2080 [Vulkan DiscreteGpu; NVIDIA 580.178.04]	Sop	2048	2048	9	270	43.99	32.18	4.61	66.57	82.61	269.86	152.0	10.0	
+synthesis	NVIDIA GeForce RTX 2080 [Vulkan DiscreteGpu; NVIDIA 580.178.04]	Sop	3072	3072	16	480	143.85	58.04	18.95	260.97	713.69	1177.56	292.0	22.5	
+synthesis	NVIDIA GeForce RTX 2080 [Vulkan DiscreteGpu; NVIDIA 580.178.04]	Sop	4096	4096	25	750	396.95	303.93	36.05	605.74	613.16	1427.42	488.0	40.0	
+synthesis	NVIDIA GeForce RTX 2080 [Vulkan DiscreteGpu; NVIDIA 580.178.04]	Sop	560	888	1	30	18.97	13.02	2.40	39.31	51.48	53.60	115.4	3.8	
+cold	NVIDIA GeForce RTX 2080 [Vulkan DiscreteGpu; NVIDIA 580.178.04]	Bop	560	888	1	27	301.52			49.23					context 243.5 ms + checkpoint parse/upload 8.8 ms + first picture 49.2 ms, of which plan build (pipeline compilation + bind groups) 13.6 ms (17 pipelines)
+synthesis	NVIDIA GeForce RTX 2080 [Vulkan DiscreteGpu; NVIDIA 580.178.04]	Bop	64	64	1	25	2.58	1.48	0.43	6.86	13.94	1.76	47.4	0.1	
+synthesis	NVIDIA GeForce RTX 2080 [Vulkan DiscreteGpu; NVIDIA 580.178.04]	Bop	128	128	1	25	2.24	1.59	0.50	2.27	9.22	4.76	47.4	0.4	
+synthesis	NVIDIA GeForce RTX 2080 [Vulkan DiscreteGpu; NVIDIA 580.178.04]	Bop	256	256	1	25	2.64	1.96	0.43	2.81	12.92	16.91	47.4	1.5	
+synthesis	NVIDIA GeForce RTX 2080 [Vulkan DiscreteGpu; NVIDIA 580.178.04]	Bop	384	384	1	25	3.79	2.95	0.47	4.71	9.47	24.48	47.4	3.4	
+synthesis	NVIDIA GeForce RTX 2080 [Vulkan DiscreteGpu; NVIDIA 580.178.04]	Bop	512	512	1	25	6.71	4.55	0.52	5.45	21.43	84.98	47.4	6.0	
+synthesis	NVIDIA GeForce RTX 2080 [Vulkan DiscreteGpu; NVIDIA 580.178.04]	Bop	768	768	1	25	15.11	9.79	1.85	15.96	88.67	187.84	56.2	13.5	
+synthesis	NVIDIA GeForce RTX 2080 [Vulkan DiscreteGpu; NVIDIA 580.178.04]	Bop	1024	1024	1	25	87.07	70.41	3.94	45.13	140.81	363.31	100.0	24.0	
+synthesis	NVIDIA GeForce RTX 2080 [Vulkan DiscreteGpu; NVIDIA 580.178.04]	Bop	1536	1536	4	108	148.27	131.03	6.12	171.77	342.80	718.40	183.0	24.0	
+synthesis	NVIDIA GeForce RTX 2080 [Vulkan DiscreteGpu; NVIDIA 580.178.04]	Bop	2048	2048	9	243	102.81	69.18	8.35	144.36	468.47	1150.20	232.0	24.0	
+synthesis	NVIDIA GeForce RTX 2080 [Vulkan DiscreteGpu; NVIDIA 580.178.04]	Bop	3072	3072	16	432	481.03	403.60	17.69	437.16	849.52	2473.74	372.0	24.0	
+synthesis	NVIDIA GeForce RTX 2080 [Vulkan DiscreteGpu; NVIDIA 580.178.04]	Bop	4096	4096	25	675	659.09	490.94	63.75	711.85	1221.45	3870.04	568.0	40.0	
+synthesis	NVIDIA GeForce RTX 2080 [Vulkan DiscreteGpu; NVIDIA 580.178.04]	Bop	560	888	1	27	39.98	36.79	0.90	77.59	19.29	66.10	195.4	11.4	
+cold	NVIDIA GeForce RTX 2080 [Vulkan DiscreteGpu; NVIDIA 580.178.04]	Hop	560	888	1	158	358.69			159.11					context 191.4 ms + checkpoint parse/upload 8.1 ms + first picture 159.1 ms, of which plan build (pipeline compilation + bind groups) 28.1 ms (46 pipelines)
+synthesis	NVIDIA GeForce RTX 2080 [Vulkan DiscreteGpu; NVIDIA 580.178.04]	Hop	64	64	1	156	6.04	5.60	0.35	150.66	8.60	12.81	15.2	0.5	
+synthesis	NVIDIA GeForce RTX 2080 [Vulkan DiscreteGpu; NVIDIA 580.178.04]	Hop	128	128	1	156	7.02	6.44	0.40	7.33	21.21	43.74	20.8	2.0	
+synthesis	NVIDIA GeForce RTX 2080 [Vulkan DiscreteGpu; NVIDIA 580.178.04]	Hop	256	256	1	156	14.67	13.93	0.49	15.77	52.02	165.41	43.3	8.0	
+synthesis	NVIDIA GeForce RTX 2080 [Vulkan DiscreteGpu; NVIDIA 580.178.04]	Hop	384	384	1	156	98.63	96.74	0.94	37.53	98.95	472.67	80.8	18.0	
+synthesis	NVIDIA GeForce RTX 2080 [Vulkan DiscreteGpu; NVIDIA 580.178.04]	Hop	512	512	1	156	70.98	69.83	0.65	72.11	182.50	603.44	133.3	32.0	
+synthesis	NVIDIA GeForce RTX 2080 [Vulkan DiscreteGpu; NVIDIA 580.178.04]	Hop	768	768	1	156	307.71	305.50	1.28	138.72	409.08	1604.44	285.8	72.0	
+synthesis	NVIDIA GeForce RTX 2080 [Vulkan DiscreteGpu; NVIDIA 580.178.04]	Hop	1024	1024	1	156	444.18	436.75	1.92	504.59	901.96	3073.65	508.0	128.0	
+synthesis	NVIDIA GeForce RTX 2080 [Vulkan DiscreteGpu; NVIDIA 580.178.04]	Hop	1536	1536	4	632	848.39	836.99	5.69	743.95	1938.07	6833.12	799.0	128.0	
+synthesis	NVIDIA GeForce RTX 2080 [Vulkan DiscreteGpu; NVIDIA 580.178.04]	Hop	2048	2048	9	1422	1191.65	1170.99	10.88	1309.10	3343.67	12262.86	848.0	128.0	
+synthesis	NVIDIA GeForce RTX 2080 [Vulkan DiscreteGpu; NVIDIA 580.178.04]	Hop	3072	3072	16	2528	2503.00	2438.27	23.44	2433.13	8338.14	30084.26	988.0	128.0	
+synthesis	NVIDIA GeForce RTX 2080 [Vulkan DiscreteGpu; NVIDIA 580.178.04]	Hop	4096	4096	25	3950	4163.98	4044.79	41.75	4133.10	13722.62	49090.38	1184.0	128.0	
+synthesis	NVIDIA GeForce RTX 2080 [Vulkan DiscreteGpu; NVIDIA 580.178.04]	Hop	560	888	1	158	101.75	100.02	0.91	396.56	339.78	1232.46	840.1	60.7	
+decode	NVIDIA GeForce RTX 2080 [Vulkan DiscreteGpu; NVIDIA 580.178.04]	Sop	560	888	1	30	12.45	3.30	0.63	43.95	19.19	50.71			img30_simple_off_bpp050; first = model load + first decode
+decode	NVIDIA GeForce RTX 2080 [Vulkan DiscreteGpu; NVIDIA 580.178.04]	Bop	560	888	1	27	17.40	8.35	0.62	28.18	28.69	83.07			img30_base_off_bpp050; first = model load + first decode
+decode	NVIDIA GeForce RTX 2080 [Vulkan DiscreteGpu; NVIDIA 580.178.04]	Hop	560	888	1	158	108.92	99.98	0.84	161.29	350.21	1316.15			img30_high_off_bpp050; first = model load + first decode
+decode	NVIDIA GeForce RTX 2080 [Vulkan DiscreteGpu; NVIDIA 580.178.04]	Bop	2096	1400	6	168	93.24	54.37	3.37	243.87	156.18	516.56			img01_base_off_bpp050; first = model load + first decode

@@ -1257,6 +1257,13 @@ impl GpuSynthesis {
         if changed {
             ws.generation += 1;
         }
+        // The first plan built this run may shrink the activation pool; plans built after
+        // it only grow, so a run of heterogenous tiles cannot ping-pong the pool (which
+        // would invalidate the plan cache on every tile).
+        ws.pool
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .begin_pass();
         if ctx.timestamps && ws.queries.is_none() {
             let bytes = MAX_TIMED_TILES as u64 * 16;
             ws.queries = Some(Queries {

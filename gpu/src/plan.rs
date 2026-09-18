@@ -41,17 +41,27 @@ pub(crate) const RETAIN_SLACK: u64 = 64 << 20;
 
 /// Pooled activation buffers shared by all plans of one context user.
 ///
-/// Bounded like the CPU pool (`zenjpegai::nn::fast::release_buffers`): a plan whose needs
+/// Bounded like the CPU pool (`zenjpegai::nn::fast::release_buffers`): a run whose needs
 /// are far below what the pool retains shrinks the slots it uses to their required size and
 /// drops the rest, so a small decode after a large picture does not keep the large
 /// picture's buffers alive (on an RTX 2080 one 4096 x 4096 picture parks ~0.5 GiB). The
-/// retained pool stays under `RETAIN_FACTOR * need + RETAIN_SLACK` of the most recent plan.
+/// retained pool stays under `RETAIN_FACTOR * need + RETAIN_SLACK` of the run's first plan.
 #[derive(Default)]
 pub struct Pool {
     slots: Vec<wgpu::Buffer>,
-    /// Bumped whenever a slot had to be replaced (cached plans then hold stale, still valid,
-    /// buffers and should be dropped to release them).
+    /// Bumped only when the pool actually drops buffers (`release`, or a `fit` that
+    /// shrinks): cached plans then pin buffers the pool no longer owns and are evicted so
+    /// the memory is really freed. Growth must NOT bump: a plan's slot binds are
+    /// self-contained scratch (cross-plan data flows only through external tensors, whose
+    /// identity is covered by `Workspace::generation`), so binding a replaced-but-valid
+    /// buffer stays correct — and bumping on grow would evict same-run plans whenever one
+    /// tile needs a bigger slot than the tiles built before it.
     pub generation: u64,
+    /// Whether the next `fit` may shrink. Set by [`Pool::begin_pass`] at the start of each
+    /// run and consumed by the first `fit` that actually needs slots: shrinking mid-run is
+    /// what turns heterogenous tile sizes (tiny edge tiles vs large interior tiles) into a
+    /// shrink/grow ping-pong that evicts every plan built so far.
+    allow_shrink: bool,
 }
 
 impl Pool {
@@ -67,18 +77,28 @@ impl Pool {
         }
     }
 
+    /// Mark the start of a run (one picture's worth of tile plans): the first [`Pool::fit`]
+    /// afterwards is allowed to shrink the retained slots to that plan's needs.
+    pub fn begin_pass(&mut self) {
+        self.allow_shrink = true;
+    }
+
     /// One buffer per `slot_bytes` entry, taken from the pool where a slot already fits and
     /// allocated where it does not. See the struct docs for the eviction rule.
     fn fit(&mut self, dev: &wgpu::Device, slot_bytes: &[u64]) -> Vec<wgpu::Buffer> {
         let need: u64 = slot_bytes.iter().sum();
         // `need == 0` marks a graph that uses no activation tensors at all (the RGBA
-        // presentation tail): it must not flush the pool.
-        let shrink = need > 0
+        // presentation tail): it must not flush the pool or consume the shrink ticket.
+        let shrink = self.allow_shrink
+            && need > 0
             && self.bytes()
                 > need
                     .saturating_mul(RETAIN_FACTOR)
                     .saturating_add(RETAIN_SLACK);
-        let mut grew = false;
+        if need > 0 {
+            self.allow_shrink = false;
+        }
+        let mut dropped = false;
         for (s, &bytes) in slot_bytes.iter().enumerate() {
             let replace = match self.slots.get(s) {
                 None => true,
@@ -97,16 +117,16 @@ impl Pool {
             });
             if s < self.slots.len() {
                 self.slots[s] = b;
-                grew = true;
+                dropped |= shrink;
             } else {
                 self.slots.push(b);
             }
         }
         if shrink && self.slots.len() > slot_bytes.len() {
             self.slots.truncate(slot_bytes.len());
-            grew = true;
+            dropped = true;
         }
-        if grew {
+        if dropped {
             self.generation += 1;
         }
         self.slots[..slot_bytes.len()].to_vec()
@@ -123,6 +143,7 @@ struct Step {
     label: String,
     pipeline: wgpu::ComputePipeline,
     params: [u32; 16],
+    n_params: usize,
     binds: Vec<Bind>,
     dispatch: [u32; 3],
 }
@@ -230,6 +251,7 @@ impl<'a> Graph<'a> {
             label: key.to_string(),
             pipeline: self.ctx.pipeline(key, src),
             params: p,
+            n_params: params.len(),
             binds,
             dispatch,
         });
@@ -293,22 +315,49 @@ impl<'a> Graph<'a> {
         // input blocks (HOP's 1 x 1 convolutions 147.5 -> 117.3 ms, its 3 x 3 family -13%) and
         // loses on the layers with few (SOP 560x888 goes 3.7 -> 5.1 ms if applied to all of
         // them), so it is chosen per layer.
-        let wg = if l.icg4 >= 16 && ow >= 128 && oh >= 128 {
+        let mut wg = if l.icg4 >= 16 && ow >= 128 && oh >= 128 {
             2 * WG
         } else {
             WG
         };
+        // Two output pixels per invocation share each weight-matrix load — measured on the
+        // RTX 2080 it loses everywhere (ob4 x px2 = 8 accumulators spill), so one pixel per
+        // invocation stays.
+        let px = 1;
+        // Stage the workgroup's input halo in workgroup memory when the chunk fits the
+        // default 16 KiB storage limit (input vec4s + weight mat4s for k>1). Prefer the
+        // layer's own workgroup size, then 8 — stride > 1 only fits at 8.
+        let mut tile_ich = 0u32;
+        if l.k.0 == l.k.1 && l.icg4 >= 8 {
+            let k2 = (l.k.0 * l.k.1) as u32;
+            'sel: for w_try in [wg, WG] {
+                let tw = (w_try - 1) * l.stride as u32 + l.k.0 as u32;
+                for ich in [4u32, 2, 1] {
+                    let wm = if k2 > 1 { k2 * l.ob as u32 * 64 } else { 0 };
+                    if tw * tw * ich * 16 + wm * ich <= 16384 && l.icg4.is_multiple_of(ich as usize)
+                    {
+                        tile_ich = ich;
+                        wg = w_try;
+                        break 'sel;
+                    }
+                }
+            }
+        }
         let v = ConvVariant {
             kh: l.k.0 as u32,
             kw: l.k.1 as u32,
             stride: l.stride as u32,
             ob: l.ob as u32,
             wg,
+            px,
             act,
             pre_relu6,
             res: res.map(|(op, _)| op),
+            icg4: l.icg4 as u32,
+            ocg4: l.ocg4 as u32,
+            tile_ich,
         };
-        let (gx, gy) = ((ow as u32).div_ceil(wg), (oh as u32).div_ceil(wg));
+        let (gx, gy) = ((ow as u32).div_ceil(wg * px), (oh as u32).div_ceil(wg));
         let mut binds = vec![
             Bind::Tensor(x.id),
             Bind::Tensor(y.id),
@@ -320,7 +369,13 @@ impl<'a> Graph<'a> {
         }
         self.push(
             &v.key(),
-            || kernels::conv(&v),
+            || {
+                if v.tile_ich > 0 {
+                    kernels::conv_tiled(&v, v.tile_ich)
+                } else {
+                    kernels::conv(&v)
+                }
+            },
             &[
                 x.h as u32,
                 x.w as u32,
@@ -351,10 +406,11 @@ impl<'a> Graph<'a> {
         let (oh, ow) = (f(x.h), f(x.w));
         let y = self.tensor(l.out_ch, oh, ow)?;
         let (k, s, ob) = (l.k as u32, l.stride as u32, l.ob as u32);
+        let ic4 = x.c4() as u32;
         let (gx, gy) = grid2(ow, oh);
         self.push(
-            &format!("convt_k{k}_s{s}_ob{ob}"),
-            || kernels::conv_transpose(k, s, ob),
+            &format!("convt_k{k}_s{s}_ob{ob}_ic{ic4}"),
+            || kernels::conv_transpose(k, s, ob, ic4),
             &[
                 x.h as u32,
                 x.w as u32,
@@ -380,17 +436,28 @@ impl<'a> Graph<'a> {
             return Err(GpuError::Shape("depthwise conv: channel mismatch".into()));
         }
         let y = self.tensor(x.c, x.h, x.w)?;
+        // ZC channel blocks per workgroup, channel the fastest lane coordinate: global IO
+        // runs ZC*16B contiguous instead of striding c4*16B per lane (sector efficiency).
+        // wg16 measured flat against wg8 on the RTX 2080 — the kernel is not halo bound.
+        let c4 = x.c4() as u32;
+        let zc = if c4.is_multiple_of(4) {
+            4
+        } else if c4.is_multiple_of(2) {
+            2
+        } else {
+            1
+        };
         let (gx, gy) = grid2(x.w, x.h);
         self.push(
-            "depthwise3x3",
-            kernels::depthwise3x3,
-            &[x.h as u32, x.w as u32, x.c4() as u32],
+            &format!("depthwise3x3_z{zc}"),
+            || kernels::depthwise3x3(zc),
+            &[x.h as u32, x.w as u32, c4],
             vec![
                 Bind::Tensor(x.id),
                 Bind::Tensor(y.id),
                 Bind::Buffer(l.weight.clone()),
             ],
-            [gx, gy, x.c4() as u32],
+            [gx, gy, c4 / zc],
         );
         Ok(y)
     }
@@ -513,7 +580,8 @@ impl<'a> Graph<'a> {
         off: usize,
     ) {
         let n = a.h * a.w;
-        let (row, dispatch) = grid1(n, 1);
+        // Lanes are (pixel, channel block) pairs — the kernel indexes `t / n4`, `t % n4`.
+        let (row, dispatch) = grid1(n * n4, 1);
         self.push(
             "elu_gate",
             kernels::elu_gate,
@@ -896,8 +964,14 @@ impl<'a> Graph<'a> {
             .steps
             .iter()
             .map(|s| {
+                // `key [grid] params` — the params (tensor sizes, channel blocks) let a
+                // profile run compute each dispatch's FLOPs and bytes for a roofline.
                 let [x, y, z] = s.dispatch;
-                format!("{} [{x}x{y}x{z}]", s.label)
+                let mut l = format!("{} [{x}x{y}x{z}]", s.label);
+                for p in &s.params[..s.n_params] {
+                    l.push_str(&format!(" {p}"));
+                }
+                l
             })
             .collect();
         let tensor_buffers = (0..self.tensors.len())

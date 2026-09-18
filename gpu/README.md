@@ -66,7 +66,7 @@ Notes for the wasm build:
 - The first picture of each size compiles pipelines and builds bind groups (`Timing::plans_built`);
   later pictures of the same size replay cached plans.
 
-## Status (2026-09-17, first hardware run and first tuning pass)
+## Status (2026-09-18, second tuning pass)
 
 Done and gated (`just gpu-test` on an RTX 2080, numbers in `PORTING.md`): kernel set,
 SOP / BOP / HOP synthesis with tiling and regions, `GpuDecoder`, presentation path, wasm32
@@ -143,60 +143,94 @@ agreed, so this only appeared on hardware.
 (1024 x 1024: 8.48 -> 7.23 ms) and loses where it matters — BOP 22.4 -> 26.3 ms, HOP 555 -> 711
 ms — and a rule that only tiles convolutions with few input blocks is worse than not tiling at
 all. The cost tracks `ob * px * py` accumulators, i.e. register pressure, so the next thing to
-try is a *smaller* `ob` together with a pixel tile, not a bigger tile.
+try is a *smaller* `ob` together with a pixel tile, not a bigger tile. (2026-09-18: retested
+one dimension, px=2 on top of the channel-group unrolls — still slower, 293 vs 226 ms on HOP
+560x888.)
+
+### Second pass (2026-09-18, `benchmarks/gpu_decode_2026-09-18_rtx2080_kernels.tsv` +
+`gpu_profile_2026-09-18_rtx2080.tsv`)
+
+The profile TSV now carries each dispatch's uniform parameters, so
+`scripts/bench/gpu_roofline.py` can classify every kernel by achieved TFLOP/s or GB/s against
+the card's ~10 TFLOP/s f32 / ~448 GB/s. What it said, and what was done about it:
+
+| change | mechanism | effect (HOP 560x888) |
+| --- | --- | --- |
+| `conv_tiled`: workgroup-staged input halo + weight chunk | the 3x3/stride-2 convolutions re-read each input texel 9 times through global memory; staging the `(WG+KH-1)^2` input tile and the `(ICH,OCB)` weight chunk in workgroup memory makes each lane's tap reads cheap. Selected per layer only when the tile fits 16 KiB of workgroup storage (`plan.rs::conv_full`), input-channel blocking `ICH` keeps the accumulation order identical so parity counts do not move | k3x3 s1 ic32 kernels 19.4 -> 8.5 ms, s2 ic32 21.8 -> 6.9 ms, k1x1 ic32 36.3 -> 19.1 ms; ~8% -> 25-37% of f32 peak |
+| `depthwise3x3_z{2,4}` | channel block is now the fastest lane dimension: a warp loads/stores contiguous `vec4` runs instead of striding `c4*16B` per pixel | 27.0 -> 7.8 ms, 135 GB/s (30% of peak) |
+| `elu_gate` flattened over `(pixel, channel-block)` | same strided-access fix | 11.4 -> 1.4 ms, ~395 GB/s (88% of peak) |
+| channel-group dims baked into the conv key (`icg4`, `ocg4`; `ic4` for `convt`) | lets the compiler fully unroll the inner channel loops; required adding `ocg4` to the pipeline key — two layers that shared a key but differed in `ocg4` produced wrong chroma (caught by `decode_ref`, regression test in `tests/kernels.rs`) | flat on its own; enables the staging above |
+
+Whole-picture device time — per-dispatch profile totals, one compute pass per dispatch run
+back-to-back so clocks stay boosted (HOP 4096² is from the sweep; the profile only runs
+560x888 and 1024²):
+
+| | HOP 560x888 | HOP 1024² | HOP 4096² | BOP 560x888 | BOP 1024² | SOP 560x888 | SOP 1024² |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| after pass 1 | 224.1 ms | 498.1 ms | 8919 ms | 9.70 ms | 21.4 ms | 3.82 ms | 7.47 ms |
+| after pass 2 | 103.4 ms | 208.5 ms | 4045 ms | 7.32 ms | 14.5 ms | 3.37 ms | 6.41 ms |
+| | **-54%** | **-58%** | **-55%** | **-25%** | **-32%** | **-12%** | **-14%** |
+
+SOP moved least: its convolutions are small-channel single-tile work where staging overhead
+roughly cancels reuse. The full sweep's synthesis rows at >=1024² carry the downclock artifact
+(the GPU idles at ~435 MHz during each interleaved CPU round; NVIDIA 580.178.04, no permission
+to lock clocks), so e.g. BOP 1024² reads 70 ms there against 14.5 ms in the profile — the
+profile totals are the trustworthy comparison.
+
+Whole-stream decode (codestream to 8-bit, CPU entropy stage included): BOP 560x888 22.8 -> 17.4 ms
+wall, HOP 560x888 326 -> 109 ms, img01 2096x1400 164 -> 93 ms.
+
+Parity is unchanged: every optimisation above keeps each output's summation order (the staged
+tiles only reorder *which lane* computes a tap, never the multiply-add sequence per output), and
+`just gpu-test` reports the same counts `PORTING.md` records.
+
+Also fixed in this pass:
+
+- **Pool / plan-cache ping-pong.** `Pool::fit` used to bump `generation` on every slot
+  replacement, and the plan cache drops everything when the stamp moves — so a run of
+  heterogenous tiles (2048x2048 = 9 tiles of very different sizes) shrank the pool on each
+  small tile and regrew it on each large one, evicting every plan built so far and rebuilding
+  all 9 on the next warm run (`gpu_bench` asserts `plans_built == 0`; it caught this).
+  Growth no longer bumps the generation — a plan's slot binds are self-contained scratch, so a
+  stale-but-valid buffer is still correct — and shrink is allowed only at the first `fit` of a
+  run (`Pool::begin_pass`, called by `run_tailed`). Small-after-large still releases memory:
+  568 -> ~195 MiB for 4096² then 560x888.
+- **Readback** (item 2 of the 2026-09-18 work): `emit_output` converts to the output format on
+  the GPU (8/10-bit RGB and YUV at the coded subsampling, half-to-even like the CPU output
+  stage) and reads back packed u16 pairs — 201 MB of f32 planes at 4096x4096 become ~100 MB,
+  decode wall −20 to −29%.
+- **Cancellation / `max_channels`** (item 3): `decode_picture_async_with`,
+  `decode_to_gpu_with`, `decode_with` take the same `enough::Stop` token the CPU path uses,
+  checked between submits, and a channel limit for progressive decode; tests in
+  `tests/decode_ref.rs`.
 
 **Open, in order:**
 
-1. **The convolutions run at a few per cent of the card's f32 peak, and the tuning did not
-   change that** — HOP's biggest single dispatch, the 3x3 stride-2 of the CAB, is 9.66 G
-   multiply-adds in 49.1 ms before and 44.6 ms after, i.e. 0.39 then 0.43 TFLOP/s against about
-   10. After the tuning the profile says HOP 1024x1024 is 24% 1x1 convolution, 13% depthwise and
-   34% the rest of the 3x3 family. Neither weight bandwidth nor arithmetic explains the gap, so
-   the next step is to find what does — occupancy, warp stall reasons — before writing another
-   kernel. The CUDA profilers cannot: these are Vulkan compute shaders, `ncu` prints "No kernels
-   were profiled" on this binary and the `nsys` installed here cannot load its Vulkan importer.
-   Nsight Graphics (GPU Trace) is the tool and is not installed on this box; until it is, the
-   measurements available are `gpu_bench --profile` and A/B runs of kernel variants.
-   Candidates named but not measured: workgroup-memory tiling for the 3x3 (it needs
-   input-channel chunking, which changes the summation order — the parity gate would have to be
-   re-measured), a GEMM-shaped 1x1 with workgroup-staged weights, `OB` other than
-   `layers.rs::pick_ob`'s at-most-4, `shader-f16` (not implemented; parity would have to be
-   re-measured).
-2. **Readback dominates large pictures**: 4096 x 4096 SOP is 139 ms of device time and 227 ms of
-   wall, the difference being 201 MB of `f32` planes over PCIe. The texture path
-   (`decode_to_gpu` + `to_rgba_texture`) avoids it; the plane path could read back 8-bit instead.
-3. **Browser**: wired into `wasm/` + `web/` (2026-09-18, `pkg-webgpu`) and verified on real
-   hardware: `initGpu`/`decode`/`present` run end to end under Chromium's WebGPU on this box's
-   RTX 2080 through Dawn/Vulkan (`navigator.gpu` reports `nvidia/turing`, non-fallback), all
-   16 demo streams on the GPU path with zero errors (`benchmarks/wasm_decode_2026-09-18_gpu`).
-   The `create_buffer_init` trap is fixed at the root: every upload now goes through
-   `create_buffer` (`mapped_at_creation: false`) + `GpuContext::write_buffer`, which chunks
-   `queue.write_buffer` at 16 MiB — no `mappedAtCreation` call exists anywhere in the crate, so
-   Dawn's staging-window `RangeError` -> wgpu `unwrap()` -> wasm trap path cannot occur (the
-   worker-side `disableGpu` + retry in `web/` remains as defence in depth, and still guards any
-   future `unwrap` in wgpu's web backend). Native parity is unchanged byte-for-byte: the
-   `gpu-tests` suite re-run after the change reports the same counts `PORTING.md` records.
-   **Remaining software-adapter caveat**: under `WEBGPU_ADAPTER=swiftshader` Dawn loses the
-   device at model-2 (bpp75) load — the first `mapAsync` after it fails with "Error occurred
-   when trying to async map a buffer" and every later GPU call fails the same way, so decodes
-   fall back per call to the CPU engine (correct, just slower). Limits are already clamped to
-   what the adapter reports (`context.rs`), so this looks like a Dawn/SwiftShader-internal
-   ceiling rather than a requestable-limit miss. It never reaches a wasm trap.
+1. **`shader-f16`** (opt-in, default off — not implemented). The RTX 2080 exposes
+   `shaderFloat16` + `storageBuffer16BitAccess`, so `wgpu::Features::SHADER_F16` is
+   requestable. What it needs: an f16 weight copy (or a second buffer) per layer, f16 kernel
+   variants generated beside the f32 ones, feature detection with an f32 fallback, and a
+   separately measured parity bound — f16 accumulation will move the 8-bit quantisation counts,
+   so the feature must record its own numbers rather than inherit the f32 bound. Expected win
+   on Turing is the ~2x fp16 FMA rate on the compute-bound convs (the bandwidth-bound kernels
+   would need f16 *storage* to benefit, a bigger change).
+2. `convt` (transposed conv) is now the top kernel on HOP (12.3 ms of 103). Its reduction is
+   over *input* bandwidth — the weight tile needed is `(ic4 * oc4 * k * k)` which does not fit
+   16 KiB of workgroup memory at the useful channel counts, so it still gathers. Options:
+   split the workgroup-memory budget between input and weights, or restructure as small GEMM.
+3. `attention_apply` / `gram_chunks` / `pixel_shuffle_2` each run at ~10-45% of bandwidth peak
+   on scalar or strided access patterns; together ~10 ms of HOP 560x888.
 4. Latent upload converts planar to HWC4 on the CPU per picture (0.4 ms for 560 x 888).
-
-5. No cancellation (`enough::Stop`) on the GPU path; `GpuDecoder` has no `max_channels`
-   (progressive decode) option.
-6. **A workspace that has synthesised a very large picture stays slow for small ones.** In the
-   size sweep the 560 x 888 BOP row, which runs last, measures 32.3 ms of device time against
-   9.7 ms for the same picture in a fresh context, reproducibly across runs; capping the sweep
-   at 2048 instead of 4096 makes it 9.4 ms. The pooled activation buffers only ever grow
-   (`plan.rs::Pool`), so after a 4096 x 4096 BOP picture every later plan binds slots sized for
-   that one. Shrinking or bucketing the pool would fix it; nothing else in the file is affected
-   (SOP and HOP show the same row unchanged).
-7. The integrated Radeon (RADV) loses the device during a BOP size sweep; see
+5. The integrated Radeon (RADV) loses the device during a BOP size sweep; see
    `benchmarks/gpu_decode_2026-09-17_radv_igpu.meta`. It is 8x slower than the crate's own CPU
    engine anyway, so the useful fix is probably to decline integrated adapters by default rather
    than to chase the hang.
+6. **Browser**: shipped and re-verified on hardware after this pass (2026-09-18): the
+   `benchmark-gpu` Playwright spec ran the new kernels under Chromium WebGPU on the RTX 2080
+   (`WEBGPU_ADAPTER=hardware`, adapter `nvidia/turing`, non-fallback, `path=gpu` rows in
+   `benchmarks/wasm_decode_2026-09-18_gpu.tsv`). **Software-adapter caveat unchanged**: under
+   `WEBGPU_ADAPTER=swiftshader` Dawn loses the device at model-2 load; decodes fall back per
+   call to the CPU engine (correct, slower).
 
 ## Tests and benchmarks
 
