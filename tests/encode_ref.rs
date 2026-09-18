@@ -789,8 +789,10 @@ fn lef_channel_matches_reference() {
 }
 
 /// Rate matching: the model and displacement `--bpp` settles on, against the reference
-/// encoder's own choice at the same target. Ours is measured on the real codestream, the
-/// reference's on a likelihood estimate (`src/encoder/rate.rs`), so the achieved rates differ.
+/// encoder's own choice at the same target. The default `RateEstimate::Coded` measures the
+/// real codestream, the reference's a likelihood estimate (`src/encoder/rate.rs`), so the
+/// achieved rates differ; `likelihood_estimate_picks_the_references_displacements` covers the
+/// reference's own measurement (`RateEstimate::Likelihood` picks its displacements exactly).
 #[test]
 fn rate_matching_hits_the_target() {
     let image = "00030_TE_560x888_8bit_sRGB.png";
@@ -852,6 +854,113 @@ fn rate_matching_hits_the_target() {
         // The stream must still be a stream.
         let ours = dec.decode(&stream).unwrap();
         assert_eq!((ours.width, ours.height), (picture.width, picture.height));
+        ran += 1;
+    }
+    assert!(ran > 0, "no reference streams on disk");
+}
+
+/// E7: `RateEstimate::Likelihood` — the `ECLibLH` estimator the reference's bitrate matcher
+/// searches with (`-sum(log2 p)` over `z_hat` and the residual, container excluded) — must
+/// pick the reference's own `(model, beta)` at the five CTC rates on both test pictures, and
+/// the estimate itself is checked against both the coded size and the reference encoder's own
+/// logged per-trial estimates (`encoder.log`'s `bits = tensor([..])` lines).
+///
+/// The estimate-vs-coded bound is not the 0.5 % of the work-queue brief: the reference's own
+/// estimator misses its coded stream by up to ~1.0 % at these rates (it prices the ideal
+/// likelihood, not the quantised ANS tables, exp-Golomb tails, flush and container — ours
+/// reproduces the reference's logged estimates to four decimals, so the gap is inherent).
+/// The bound below is the measured worst case plus margin.
+#[test]
+fn likelihood_estimate_picks_the_references_displacements() {
+    let enc = Encoder::new(ref_root().join("models"));
+    let dec = zenjpegai::Decoder::new(ref_root().join("models"));
+    // (source image, target bpp, reference stream vector)
+    let img30 = "00030_TE_560x888_8bit_sRGB.png";
+    let img01 = "00001_TE_2096x1400_8bit_sRGB.png";
+    let cases = [
+        (img30, 0.12, "img30_base_off_bpp012"),
+        (img30, 0.25, "img30_base_off_bpp025"),
+        (img30, 0.50, "img30_base_off_bpp050"),
+        (img30, 0.75, "img30_base_off_bpp075"),
+        (img30, 1.00, "img30_base_off_bpp100"),
+        (img01, 0.12, "img01_base_off_bpp012"),
+        (img01, 0.25, "img01_base_off_bpp025"),
+        (img01, 0.50, "img01_base_off_bpp050"),
+        (img01, 0.75, "img01_base_off_bpp075"),
+        (img01, 1.00, "img01_base_off_bpp100"),
+    ];
+    let mut ran = 0;
+    for (image, target, vector) in cases {
+        if !common::vector_present(vector) {
+            continue;
+        }
+        let dir = vector_dir(vector);
+        let path = dir.join("stream.bits");
+        let picture = source(image);
+        let pixels = (picture.width * picture.height) as f64;
+        let (stream, m) = enc
+            .encode_to_bpp(
+                &picture,
+                target,
+                EncodeParams {
+                    op: OperatingPoint::Bop,
+                    rate_estimate: zenjpegai::encoder::RateEstimate::Likelihood,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let theirs = std::fs::read(&path).unwrap();
+        let their_hdr = dec.read_headers(&theirs).unwrap().picture;
+        let estimate = m.estimated_bpp.expect("likelihood mode must report it");
+        // The stream the search returns is still a real codestream at the chosen displacement.
+        assert_eq!(
+            stream.len() as f64 * 8.0 / pixels,
+            m.bpp,
+            "{vector}: RateMatch::bpp must be the returned stream's rate"
+        );
+        println!(
+            "{vector}: ours model {} beta {} -> {:.4} bpp (est {estimate:.6}); \
+             reference model {} beta {} -> {:.4} bpp",
+            m.model_id,
+            m.beta_displacement_log,
+            m.bpp,
+            their_hdr.model_id,
+            their_hdr.beta_displacement_log[0],
+            theirs.len() as f64 * 8.0 / pixels,
+        );
+        assert_eq!(
+            (m.model_id, m.beta_displacement_log),
+            (their_hdr.model_id, their_hdr.beta_displacement_log[0]),
+            "{vector}: likelihood search picked a different (model, beta) than the reference"
+        );
+        // The estimator's bit count vs the coded size it stands in for (measured worst case:
+        // -1.0 % at img30 0.75 bpp — see the doc comment).
+        let rel = estimate / m.bpp - 1.0;
+        assert!(
+            rel.abs() < 0.015,
+            "{vector}: estimate {estimate:.6} vs coded {:.6} ({rel:+.3})",
+            m.bpp
+        );
+        // Stronger oracle: the reference logs `bits = tensor([<est>])` for every trial; its
+        // estimate at the winning beta must be ours (the log prints four decimals).
+        let log = std::fs::read_to_string(dir.join("encoder.log")).unwrap();
+        let marker = format!("beta = {},", m.beta_displacement_log);
+        if let Some(line) = log
+            .lines()
+            .rfind(|l| l.contains(&marker) && l.contains("bits = tensor"))
+        {
+            let ref_est: f64 = line
+                .split("bits = tensor([")
+                .nth(1)
+                .and_then(|s| s.split(']').next())
+                .and_then(|s| s.trim().parse().ok())
+                .expect("encoder.log: unparseable trial line");
+            assert!(
+                (estimate - ref_est).abs() < 2e-3,
+                "{vector}: estimate {estimate:.6} vs the reference's {ref_est} at beta {}",
+                m.beta_displacement_log
+            );
+        }
         ran += 1;
     }
     assert!(ran > 0, "no reference streams on disk");

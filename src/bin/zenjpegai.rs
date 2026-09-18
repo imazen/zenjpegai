@@ -40,6 +40,9 @@ OPTIONS:
     --beta-disp <n>    encode: quantiser displacement, -1069..702 (default 0; lower = lower rate)
     --bpp <r>          encode: target bits per pixel; searches the model and the displacement
                        (rate matching) instead of taking --model / --beta-disp
+    --rate-estimate <coded|likelihood>
+                       encode: what --bpp measures each trial with; `likelihood` is the
+                       reference's `ECLibLH` estimate and picks the same (model, beta)
     --c-ver <1|2>      encode: code the chroma at half vertical resolution
                        (-c_ver_value; default: the source's subsampling)
     --c-hor <1|2>      encode: the same, horizontally (-c_hor_value)
@@ -79,6 +82,7 @@ struct Args {
     only: Option<String>,
     beta_disp: i32,
     bpp: Option<f64>,
+    rate_estimate: zenjpegai::encoder::RateEstimate,
     c_ver: Option<u8>,
     c_hor: Option<u8>,
     diff_display: (u8, u8),
@@ -109,6 +113,7 @@ fn parse_args() -> Result<Args, String> {
         only: None,
         beta_disp: 0,
         bpp: None,
+        rate_estimate: zenjpegai::encoder::RateEstimate::Coded,
         c_ver: None,
         c_hor: None,
         diff_display: (0, 0),
@@ -177,6 +182,13 @@ fn parse_args() -> Result<Args, String> {
             }
             "--bpp" => {
                 a.bpp = Some(value("--bpp")?.parse().map_err(|e| format!("--bpp: {e}"))?);
+            }
+            "--rate-estimate" => {
+                a.rate_estimate = match value("--rate-estimate")?.as_str() {
+                    "coded" => zenjpegai::encoder::RateEstimate::Coded,
+                    "likelihood" => zenjpegai::encoder::RateEstimate::Likelihood,
+                    other => return Err(format!("--rate-estimate: unknown mode `{other}`")),
+                };
             }
             "--c-ver" | "--c-hor" => {
                 let v: u8 = value(&arg)?.parse().map_err(|e| format!("{arg}: {e}"))?;
@@ -364,6 +376,7 @@ fn run() -> Result<(), String> {
                 c_ver: args.c_ver,
                 c_hor: args.c_hor,
                 diff_display: args.diff_display,
+                rate_estimate: args.rate_estimate,
             };
             // `--quality-map`: an RGB mask at picture resolution, white = region of interest.
             let quality_map = match &args.quality_map {
@@ -409,9 +422,15 @@ fn run() -> Result<(), String> {
                             .map_err(|e| format!("{e:?}"))?;
                         if run == 0 {
                             eprintln!(
-                                "rate matching: model {} beta-disp {} -> {:.4} bpp \
+                                "rate matching: model {} beta-disp {} -> {:.4} bpp{} \
                                  (target {bpp}, {} trial encodes)",
-                                m.model_id, m.beta_displacement_log, m.bpp, m.trials
+                                m.model_id,
+                                m.beta_displacement_log,
+                                m.bpp,
+                                m.estimated_bpp
+                                    .map(|e| format!(", estimated {e:.4}"))
+                                    .unwrap_or_default(),
+                                m.trials
                             );
                         }
                         s

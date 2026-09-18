@@ -23,13 +23,14 @@ mod colour;
 pub mod filters;
 #[cfg(not(feature = "unstable-internals"))]
 pub(crate) mod filters;
+mod lh;
 pub mod limits;
 mod rate;
 mod tiles;
 
 pub use colour::{AnalysisInput, SourceImage, SourceMeta, preprocess, preprocess_rgb};
 pub use limits::{EncodeLimits, estimate_encode_memory};
-pub use rate::{BDL_SEARCH_RANGE, RateMatch, search_beta};
+pub use rate::{BDL_SEARCH_RANGE, RateEstimate, RateMatch, search_beta};
 pub use tiles::{AnalysisTile, analysis_tiles};
 
 use alloc::vec::Vec;
@@ -112,6 +113,10 @@ pub struct EncodeParams {
     /// decoder-side only (`crate::filters::lef`) — the reference applies it to the
     /// reconstruction once, after the rate loop (`coding_engine.py::compress`).
     pub lef: bool,
+    /// How `encode_to_bpp` measures a rate-matching trial: the real codestream
+    /// ([`RateEstimate::Coded`], default) or the reference's `ECLibLH` likelihood estimate
+    /// ([`RateEstimate::Likelihood`]), which picks the same `(model, beta)` the reference does.
+    pub rate_estimate: RateEstimate,
 }
 
 /// How a region's residual reaches the codestream
@@ -160,6 +165,7 @@ impl Default for EncodeParams {
             c_hor: None,
             diff_display: (0, 0),
             lef: false,
+            rate_estimate: RateEstimate::Coded,
         }
     }
 }
@@ -172,6 +178,8 @@ struct ModelSet {
     analysis_y: AnalysisPrimary,
     analysis_uv: AnalysisSecondary,
     hyper: [HyperEncoder; 2],
+    /// `ECLibLH` likelihood tables (the factorized `z` model), for [`RateEstimate::Likelihood`].
+    lh: [lh::Likelihood; 2],
 }
 
 /// A JPEG AI encoder bound to a directory of upstream checkpoints.
@@ -321,6 +329,14 @@ impl Encoder {
             hyper: [
                 model::load_hyper_encoder(&*self.models, id, 0, eng)?,
                 model::load_hyper_encoder(&*self.models, id, 1, eng)?,
+            ],
+            lh: [
+                model::with_checkpoint(&*self.models, &model::common_path(id, 0)?, |ck| {
+                    lh::Likelihood::load(ck)
+                })?,
+                model::with_checkpoint(&*self.models, &model::common_path(id, 1)?, |ck| {
+                    lh::Likelihood::load(ck)
+                })?,
             ],
         });
         if let Ok(mut c) = self.cache.lock() {
@@ -566,16 +582,18 @@ impl Encoder {
             .flatten()
             .map(|(v, h)| (v as usize, h as usize));
         let mut trials = 0usize;
-        // One analysis per model; every displacement re-codes from its latents.
+        // One analysis per model; every displacement re-codes from its latents. The second
+        // return is the rate the search compares against: the coded size, or the `ECLibLH`
+        // likelihood estimate when `params.rate_estimate` asks for it.
         let mut latents: Vec<Option<ModelLatents>> =
             (0..model::MODEL_BETAS.len()).map(|_| None).collect();
         let code = |ccs_model: usize,
                     beta: i32,
                     latents: &mut [Option<ModelLatents>],
                     trials: &mut usize|
-         -> Result<Vec<u8>> {
+         -> Result<(Vec<u8>, f64)> {
+            let set = self.model_set(ccs_model, op)?;
             if latents[ccs_model].is_none() {
-                let set = self.model_set(ccs_model, op)?;
                 let mut ys = Vec::with_capacity(2);
                 let mut zs = Vec::with_capacity(2);
                 for (ccs, plane) in [&input.luma, &input.chroma].into_iter().enumerate() {
@@ -601,7 +619,7 @@ impl Encoder {
                 beta_displacement_log: [beta; 2],
                 ..base_params
             };
-            let (stream, _) = self.encode_from_latents(
+            let (stream, components) = self.encode_from_latents(
                 [&y[0], &y[1]],
                 Some([z[0].clone(), z[1].clone()]),
                 src.width(),
@@ -610,9 +628,24 @@ impl Encoder {
                 params,
                 None,
                 stop,
-                false,
+                // The likelihood measure reads `scale_log`/`residual_q` off the trace;
+                // the coded measure sheds them for the early-drop memory win.
+                params.rate_estimate == RateEstimate::Likelihood,
             )?;
-            Ok(stream)
+            let bpp = match params.rate_estimate {
+                RateEstimate::Likelihood => {
+                    set.lh
+                        .iter()
+                        .zip(&components)
+                        .map(|(lh, c)| {
+                            lh.bits(&c.z_hat, &c.scales.scale_log, &c.residual_q, c.residual_q.c)
+                        })
+                        .sum::<f64>()
+                        / pixels
+                }
+                RateEstimate::Coded => stream.len() as f64 * 8.0 / pixels,
+            };
+            Ok((stream, bpp))
         };
 
         // `match_luma`: the model whose rate at displacement 0 is relatively closest. Latents
@@ -623,7 +656,7 @@ impl Encoder {
         let mut base: Vec<Option<f64>> = alloc::vec![None; model::MODEL_BETAS.len()];
         for id in 0..model::MODEL_BETAS.len() {
             stop.check()?;
-            let bpp = code(id, 0, &mut latents, &mut trials)?.len() as f64 * 8.0 / pixels;
+            let bpp = code(id, 0, &mut latents, &mut trials)?.1;
             base[id] = Some(bpp);
             let diff = (bpp - target_bpp).abs() / bpp;
             if diff < best_diff {
@@ -645,14 +678,26 @@ impl Encoder {
                     return Ok(v);
                 }
                 stop.check()?;
-                let bpp =
-                    code(best_model, b, &mut latents, &mut trials)?.len() as f64 * 8.0 / pixels;
+                let bpp = code(best_model, b, &mut latents, &mut trials)?.1;
                 cache.insert(b, bpp);
                 Ok(bpp)
             };
-            rate::search_beta(target_bpp, rate::BDL_SEARCH_RANGE[best_model], &mut cached)?
+            // The likelihood estimate searches with the reference's own tolerances and its
+            // unclamped +/-100 window so it picks the same displacements; the coded path keeps
+            // this port's tighter tolerance and range-clipped window.
+            let (tol, clamp_window) = match params.rate_estimate {
+                RateEstimate::Likelihood => (rate::TOLERANCE_LH, false),
+                RateEstimate::Coded => ((rate::TOLERANCE_MIN, rate::TOLERANCE_MAX), true),
+            };
+            rate::search_beta_with(
+                target_bpp,
+                rate::BDL_SEARCH_RANGE[best_model],
+                tol,
+                clamp_window,
+                &mut cached,
+            )?
         };
-        let stream = code(best_model, beta, &mut latents, &mut trials)?;
+        let (stream, estimate) = code(best_model, beta, &mut latents, &mut trials)?;
         let bpp = stream.len() as f64 * 8.0 / pixels;
         Ok((
             stream,
@@ -660,6 +705,8 @@ impl Encoder {
                 model_id: best_model as u8,
                 beta_displacement_log: beta.clamp(BDL_RANGE.0, BDL_RANGE.1),
                 bpp,
+                estimated_bpp: (params.rate_estimate == RateEstimate::Likelihood)
+                    .then_some(estimate),
                 trials,
             },
         ))

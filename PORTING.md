@@ -34,7 +34,7 @@ against reference-produced data passes. "stub" and "partial" mean what they say.
 | `tools::rvs` (encode) | `res_var_scale.py::{analyzeCWG, quantize_resi}` | ported: the forward scale table and `grfs_flags` (the `cnum_list[model]` channels with the highest mean sigma get the gain flag) | `tests/encode_ref.rs` on `enc_img30_bop_m1_b0_{rvs,rvsonly,grfsonly}`: byte-identical streams, so the derived flags are the reference's |
 | `encoder` (regions) | `ccs_sgmm_tool.py::calc_numHor_numVer_regions`, `common_modules.py::{compress, compress_ar_scale_tile, merge_psi_overlaps_of_tiles}`, `tiling.py::TileManagerHyper` | ported: the region grid from the picture size, per-region hyper-decoder and context model merged exactly as `decoder::reconstruct::reconstruct_latent_with` merges them, per-region residual substreams (dependent: sizes at the head of one substream; independent: one substream per region behind its index), and the region-aware analysis tiling independent regions force (`cfg_update_for_conformance`) | `tests/encode_ref.rs` on `enc_img01_bop_m1_b0_{depregions,indregions}`: the dependent stream is byte-identical to the reference's given its own latents; both are its length from the PNG, and the patched reference decoder reads both |
 | `tools::qualmap` (encode) | `quality_map.py::{encode, quantize_resi, generate_qp_map_index, generate_qp_map_byROI_map}` | ported: the ROI-mask map (`qp_map_type = 3`, the only generator that works on this code path), the entropy-index choice from the zero-delta fraction, the DPCM deltas and their SOQ substream, and the forward quantiser step. **The other three map generators are not ported** (the reference crashes on them here) | `tests/encode_ref.rs` on `enc_img30_bop_m1_b0_qmap{,_rvs}`: both streams byte-identical to the reference's |
-| `encoder::rate` | `bitrate_matcher/bitrate_matcher.py::{match_luma, beta_linear_interpolation}` | ported: model pre-selection at displacement 0, log-rate interpolation, +/-100 bisection, +/-1 % tolerance, per-model `BDL_range`. **Each trial codes the real stream instead of the reference's likelihood estimate, and `find_UV_beta_with_hyperopt` is not ported** (the shipped config never reaches it) | `tests/encode_ref.rs::rate_matching_hits_the_target`: same model as the reference at all five CTC rates, and closer to the target at every one (table below) |
+| `encoder::rate` | `bitrate_matcher/bitrate_matcher.py::{match_luma, beta_linear_interpolation}` | ported: model pre-selection at displacement 0, log-rate interpolation, +/-100 bisection, per-model `BDL_range`. Two trial measures (`EncodeParams::rate_estimate`): `Coded` (default) measures the real codestream at the +/-1 % parameter-default tolerance; `Likelihood` is the reference's `ECLibLH` estimate with the reference's effective tolerances (`cfg/BRM/regen_list.json`: -10 % / +5 %, and its unclamped +/-100 bisection window) and picks the reference's `(model, beta)` exactly. **`find_UV_beta_with_hyperopt` is not ported** (the shipped config never reaches it) | `tests/encode_ref.rs::rate_matching_hits_the_target` (coded path): same model as the reference at all five CTC rates, and closer to the target at every one (table below); `likelihood_estimate_picks_the_references_displacements`: same `(model, beta)` as the reference at all five CTC rates on both test pictures, estimate within 2e-3 bpp of the reference's logged per-trial estimates |
 | `model::mcm` (compress) | `context.py::{forward, pred, gen_skip_cubeflag, convert_cubeflag_map, _mask_redundant_padding_*}` | ported: per stage quantise with the sigma-threshold mask, decide the stage's cube flags from its own reconstruction error, re-quantise with the cubes that must not be skipped | as above (`y.residual_quant`, `y.cube_flag`) |
 | `decoder::entropy` | `common_modules.py::decode/decode_z/decode_y/_ac_decode_y/_cal_step_size`, `gm.py::build_indexes` | ported for: all 4 models, 1..16 threads, no regions / dependent / independent regions, RVS, GRFS, the quality map, and progressive decode (`num_decode_chs`: a caller-chosen prefix of the latent channels) | `tests/entropy_ref.rs`: 21 reference streams (6 with RVS and/or GRFS, 3 with a quality map); z_hat, sigma, quantised residual exact, dequantised residual bit-identical |
 | `nn` + `nn::reference` | `torch.nn.functional` conv2d / conv_transpose2d / pixel_shuffle / ReLU / ReLU6 | ported as plain loops that *define* the crate's numeric contract (FMA accumulation in `(ic, ky, kx)` order). Kept as the oracle and as the fallback for geometries the fast engine does not cover (stride-2 convolutions) | `tests/nn_vectors.rs`: 11 tiny PyTorch-computed cases (groups, depthwise, stride 2, 2x2, 1x3/3x1, both transposed geometries) within 2e-6 relative; pixel shuffle exact |
@@ -118,10 +118,20 @@ reference's stock configuration produces this never happens; it takes beta displ
 
 ### Rate matching (`--bpp`), 560x888 test image 00030, base profile
 
-Ours codes every trial; the reference scores trials with the entropy model's likelihood
-(`ECLibLH`) and only codes the winner, so its *achieved* rate drifts from the target.
+Two trial measures (`EncodeParams::rate_estimate`): `Coded` (the default) codes every trial
+and measures the real codestream; `Likelihood` is the reference's own measure — `ECLibLH`,
+`-sum(log2 p)` over `z_hat` (the factorized model's float `forward`, per-channel tables in
+`src/encoder/lh.rs`) and the residual (`GMProbModel.forward`'s unquantised Gaussian) — at the
+reference's effective tolerances (`cfg/BRM/regen_list.json`, always appended by
+`--set_target_bpp`: -10 % / +5 %, not the +/-1 % parameter defaults this port's coded path
+kept) and its unclamped +/-100 bisection window. `Likelihood` picks the reference's
+`(model, beta)` exactly on all ten CTC points (five rates, both test pictures); its estimate
+reproduces the reference encoder's logged per-trial estimates to the four decimals the log
+prints. Note the reference's own estimator misses the coded size by up to ~1 % at these rates
+(img30 0.75: est 0.7866 vs coded 0.7946) — the ideal likelihood under-prices the quantised
+ANS tables, exp-Golomb tails, flush and container.
 
-| target bpp | our model / displacement | our bpp | reference model / displacement | reference bpp |
+| target bpp | our model / displacement (Coded) | our bpp | reference model / displacement (= Likelihood pick) | reference bpp |
 | --- | --- | --- | --- | --- |
 | 0.12 | 0 / +259 | 0.1165 (-3.0 %) | 0 / +211 | 0.1081 (-9.9 %) |
 | 0.25 | 1 / -222 | 0.2523 (+0.9 %) | 1 / -189 | 0.2643 (+5.7 %) |
@@ -129,9 +139,10 @@ Ours codes every trial; the reference scores trials with the entropy model's lik
 | 0.75 | 2 / -248 | 0.7568 (+0.9 %) | 2 / -209 | 0.7946 (+5.9 %) |
 | 1.00 | 2 / -9   | 1.0088 (+0.9 %) | 2 / 0    | 1.0198 (+2.0 %) |
 
-The model choice is the reference's at every rate. The two that miss +/-1 % are capped by the
-model's own `BDL_range` (`cfg/BRM/default.json`): model 0 and model 1 stop at +259, which is as
-high a rate as they can reach. 12-15 trial encodes, 0.55 s of process wall time.
+The model choice is the reference's at every rate on either measure. The two coded-path picks
+that miss +/-1 % are capped by the model's own `BDL_range` (`cfg/BRM/default.json`): model 0
+and model 1 stop at +259, which is as high a rate as they can reach. 12-15 trial encodes,
+0.55 s of process wall time.
 
 ### Speed (`benchmarks/encode_end_to_end_2026-09-18.{tsv,meta}`)
 
@@ -151,8 +162,7 @@ reference's **1.5 s** at 560x888. The reference pins torch to one thread by defa
 Not started (decoder): nothing left of the float path. Decided against porting: the
 user-defined colour transform (`colour_transform_idx = 2`) — dead, self-inconsistent code
 upstream, see "Reference dead code".
-Not started (encoder): the EFE / eICCI post-filters on the encode side, and the rate matcher's
-likelihood estimator.
+Not started (encoder): the EFE / eICCI post-filters on the encode side.
 
 ## WebAssembly numeric policy (measured 2026-09-17)
 
@@ -478,11 +488,15 @@ measured numbers in the status table above when you close an item.
   above); the reference decoder reads all nine and its output agrees with ours within 1 LSB
   (`tests/encode_ref.rs::formats_streams_match_reference` and
   `reference_decoder_accepts_formats_streams`, the latter `--ignored`).
-- **E7 Likelihood-based rate estimation.** `bitrate_matcher` uses `ECLibLH` +
-  `GMProbModel.forward` to estimate bits without coding; ours codes each trial. Port it as an
-  optional `RateEstimate::Likelihood` so our search picks the reference's displacements exactly;
-  gate: same `(model, beta)` as the reference at the five CTC rates on both test pictures, and
-  the estimator's bit count within 0.5 % of the coded size.
+- ~~**E7 Likelihood-based rate estimation.**~~ **Done 2026-09-18**: `RateEstimate::Likelihood`
+  (`EncodeParams::rate_estimate`, CLI `--rate-estimate likelihood`) runs the `ECLibLH` port in
+  `src/encoder/lh.rs` — factorized `z` likelihood tables plus the `GMProbModel` Gaussian —
+  with the reference's effective tolerances (-10 %/+5 %, `cfg/BRM/regen_list.json`) and its
+  unclamped +/-100 window. Gate: same `(model, beta)` as the reference at all five CTC rates
+  on both test pictures (10/10), estimates equal the reference's logged per-trial estimates to
+  the four decimals printed, estimate within 1.0 % of the coded size — the reference's own
+  estimator misses by that much (the brief's 0.5 % is unattainable: it prices the ideal
+  likelihood, not the quantised ANS tables). `RateEstimate::Coded` stays the default.
 - ~~**E8 Encoder limits and memory.**~~ **Done 2026-09-18**: `EncodeLimits` +
   `Encoder::limits` (max pixels / dimensions / estimated heap; defaults 120 MP and 4 GiB, as
   the decoder's), `estimate_encode_memory` / `Encoder::estimate_memory` and

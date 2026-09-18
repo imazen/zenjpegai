@@ -5,16 +5,15 @@
 //! (`match_luma` + `beta_linear_interpolation`): pick the model whose rate at displacement 0 is
 //! relatively closest to the target, then bracket the displacement with the model's search
 //! range, interpolate in the log-rate domain and bisect a +/-100 window, keeping the tightest
-//! trial inside a +/-1 % tolerance.
+//! trial inside the configured tolerance.
 //!
-//! **Deliberate divergence.** The reference measures each trial with a *likelihood* estimate
-//! (`ECLibLH`: `-sum(log2(p))` of the entropy model, excluding the container) instead of coding
-//! it. This port codes each trial and measures the real codestream, which is what the caller
-//! asked for; it also means our rate is the one you get, not one the estimator predicted. The
-//! search therefore visits the same betas only when the estimate and the truth agree.
-//! `find_UV_beta_with_hyperopt` is not ported either: the shipped configuration
-//! (`cfg/BRM/default.json`, `independent_beta_UV: 1`) never reaches it, and it is a stochastic
-//! TPE search.
+//! The reference measures each trial with a *likelihood* estimate (`ECLibLH`: `-sum(log2(p))`
+//! of the entropy model, excluding the container) instead of coding it; that is ported as
+//! [`RateEstimate::Likelihood`]. The default [`RateEstimate::Coded`] keeps this port's earlier
+//! choice of measuring the real codestream — the rate you get, not one the estimator
+//! predicted — at the parameter file's default tolerance. `find_UV_beta_with_hyperopt` is not
+//! ported either: the shipped configuration (`cfg/BRM/default.json`, `independent_beta_UV: 1`)
+//! never reaches it, and it is a stochastic TPE search.
 
 use crate::error::Result;
 
@@ -23,8 +22,28 @@ use crate::error::Result;
 pub const BDL_SEARCH_RANGE: [(i32, i32); 4] = [(-1024, 259), (-443, 259), (-443, 702), (-443, 702)];
 
 /// `tolerance_min` / `tolerance_max` (`bitrate_matcher/params.py`).
-const TOLERANCE_MIN: f64 = -0.01;
-const TOLERANCE_MAX: f64 = 0.01;
+pub(crate) const TOLERANCE_MIN: f64 = -0.01;
+pub(crate) const TOLERANCE_MAX: f64 = 0.01;
+
+/// The tolerances the reference actually searches with: `--set_target_bpp` always appends
+/// `cfg/BRM/regen_list.json`, which overrides the parameter defaults to `tolerance_min =
+/// -0.10`, `tolerance_max = +0.05`. [`RateEstimate::Likelihood`] uses them so the search
+/// accepts the same window the reference does.
+pub(crate) const TOLERANCE_LH: (f64, f64) = (-0.10, 0.05);
+
+/// How a rate-matching trial is measured (`EncodeParams::rate_estimate`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RateEstimate {
+    /// Code the trial and measure the codestream size. The default: our rate is the one you
+    /// get, and the tight +/-1 % parameter default applies.
+    #[default]
+    Coded,
+    /// `ECLibLH` — the `-sum(log2(p))` likelihood estimate ([`super::lh`]) the reference's
+    /// bitrate matcher searches with, at the reference's effective tolerances
+    /// (`cfg/BRM/regen_list.json`: -10 % / +5 %). The search then picks the same
+    /// `(model, beta)` the reference does; the returned stream is still coded for real.
+    Likelihood,
+}
 
 /// What a rate-matched encode settled on.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -33,6 +52,10 @@ pub struct RateMatch {
     pub beta_displacement_log: i32,
     /// Achieved rate, over the coded picture's luma samples.
     pub bpp: f64,
+    /// The likelihood estimate at the chosen displacement, when
+    /// [`EncodeParams::rate_estimate`](crate::encoder::EncodeParams::rate_estimate) is
+    /// [`RateEstimate::Likelihood`]; `None` for [`RateEstimate::Coded`].
+    pub estimated_bpp: Option<f64>,
     /// Trial encodes performed (both stages).
     pub trials: usize,
 }
@@ -42,9 +65,23 @@ pub struct RateMatch {
 pub fn search_beta(
     target: f64,
     range: (i32, i32),
+    bpp_at: impl FnMut(i32) -> Result<f64>,
+) -> Result<i32> {
+    search_beta_with(target, range, (TOLERANCE_MIN, TOLERANCE_MAX), true, bpp_at)
+}
+
+/// [`search_beta`] with explicit `(tolerance_min, tolerance_max)` and window handling:
+/// `clamp_window` clips the +/-100 bisection window to `range`, which the reference does not
+/// do (only the encoder's `BDL_clipping_range` applies downstream); [`RateEstimate::Coded`]
+/// keeps the clipping because it only skips trials that re-code an endpoint already measured.
+pub(crate) fn search_beta_with(
+    target: f64,
+    range: (i32, i32),
+    tol: (f64, f64),
+    clamp_window: bool,
     mut bpp_at: impl FnMut(i32) -> Result<f64>,
 ) -> Result<i32> {
-    let (mut tol_min, mut tol_max) = (TOLERANCE_MIN, TOLERANCE_MAX);
+    let (mut tol_min, mut tol_max) = tol;
     let base = bpp_at(0)?;
     let base_mismatch = (base - target) / target;
     if (tol_min..=tol_max).contains(&base_mismatch) {
@@ -76,10 +113,22 @@ pub fn search_beta(
             / (libm::log(max_bits) - libm::log(min_bits))
             + f64::from(min_beta)) as i32
     };
-    // Clamping the window to the model's range only removes trials that would code the same
-    // stream anyway (the encoder clips the displacement it is given).
-    let (mut lo, mut hi) = ((now - 100).max(range.0), (now + 100).min(range.1));
-    let (mut best, mut last) = (None, now.clamp(range.0, range.1));
+    // The reference bisects `[now - 100, now + 100]` unclamped; `clamp_window` restores this
+    // port's clipping to `range`, which only removes trials that would code the same stream
+    // anyway (the encoder clips the displacement it is given).
+    let (mut lo, mut hi) = if clamp_window {
+        ((now - 100).max(range.0), (now + 100).min(range.1))
+    } else {
+        (now - 100, now + 100)
+    };
+    let (mut best, mut last) = (
+        None,
+        if clamp_window {
+            now.clamp(range.0, range.1)
+        } else {
+            now
+        },
+    );
     while lo <= hi {
         let beta = lo + (hi - lo + 1) / 2;
         let bits = bpp_at(beta)?;

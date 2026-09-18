@@ -2,7 +2,7 @@
 # Encode + decode a matrix of configurations with the reference software and dump the decoder's
 # intermediate tensors for the parity tests.
 #
-#   scripts/ref_vectors/make_reference_streams.sh [SET]      SET: smoke (default) | regions | tools | filters | efe | filtertiles | qmap | formats | icci420 | encoder | cubeflags | all
+#   scripts/ref_vectors/make_reference_streams.sh [SET]      SET: smoke (default) | regions | tools | filters | efe | filtertiles | qmap | formats | icci420 | encoder | cubeflags | rate | all
 #
 # Output: $OUT/<name>/{stream.bits,encoder.log,tensors.bin,manifest.txt,decoded.png,stdout.log}
 # with OUT=/mnt/v/output/zenjpegai/reference/vectors. Existing streams are kept (delete the
@@ -83,6 +83,14 @@ if [ "$SET" = smoke ] || [ "$SET" = all ]; then
     set -- $lim; dir="$OUT/img30_base_off_bpp050/progressive_y$1_uv$2"
     [ -f "$dir/manifest.txt" ] || nice -n 19 python "$HERE/dump_decode.py" "$OUT/img30_base_off_bpp050/stream.bits" "$dir" \
         --decoder-args "$P.model_y.common_modules.num_decode_chs $1 $P.model_uv.common_modules.num_decode_chs $2" > "$dir.log" 2>&1
+  done
+fi
+
+if [ "$SET" = rate ] || [ "$SET" = all ]; then
+  # E7: the second CTC picture at every CTC rate, for the likelihood-estimator parity gate
+  # (img30's five are the `smoke` set; `regions` adds img01 at 0.50).
+  for bpp in 012 025 075 100; do
+    one "img01_base_off_bpp$bpp" $IMG01 "$((10#$bpp))" cfg/tools_off.json cfg/profiles/base.json
   done
 fi
 

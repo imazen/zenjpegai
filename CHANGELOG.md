@@ -6,6 +6,13 @@
 <!-- Breaking changes that will ship together in the next major (or minor for 0.x) release. -->
 
 ### Added
+- Encoder: `RateEstimate::Likelihood` (`EncodeParams::rate_estimate`, CLI
+  `--rate-estimate likelihood`) — the reference bitrate matcher's `ECLibLH` trial measure
+  (`src/encoder/lh.rs`: the factorized `z` model's float `forward` as per-channel likelihood
+  tables, plus `GMProbModel.forward`'s unquantised Gaussian on the residual, with the
+  reference's effective -10 %/+5 % tolerances and unclamped bisection window). It picks the
+  reference's `(model, beta)` exactly at all five CTC rates on both test pictures; the coded
+  measure stays the default.
 - Encoder resource limits and a memory estimate, mirroring the decoder's (`E8`):
   `EncodeLimits` (max pixels / dimensions / estimated heap; default 120 MP and 4 GiB),
   `Encoder::limits`, `estimate_encode_memory` / `Encoder::estimate_memory` (fixed-model or
