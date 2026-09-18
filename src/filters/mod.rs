@@ -35,6 +35,9 @@ pub struct FilterContext<'a> {
     pub op: crate::header::OperatingPoint,
     /// Loaded eICCI networks, kept between decodes.
     pub icci_nets: &'a icci::NetCache,
+    /// Cooperative cancellation, checked once per enabled filter and, for eICCI, once per tile
+    /// (it runs a whole network per tile).
+    pub stop: &'a dyn enough::Stop,
 }
 
 /// What one filter hands to the next (`[img, upsampled_img]` in the reference).
@@ -52,15 +55,19 @@ pub fn apply(ctx: &FilterContext<'_>, image: Planes) -> Result<Planes> {
         upsampled: None,
     };
     if let Some(h) = &ctx.tools.efe_linear {
+        ctx.stop.check()?;
         state = efe_linear::apply(ctx, h, state)?;
     }
     if let Some(h) = &ctx.tools.icci {
+        ctx.stop.check()?;
         state = icci::apply(ctx, h, state)?;
     }
     if let Some(h) = &ctx.tools.efe_nonlinear {
+        ctx.stop.check()?;
         state = efe_nonlinear::apply(ctx, h, state)?;
     }
     if let Some(channel) = ctx.tools.lef_channel {
+        ctx.stop.check()?;
         state = lef::apply(ctx, channel, state)?;
     }
     Ok(state.image)

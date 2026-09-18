@@ -487,6 +487,7 @@ pub(super) mod tests {
             models: &models,
             op: hdr.synthesis_transforms[0],
             icci_nets: &Default::default(),
+            stop: &enough::Unstoppable,
         })
     }
 

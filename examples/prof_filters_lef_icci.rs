@@ -83,7 +83,17 @@ fn main() {
                 let t = Instant::now();
                 let op = hdr.synthesis_transforms[0];
                 std::hint::black_box(
-                    icci::filter(&eng, hdr, h, op, &models, &cache, image).unwrap(),
+                    icci::filter(
+                        &eng,
+                        hdr,
+                        h,
+                        op,
+                        &models,
+                        &cache,
+                        image,
+                        &enough::Unstoppable,
+                    )
+                    .unwrap(),
                 );
                 let ms = t.elapsed().as_secs_f64() * 1e3;
                 first.get_or_insert(ms);

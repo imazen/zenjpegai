@@ -243,6 +243,7 @@ impl GpuDecoder {
                 models: &*self.models,
                 op: decoded.op,
                 icci_nets: &self.icci_nets,
+                stop: &enough::Unstoppable,
             };
             filters::apply(&fctx, synthesized.clone())?
         } else {

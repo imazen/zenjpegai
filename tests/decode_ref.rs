@@ -69,6 +69,7 @@ fn decode(stream: &[u8], eng: &Engine) -> (zenjpegai::header::PictureHeader, Dec
         models: &models,
         op,
         icci_nets: &Default::default(),
+        stop: &enough::Unstoppable,
     };
     let filtered = zenjpegai::filters::apply(&ctx, planes.clone()).unwrap();
     let psi = [ly.psi, luv.psi];

@@ -280,6 +280,7 @@ impl Decoder {
                 models: &*self.models,
                 op,
                 icci_nets: &self.icci_nets,
+                stop,
             };
             filters::apply(&ctx, planes).map_err(|e| at!(e))?
         } else {

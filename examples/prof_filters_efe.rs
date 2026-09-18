@@ -60,6 +60,7 @@ fn main() {
             models: &models,
             op: headers.picture.synthesis_transforms[0],
             icci_nets: &Default::default(),
+            stop: &enough::Unstoppable,
         };
         if let (Some(h), Some(input)) = (
             &headers.tools.efe_linear,

@@ -127,6 +127,7 @@ fn check_icci(name: &str, expect_change: bool) {
             &models,
             &cache,
             planes(&dump, "eicci.in"),
+            &enough::Unstoppable,
         )
         .unwrap();
         for (what, w, g, i) in [

@@ -118,6 +118,7 @@ fn check(name: &str, linear: bool, nonlinear: bool, expect_alt: bool) {
                 models: &models,
                 op: headers.picture.synthesis_transforms[0],
                 icci_nets: &Default::default(),
+                stop: &enough::Unstoppable,
             };
             let first = baseline.is_none();
             let mut results = Vec::new();

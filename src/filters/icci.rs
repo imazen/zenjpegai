@@ -163,6 +163,10 @@ fn write_core(plane: &mut Tensor<f32>, tile: &FilterTile, full: &Tensor<f32>) {
 
 /// Apply the filter to a 4:4:4 picture in the codec range. `op` is the operating point the
 /// picture was synthesised with: it selects the network bank and the short lists.
+///
+/// `stop` is checked once per tile: each tile runs a whole luma and/or chroma network, the
+/// filter's most expensive unit of work.
+#[allow(clippy::too_many_arguments)]
 pub fn filter(
     eng: &Engine,
     hdr: &PictureHeader,
@@ -171,6 +175,7 @@ pub fn filter(
     models: &dyn ModelSource,
     cache: &NetCache,
     mut image: Planes,
+    stop: &dyn enough::Stop,
 ) -> Result<Planes> {
     let (ph, pw) = (image.y.h, image.y.w);
     let same = |p: &Tensor<f32>| p.c == 1 && p.h == ph && p.w == pw;
@@ -210,6 +215,7 @@ pub fn filter(
         }
     }
     for (tile, sel) in tiles.iter().zip(&h.tiles) {
+        stop.check()?;
         let (net_y, net_uv) = selection(sel, op, hdr.model_id as usize)?;
         if net_y.is_none() && net_uv.is_none() {
             continue;
@@ -264,6 +270,7 @@ pub(super) fn apply(
         ctx.models,
         ctx.icci_nets,
         state.image,
+        ctx.stop,
     )?;
     Ok(state)
 }
