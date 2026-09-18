@@ -231,3 +231,10 @@ reference-vector set carries non-sRGB CICP to develop and test it against.
    register block for 1x1 convolutions and a `node --cpu-prof` profile are not.
 4. A stream with non-sRGB CICP in the reference-vector set, to build and test the P3 hook above
    against real data instead of leaving it as a documented no-op.
+
+## Demo asset hygiene
+
+`manifest.json` in the `demo-assets-v1` release is published verbatim on the site. Its
+`sourceFile` values must stay redacted to `<id>_..._<WxH>.<ext>` (like `demo/IMAGES.md`): the
+full imazen-26 filenames encode where and when a photo was taken and on which device. Checked
+and scrubbed 2026-09-18; re-check whenever the release is regenerated.
