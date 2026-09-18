@@ -43,6 +43,8 @@ OPTIONS:
     --rvs --grfs       encode: residual variance scaling / channel gain flags
     --lsbs             encode: latent scaling before synthesis (a decoder-side tool)
     --ans-threads <n>  encode: ANS threads per substream (1, 2, 4, 8 or 16)
+    --regions <mode>   encode: region partitioning, `dependent` or `independent` (large
+                       pictures only; the grid follows the picture size)
     --max-channels <y,uv>  progressive decode: read only the first latent channels
     --single-thread    do not use the thread pool
     --scalar           no SIMD (for debugging; every tier produces identical pixels)
@@ -74,6 +76,7 @@ struct Args {
     grfs: bool,
     lsbs: bool,
     ans_threads: u8,
+    regions: Option<zenjpegai::encoder::RegionMode>,
     single_thread: bool,
     scalar: bool,
     repeat: usize,
@@ -98,6 +101,7 @@ fn parse_args() -> Result<Args, String> {
         grfs: false,
         lsbs: false,
         ans_threads: 1,
+        regions: None,
         single_thread: false,
         scalar: false,
         repeat: 1,
@@ -137,6 +141,13 @@ fn parse_args() -> Result<Args, String> {
                 a.only = Some(v);
             }
             "--out" => a.out = Some(PathBuf::from(value("--out")?)),
+            "--regions" => {
+                a.regions = Some(match value("--regions")?.as_str() {
+                    "dependent" => zenjpegai::encoder::RegionMode::Dependent,
+                    "independent" => zenjpegai::encoder::RegionMode::Independent,
+                    other => return Err(format!("--regions: unknown mode `{other}`")),
+                });
+            }
             "--rvs" => a.rvs = true,
             "--grfs" => a.grfs = true,
             "--lsbs" => a.lsbs = true,
@@ -294,6 +305,7 @@ fn run() -> Result<(), String> {
                 lsbs: args.lsbs,
                 num_threads_z: args.ans_threads,
                 num_threads_r: args.ans_threads,
+                regions: args.regions,
             };
             let encoder = Encoder::with_engine(models, engine);
             let mut stream = Vec::new();

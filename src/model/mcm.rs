@@ -235,6 +235,9 @@ pub struct Compressed {
     /// ((0,0), (0,1), (1,0), (1,1)); `true` = the cube may be skipped. Exactly the layout
     /// [`crate::header::ComponentHeader::cube_flags`] and [`crate::tools::skip::skip_mask`] use.
     pub cube_flag: Vec<bool>,
+    /// The merged hyper-decoder output the quantisation was measured against (diagnostics only;
+    /// a one-sample placeholder where the caller does not fill it in).
+    pub psi: Tensor<f32>,
 }
 
 /// Maximum of `err` over each `CUBE_SIZE x CUBE_SIZE` block of every channel, thresholded:
@@ -387,6 +390,7 @@ impl ContextModel {
             residual_q,
             residual,
             cube_flag,
+            psi: Tensor::<f32>::zeros(1, 1, 1)?,
         })
     }
 }

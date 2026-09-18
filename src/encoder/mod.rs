@@ -29,14 +29,15 @@ use std::sync::{Arc, Mutex};
 
 use whereat::{At, at};
 
-use crate::container::{CodestreamWriter, Marker, join_threads};
+use crate::container::{CodestreamWriter, Marker, join_dependent_regions, join_threads};
 use crate::decoder::entropy::{
     ComponentScales, GrfsFlags, channel_step, component_scales_with, distribution_index,
 };
 use crate::decoder::output::RgbImage;
+use crate::decoder::reconstruct::{HD_MCM_TILE_OVERLAP, hyper_crop};
 use crate::error::{Error, Result};
 use crate::header::{
-    ColourTransform, ComponentHeader, LATENT_CHANNELS, OperatingPoint, PictureHeader,
+    ColourTransform, ComponentHeader, LATENT_CHANNELS, OperatingPoint, PictureHeader, Regions,
     RenderingInfo, ToolHeader,
 };
 use crate::mans::AnsTables;
@@ -47,7 +48,7 @@ use crate::model::mcm::{self, upshuffle_psi};
 use crate::model::{self, CommonModel, ModelDir, ModelSource};
 use crate::nn::fast::{BTensor, Engine};
 use crate::tensor::Tensor;
-use crate::tools::regions::Area;
+use crate::tools::regions::{Area, Plane, region_grid};
 use crate::tools::skip::skip_mask;
 
 /// `skip_cube_thr`: a cube may be skipped while every latent sample in it is reconstructed
@@ -83,6 +84,40 @@ pub struct EncodeParams {
     /// ANS threads of the `z` substream and of each residual substream (1, 2, 4, 8 or 16).
     pub num_threads_z: u8,
     pub num_threads_r: u8,
+    /// Region partitioning (`cfg/tools/{Dependent,Independent}Regions.json`). The grid itself is
+    /// derived from the picture size (`calc_numHor_numVer_regions`); a picture of at most
+    /// `NumSamplesInRegion` samples gets no regions whatever this says.
+    pub regions: Option<RegionMode>,
+}
+
+/// How a region's residual reaches the codestream
+/// (`region_residual_in_its_own_substream_flag`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RegionMode {
+    /// One SORP / SORS substream for all regions, with their sizes at its head. Regions overlap
+    /// and their contexts see each other.
+    Dependent,
+    /// One substream per region, each starting with its index: every region decodes on its own.
+    Independent,
+}
+
+/// `NumSamplesInRegion` (`cfg/tools/*Regions.json`): a picture at most this large is not
+/// partitioned.
+pub const NUM_SAMPLES_IN_REGION: usize = 1_048_576;
+/// `hyper_decoder_overlap_in_latent_samples` / `mcm_overlap_in_latent_samples`, as signalled.
+pub const HYPER_DECODER_OVERLAP: u8 = 2;
+pub const MCM_OVERLAP: u8 = 8;
+
+/// `calc_numHor_numVer_regions`: `(num_ver, num_hor)`, or `None` when the picture is small
+/// enough that the reference clears `region_partitioning_flag` again.
+pub fn region_counts(height: usize, width: usize) -> Option<(u8, u8)> {
+    if height * width <= NUM_SAMPLES_IN_REGION {
+        return None;
+    }
+    let step = libm::sqrt(NUM_SAMPLES_IN_REGION as f64) as usize;
+    let num_hor = (width / step).clamp(1, width.div_ceil(512));
+    let num_ver = (height / step).clamp(1, height.div_ceil(256));
+    Some((num_ver as u8, num_hor as u8))
 }
 
 impl Default for EncodeParams {
@@ -96,6 +131,7 @@ impl Default for EncodeParams {
             lsbs: false,
             num_threads_z: 1,
             num_threads_r: 1,
+            regions: None,
         }
     }
 }
@@ -128,6 +164,7 @@ type ModelLatents = ([Tensor<f32>; 2], [Tensor<i8>; 2]);
 /// Everything one component contributes to the codestream.
 struct Component {
     z_hat: Tensor<i8>,
+    psi: Tensor<f32>,
     scales: ComponentScales,
     residual_q: Tensor<i16>,
     mask: Tensor<bool>,
@@ -149,6 +186,8 @@ pub struct ComponentTrace {
     pub cube_flag: Vec<bool>,
     /// `true` where a residual symbol is written.
     pub mask: Tensor<bool>,
+    /// The merged hyper-decoder output the context model saw.
+    pub psi: Tensor<f32>,
 }
 
 impl Encoder {
@@ -260,6 +299,7 @@ impl Encoder {
                     residual,
                     cube_flag: c.cube_flag,
                     mask: c.mask,
+                    psi: c.psi,
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -309,11 +349,15 @@ impl Encoder {
         let set = self.model_set(self.check_params(rgb.width, rgb.height, params)?, params.op)?;
         // 1. Colour pre-processing, then the analysis transform and the hyper-encoder, tile by
         //    tile (`sep_chan_tool.py::analysis_and_hyper_encoder`).
+        let independent = (params.regions == Some(RegionMode::Independent))
+            .then(|| region_counts(rgb.height, rgb.width))
+            .flatten()
+            .map(|(v, h)| (v as usize, h as usize));
         let input = preprocess_rgb(rgb)?;
         let planes = [&input.luma, &input.chroma];
         let (mut ys, mut zs) = (Vec::with_capacity(2), Vec::with_capacity(2));
         for (ccs, plane) in planes.into_iter().enumerate() {
-            let (y, z) = self.analyse_component(&set, ccs, plane, stop)?;
+            let (y, z) = self.analyse_component(&set, ccs, plane, independent, stop)?;
             ys.push(y);
             zs.push(z);
         }
@@ -371,6 +415,10 @@ impl Encoder {
         let pixels = (rgb.width * rgb.height) as f64;
         let input = preprocess_rgb(rgb)?;
         let base_params = EncodeParams { op, ..params };
+        let independent = (params.regions == Some(RegionMode::Independent))
+            .then(|| region_counts(rgb.height, rgb.width))
+            .flatten()
+            .map(|(v, h)| (v as usize, h as usize));
         let mut trials = 0usize;
         // One analysis per model; every displacement re-codes from its latents.
         let mut latents: Vec<Option<ModelLatents>> =
@@ -385,7 +433,7 @@ impl Encoder {
                 let mut ys = Vec::with_capacity(2);
                 let mut zs = Vec::with_capacity(2);
                 for (ccs, plane) in [&input.luma, &input.chroma].into_iter().enumerate() {
-                    let (y, z) = self.analyse_component(&set, ccs, plane, stop)?;
+                    let (y, z) = self.analyse_component(&set, ccs, plane, independent, stop)?;
                     ys.push(y);
                     zs.push(z);
                 }
@@ -461,6 +509,44 @@ impl Encoder {
         ))
     }
 
+    /// The analysis tile grid [`Encoder::encode`] would use for component `ccs` of a
+    /// `width x height` picture. Exposed for the parity tests and for diagnostics.
+    pub fn analysis_tile_grid(
+        width: usize,
+        height: usize,
+        ccs: usize,
+        params: EncodeParams,
+    ) -> Result<Vec<AnalysisTile>> {
+        let (pw, ph) = (width + width % 2, height + height % 2);
+        let (ph, pw) = if ccs == 0 { (ph, pw) } else { (ph / 2, pw / 2) };
+        let d = tiles::LATENT_DOWNSCALE[ccs];
+        let independent = (params.regions == Some(RegionMode::Independent))
+            .then(|| region_counts(height, width))
+            .flatten()
+            .map(|(v, h)| (v as usize, h as usize));
+        let region_areas;
+        let regions = match independent {
+            None => None,
+            Some((num_ver, num_hor)) => {
+                let scale = if ccs == 0 { 1 } else { 2 };
+                let size =
+                    tiles::conformance_tile_size(ph * scale, pw * scale, num_ver, num_hor) / scale;
+                region_areas = region_area_grid(ph, pw, num_ver, num_hor);
+                Some((region_areas.as_slice(), size))
+            }
+        };
+        tiles::analysis_tiles_with(
+            ccs,
+            ph,
+            pw,
+            ph.div_ceil(d),
+            pw.div_ceil(d),
+            ph.div_ceil(4 * d),
+            pw.div_ceil(4 * d),
+            regions,
+        )
+    }
+
     /// `compress_colocated_tiles` over every analysis tile of one component: the analysis
     /// transform and the hyper-encoder run per tile and only each tile's core is kept.
     fn analyse_component(
@@ -468,6 +554,7 @@ impl Encoder {
         set: &ModelSet,
         ccs: usize,
         plane: &Tensor<f32>,
+        independent_regions: Option<(usize, usize)>,
         stop: &dyn enough::Stop,
     ) -> Result<(Tensor<f32>, Tensor<i8>)> {
         let (ph, pw) = (plane.h, plane.w);
@@ -476,7 +563,21 @@ impl Encoder {
         let (hz, wz) = (ph.div_ceil(4 * d), pw.div_ceil(4 * d));
         let chs = LATENT_CHANNELS[ccs];
         let eng = &self.engine;
-        let grid = tiles::analysis_tiles(ccs, ph, pw, lh, lw, hz, wz)?;
+        // With independent regions the tile size is forced by `cfg_update_for_conformance` and
+        // tiles grow only towards neighbours inside their own region.
+        let region_areas;
+        let regions = match independent_regions {
+            None => None,
+            Some((num_ver, num_hor)) => {
+                // The conformance tile size is computed on the luma picture; chroma halves it.
+                let scale = if ccs == 0 { 1 } else { 2 };
+                let size =
+                    tiles::conformance_tile_size(ph * scale, pw * scale, num_ver, num_hor) / scale;
+                region_areas = region_area_grid(ph, pw, num_ver, num_hor);
+                Some((region_areas.as_slice(), size))
+            }
+        };
+        let grid = tiles::analysis_tiles_with(ccs, ph, pw, lh, lw, hz, wz, regions)?;
         let mut y = Tensor::<f32>::zeros(chs, lh, lw)?;
         let mut z_hat = Tensor::<i8>::zeros(chs, hz, wz)?;
         for t in &grid {
@@ -601,19 +702,12 @@ impl Encoder {
             )?;
             let mask = skip_mask(&scales.skip_scale_log, None)?;
 
-            // 5. psi, then the residual quantisation with its cube-flag decision.
-            let psi = model.hyper_decoder.forward_with(
-                eng,
-                z_hat,
-                lh.div_ceil(2),
-                lw.div_ceil(2),
-                stop,
-            )?;
+            // 5. psi, then the residual quantisation with its cube-flag decision, region by
+            //    region (`compress`'s two `iter_colocated_grids` loops).
             let q = EncoderQuantiser { scales: &scales };
-            let out = match &model.context {
-                Some(ctx) => ctx.compress(eng, latent, &psi, &q, &mask, SKIP_CUBE_THR, stop)?,
-                None => compress_context_free(latent, &psi, &q, &mask, SKIP_CUBE_THR)?,
-            };
+            let out = compress_regions(
+                eng, &hdr, ccs, model, z_hat, latent, &mask, &q, lh, lw, stop,
+            )?;
 
             // 6. `encoder_skip_and_cubeflag_for_tiles`: the final mask is the threshold mask
             //    widened by the cubes that must not be skipped; everything else is dropped.
@@ -631,6 +725,7 @@ impl Encoder {
             hdr.components[ccs].grfs_channel_flags = scales.grfs_flags.clone();
             components.push(Component {
                 z_hat: z_hats[ccs].clone(),
+                psi: out.psi,
                 scales,
                 residual_q,
                 mask,
@@ -673,48 +768,75 @@ impl Encoder {
         };
         out.substream(Marker::Ton, &tools.write(&hdr)?)?;
         out.substream(Marker::Rdi, &RenderingInfo::default().write()?)?;
-        out.substream(Marker::Sorp, &residual_payloads[0])?;
-        out.substream(Marker::Sors, &residual_payloads[1])?;
+        for (ccs, marker) in [Marker::Sorp, Marker::Sors].into_iter().enumerate() {
+            let regions = &residual_payloads[ccs];
+            if hdr.regions.is_some_and(|r| r.independent) {
+                // One substream per region, each introduced by its index.
+                for (i, payload) in regions.iter().enumerate() {
+                    let mut body = alloc::vec![i as u8];
+                    body.extend_from_slice(payload);
+                    out.substream(marker, &body)?;
+                }
+            } else {
+                let refs: Vec<&[u8]> = regions.iter().map(|p| p.as_slice()).collect();
+                out.substream(marker, &join_dependent_regions(&refs))?;
+            }
+        }
         out.substream(Marker::Soz, &soz)?;
         Ok((out.finish(), components))
     }
 
-    /// `encode_y` / `_ac_encode_y` for one component: the decoder's channel-chunk loop, walked
-    /// backwards (ANS is last-in-first-out).
-    fn encode_residual(&self, hdr: &PictureHeader, ccs: usize, c: &Component) -> Result<Vec<u8>> {
+    /// `encode_y` / `_ac_encode_y` for one component: one payload per region, each walking the
+    /// decoder's channel-chunk loop backwards (ANS is last-in-first-out).
+    fn encode_residual(
+        &self,
+        hdr: &PictureHeader,
+        ccs: usize,
+        c: &Component,
+    ) -> Result<Vec<Vec<u8>>> {
         let comp = &hdr.components[ccs];
         let (lh, lw) = hdr.latent_size(ccs);
         let (lh, lw) = (lh as usize, lw as usize);
         let num_chs = (comp.num_chs as usize).min(c.residual_q.c);
         let threads = comp.num_threads_r as usize;
-        let mut enc = self.tables.encoder(threads)?;
-        let step = channel_step(lh, lw, num_chs, threads);
-        let chunks: Vec<usize> = (0..num_chs).step_by(step).collect();
+        let grid = region_grid(hdr, ccs, Plane::Latent);
+        let mut out = Vec::with_capacity(grid.core.len());
         let (mut sigma, mut coded, mut values) = (Vec::new(), Vec::new(), Vec::new());
-        for &c0 in chunks.iter().rev() {
-            let c1 = (c0 + step).min(num_chs);
-            let n = (c1 - c0) * lh * lw;
-            sigma.clear();
-            coded.clear();
-            values.clear();
-            sigma.reserve(n);
-            coded.reserve(n);
-            values.reserve(n);
-            for ch in c0..c1 {
-                sigma.extend(
-                    c.scales.scale_log.plane(ch)[..lh * lw]
-                        .iter()
-                        .map(|&s| distribution_index(s)),
-                );
-                coded.extend_from_slice(&c.mask.plane(ch)[..lh * lw]);
-                values.extend_from_slice(&c.residual_q.plane(ch)[..lh * lw]);
+        for area in &grid.core {
+            let (rh, rw) = (
+                area.height.min(lh - area.y.min(lh)),
+                area.width.min(lw - area.x.min(lw)),
+            );
+            let mut enc = self.tables.encoder(threads)?;
+            if rh != 0 && rw != 0 {
+                let step = channel_step(rh, rw, num_chs, threads);
+                let chunks: Vec<usize> = (0..num_chs).step_by(step).collect();
+                for &c0 in chunks.iter().rev() {
+                    let c1 = (c0 + step).min(num_chs);
+                    sigma.clear();
+                    coded.clear();
+                    values.clear();
+                    for ch in c0..c1 {
+                        for y in area.y..area.y + rh {
+                            let row = (ch * lh + y) * lw + area.x;
+                            sigma.extend(
+                                c.scales.scale_log.data[row..row + rw]
+                                    .iter()
+                                    .map(|&s| distribution_index(s)),
+                            );
+                            coded.extend_from_slice(&c.mask.data[row..row + rw]);
+                            values.extend_from_slice(&c.residual_q.data[row..row + rw]);
+                        }
+                    }
+                    enc.encode_residual(&sigma, &coded, &values)?;
+                }
             }
-            enc.encode_residual(&sigma, &coded, &values)?;
+            let parts = enc.finish();
+            out.push(join_threads(
+                &parts.iter().map(|t| t.as_slice()).collect::<Vec<_>>(),
+            ));
         }
-        let parts = enc.finish();
-        Ok(join_threads(
-            &parts.iter().map(|t| t.as_slice()).collect::<Vec<_>>(),
-        ))
+        Ok(out)
     }
 }
 
@@ -748,6 +870,158 @@ pub fn read_png_rgb8(bytes: &[u8]) -> Result<RgbImage> {
 #[cfg(feature = "cli")]
 fn png_err<E>(_e: E) -> &'static str {
     "the input is not a readable PNG"
+}
+
+/// `common_modules.py::compress`: the hyper-decoder and the context model region by region,
+/// merged the way `merge_psi_overlaps_of_tiles` / `compress_ar_scale_tile` merge them. The
+/// mirror of `decoder::reconstruct::reconstruct_latent_with`, and it must stay one.
+#[allow(clippy::too_many_arguments)]
+fn compress_regions<Q: mcm::Quantiser>(
+    eng: &Engine,
+    hdr: &PictureHeader,
+    ccs: usize,
+    model: &CommonModel,
+    z_hat: &Tensor<i8>,
+    y: &Tensor<f32>,
+    mask: &Tensor<bool>,
+    q: &Q,
+    lh: usize,
+    lw: usize,
+    stop: &dyn enough::Stop,
+) -> Result<mcm::Compressed> {
+    let chs = model.chs;
+    let independent = hdr.regions.is_some_and(|r| r.independent);
+    let img = region_grid(hdr, ccs, Plane::Image);
+    let zg = region_grid(hdr, ccs, Plane::HyperLatent);
+    let pg = region_grid(hdr, ccs, Plane::Psi);
+    let lg = region_grid(hdr, ccs, Plane::Latent);
+    let n = img.extended.len();
+    let v = eng.tier.block();
+    let (pic_h, pic_w) = (hdr.height as usize, hdr.width as usize);
+
+    // 1. psi per region, merged (identical to the decoder's first loop).
+    let mut psi = Tensor::<f32>::zeros(4 * chs, lh.div_ceil(2), lw.div_ceil(2))?;
+    let mut psi_single = None;
+    for r in 0..n {
+        stop.check()?;
+        let (it, zt) = (img.extended[r], zg.extended[r]);
+        let (th, tw, divider) = if ccs == 0 {
+            (it.height, it.width, 32)
+        } else {
+            (it.height.div_ceil(2), it.width.div_ceil(2), 16)
+        };
+        let out_h = (2 * zt.height)
+            .checked_sub(hyper_crop(th, divider))
+            .ok_or(Error::InvalidData("region geometry"))?;
+        let out_w = (2 * zt.width)
+            .checked_sub(hyper_crop(tw, divider))
+            .ok_or(Error::InvalidData("region geometry"))?;
+        let z_tile;
+        let z = if n == 1 {
+            z_hat
+        } else {
+            z_tile = z_hat.window(zt.x, zt.y, zt.width, zt.height)?;
+            &z_tile
+        };
+        let t = model
+            .hyper_decoder
+            .forward_with(eng, z, out_h, out_w, stop)?;
+        if n == 1 && t.h == psi.h && t.w == psi.w {
+            psi_single = Some(t);
+        } else {
+            assign(&mut psi, pg.extended[r], &t.to_planar()?, (0, 0));
+        }
+        if let Some(p) = &psi_single {
+            psi = p.to_planar()?;
+        }
+    }
+
+    // 2. the residual per region, merged by cores.
+    let mut residual_q = Tensor::<i16>::zeros(chs, lh, lw)?;
+    let mut residual = Tensor::<f32>::zeros(chs, lh, lw)?;
+    let (cube_h, cube_w) = (
+        lh.div_ceil(2).div_ceil(mcm::CUBE_SIZE),
+        lw.div_ceil(2).div_ceil(mcm::CUBE_SIZE),
+    );
+    let mut cube_flag = alloc::vec![true; 4 * cube_h * cube_w];
+    for r in 0..n {
+        stop.check()?;
+        let (lt, pt, it) = (lg.extended[r], pg.extended[r], img.extended[r]);
+        let (y_tile, mask_tile, psi_tile);
+        let (yt, mt, psi_b) = match psi_single.take() {
+            Some(p) => (y, mask, p),
+            None => {
+                y_tile = y.window(lt.x, lt.y, lt.width, lt.height)?;
+                mask_tile = mask.window(lt.x, lt.y, lt.width, lt.height)?;
+                psi_tile = psi.window(pt.x, pt.y, pt.width, pt.height)?;
+                (&y_tile, &mask_tile, BTensor::from_planar(&psi_tile, v)?)
+            }
+        };
+        let out = match &model.context {
+            Some(ctx) => ctx.compress(eng, yt, &psi_b, q, mt, SKIP_CUBE_THR, stop)?,
+            None => compress_context_free(yt, &psi_b, q, mt, SKIP_CUBE_THR)?,
+        };
+        // `compress_ar_scale_tile`: independent regions keep their whole tile, dependent ones
+        // drop the half-overlap on every side facing another region.
+        let (core, offset) = if independent || n == 1 {
+            (lt, (0, 0))
+        } else {
+            let cut = HD_MCM_TILE_OVERLAP / 2 / 16;
+            let left = if it.x == 0 { 0 } else { cut };
+            let top = if it.y == 0 { 0 } else { cut };
+            let right = if it.x + it.width >= pic_w { 0 } else { cut };
+            let bottom = if it.y + it.height >= pic_h { 0 } else { cut };
+            let (cw, ch) = (
+                lt.width.checked_sub(left + right),
+                lt.height.checked_sub(top + bottom),
+            );
+            let (Some(cw), Some(ch)) = (cw, ch) else {
+                return Err(Error::InvalidData("region smaller than its overlap"));
+            };
+            (Area::new(lt.x + left, lt.y + top, cw, ch), (left, top))
+        };
+        assign(&mut residual_q, core, &out.residual_q, offset);
+        assign(&mut residual, core, &out.residual, offset);
+        // The cube flags of a region are merged whole, at the latent area downscaled by 16.
+        let (rh, rw) = (
+            lt.height.div_ceil(2).div_ceil(mcm::CUBE_SIZE),
+            lt.width.div_ceil(2).div_ceil(mcm::CUBE_SIZE),
+        );
+        let (cx, cy) = (lt.x.div_ceil(16), lt.y.div_ceil(16));
+        for phase in 0..4 {
+            for y in 0..rh.min(cube_h.saturating_sub(cy)) {
+                for x in 0..rw.min(cube_w.saturating_sub(cx)) {
+                    cube_flag[(phase * cube_h + cy + y) * cube_w + cx + x] =
+                        out.cube_flag[(phase * rh + y) * rw + x];
+                }
+            }
+        }
+    }
+    Ok(mcm::Compressed {
+        residual_q,
+        residual,
+        cube_flag,
+        psi,
+    })
+}
+
+/// The regions of one component's plane, in that plane's coordinates
+/// (`calculate_region_coordinates` at depth 0, on the half-size plane for chroma).
+fn region_area_grid(h: usize, w: usize, num_ver: usize, num_hor: usize) -> Vec<Area> {
+    let axis = |size: usize, n: usize| -> Vec<(usize, usize)> {
+        let region = (size.div_ceil(128) / n) * 128;
+        (0..n)
+            .map(|i| (i * region, if i + 1 < n { (i + 1) * region } else { size }))
+            .collect()
+    };
+    let (ver, hor) = (axis(h, num_ver), axis(w, num_hor));
+    let mut out = Vec::with_capacity(ver.len() * hor.len());
+    for &(y0, y1) in &ver {
+        for &(x0, x1) in &hor {
+            out.push(Area::new(x0, y0, x1 - x0, y1 - y0));
+        }
+    }
+    out
 }
 
 /// `quant_dequant` with the tools the encoder supports: the gain unit and RVS / GRFS.
@@ -842,6 +1116,7 @@ fn compress_context_free<Q: mcm::Quantiser>(
         residual_q,
         residual,
         cube_flag,
+        psi: Tensor::<f32>::zeros(1, 1, 1)?,
     })
 }
 
@@ -879,6 +1154,22 @@ fn picture_header(
 ) -> PictureHeader {
     use OperatingPoint::{Bop, Hop, Sop};
     let op = params.op;
+    let regions = params.regions.and_then(|mode| {
+        let (num_ver, num_hor) = region_counts(height as usize, width as usize)?;
+        let independent = mode == RegionMode::Independent;
+        Some(Regions {
+            num_ver,
+            num_hor,
+            independent,
+            hyper_decoder_overlap: if independent {
+                0
+            } else {
+                HYPER_DECODER_OVERLAP
+            },
+            mcm_overlap: if independent { 0 } else { MCM_OVERLAP },
+        })
+    });
+    let independent = regions.filter(|r| r.independent);
     // `cfg/profiles/{simple,base,high}.json`.
     let (decoder_profile_id, synthesis_transforms) = match op {
         Sop => (0, alloc::vec![Sop]),
@@ -903,7 +1194,7 @@ fn picture_header(
         model_id,
         num_threads_z: params.num_threads_z,
         beta_displacement_log,
-        regions: None,
+        regions,
         // `tile_manager_synthesis` is set up from the coded luma size for both components.
         components: [0, 1].map(|ccs| ComponentHeader {
             num_threads_r: params.num_threads_r,
@@ -911,7 +1202,11 @@ fn picture_header(
             cube_flags: None,
             rvs_enabled: false,
             grfs_channel_flags: None,
-            synthesis_tiling: tiles::synthesis_tiling(height as usize, width as usize),
+            synthesis_tiling: tiles::synthesis_tiling(
+                height as usize,
+                width as usize,
+                independent.map(|r| (r.num_ver as usize, r.num_hor as usize)),
+            ),
         }),
         quality_map: None,
     }

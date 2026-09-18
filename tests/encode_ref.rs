@@ -146,7 +146,7 @@ fn analysis_tiers_agree_bit_for_bit() {
 // through both decoders.
 
 use std::path::Path;
-use zenjpegai::encoder::{EncodeParams, Encoder, preprocess_rgb, read_png_rgb8};
+use zenjpegai::encoder::{EncodeParams, Encoder, RegionMode, preprocess_rgb, read_png_rgb8};
 
 /// (`vector`, source image, `model_id`, operating point, `beta_displacement_log`, tools) of
 /// every fixed-model encode `make_reference_streams.sh encoder` produces.
@@ -228,6 +228,7 @@ const VECTORS_BASE: &[(&str, &str, u8, OperatingPoint, i32)] = &[
 ];
 
 const IMG30: &str = "00030_TE_560x888_8bit_sRGB.png";
+const IMG01: &str = "00001_TE_2096x1400_8bit_sRGB.png";
 
 /// The coding tools the encoder can switch on, each against its own reference encode.
 const VECTORS_TOOLS: &[ToolVector] = &[
@@ -278,6 +279,28 @@ const VECTORS_TOOLS: &[ToolVector] = &[
         OperatingPoint::Bop,
         0,
         |p| EncodeParams { lsbs: true, ..p },
+    ),
+    (
+        "enc_img01_bop_m1_b0_depregions",
+        IMG01,
+        1,
+        OperatingPoint::Bop,
+        0,
+        |p| EncodeParams {
+            regions: Some(RegionMode::Dependent),
+            ..p
+        },
+    ),
+    (
+        "enc_img01_bop_m1_b0_indregions",
+        IMG01,
+        1,
+        OperatingPoint::Bop,
+        0,
+        |p| EncodeParams {
+            regions: Some(RegionMode::Independent),
+            ..p
+        },
     ),
 ];
 
@@ -335,28 +358,18 @@ fn present(vector: &str) -> bool {
 /// that our analysis tile grid is the reference's, tile for tile.
 #[test]
 fn colour_preprocessing_matches_reference() {
-    use zenjpegai::encoder::analysis_tiles;
     let mut ran = 0;
     for v in vectors() {
         let (vector, image) = (v.name, v.image);
         let dump = load_encoder_dump(&vector_dir(vector).join("enc2"));
-        let input = preprocess_rgb(&source(image)).unwrap();
+        let picture = source(image);
+        let input = preprocess_rgb(&picture).unwrap();
         for (ccs, (net, plane)) in [("analysis_y", &input.luma), ("analysis_uv", &input.chroma)]
             .into_iter()
             .enumerate()
         {
-            let d = [16usize, 8][ccs];
-            let (lh, lw) = (plane.h.div_ceil(d), plane.w.div_ceil(d));
-            let tiles = analysis_tiles(
-                ccs,
-                plane.h,
-                plane.w,
-                lh,
-                lw,
-                plane.h.div_ceil(4 * d),
-                plane.w.div_ceil(4 * d),
-            )
-            .unwrap();
+            let tiles = Encoder::analysis_tile_grid(picture.width, picture.height, ccs, v.params())
+                .unwrap();
             for (i, t) in tiles.iter().enumerate() {
                 let key = format!("{net}.{i}.in");
                 let want = dump
@@ -554,6 +567,11 @@ fn encoder_end_to_end_matches_reference() {
 }
 
 /// The reference decoder must accept our streams and produce the same picture.
+///
+/// Region streams go through `dump_decode.py --contiguous-masks`: the stock reference decoder
+/// mis-decodes *any* stream with `region_partitioning_flag = 1`, its own included (the
+/// non-contiguous mask it hands the C++ coder; see `PORTING.md`), so the patched decoder is the
+/// only oracle for them.
 #[test]
 #[ignore = "runs the reference decoder (Python); enable with --ignored"]
 fn reference_decoder_accepts_our_streams() {
@@ -561,21 +579,34 @@ fn reference_decoder_accepts_our_streams() {
         let (vector, params) = (v.name, v.params());
         let enc = Encoder::new(ref_root().join("models"));
         let stream = enc.encode(&source(v.image), params).unwrap();
-        let dir = std::env::temp_dir();
-        let _ = dir;
         let scratch = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/refdec");
         std::fs::create_dir_all(&scratch).unwrap();
         let bits = scratch.join(format!("{vector}.bits"));
         let png = scratch.join(format!("{vector}.png"));
         std::fs::write(&bits, &stream).unwrap();
+        let regions = params.regions.is_some();
+        let cmd = if regions {
+            let out = scratch.join(vector);
+            format!(
+                "python {}/scripts/ref_vectors/dump_decode.py {} {} --contiguous-masks && cp {}/decoded.png {}",
+                env!("CARGO_MANIFEST_DIR"),
+                bits.display(),
+                out.display(),
+                out.display(),
+                png.display()
+            )
+        } else {
+            format!(
+                "python -m src.reco.coders.decoder {} {} -target_device cpu",
+                bits.display(),
+                png.display()
+            )
+        };
         let status = std::process::Command::new("bash")
             .arg("-lc")
             .arg(format!(
-                ". {}/.venv/bin/activate && cd {} && python -m src.reco.coders.decoder {} {} -target_device cpu",
-                ref_root().display(),
-                ref_root().display(),
-                bits.display(),
-                png.display()
+                ". {ref}/.venv/bin/activate && cd {ref} && PYTHONPATH=. {cmd}",
+                ref = ref_root().display()
             ))
             .status()
             .unwrap();
@@ -597,7 +628,10 @@ fn reference_decoder_accepts_our_streams() {
             .zip(&theirs.data)
             .filter(|(a, b)| a != b)
             .count();
-        println!("{vector}: reference decode differs in {differing} samples, worst {worst}");
+        println!(
+            "{vector}: reference decode differs in {differing} of {} samples, worst {worst}",
+            ours.data.len()
+        );
         assert!(worst <= 1, "{vector}: reference decode differs by {worst}");
     }
 }

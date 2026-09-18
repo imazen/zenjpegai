@@ -70,6 +70,27 @@ pub fn analysis_tiles(
     hz: usize,
     wz: usize,
 ) -> Result<Vec<AnalysisTile>> {
+    analysis_tiles_with(ccs, h, w, lh, lw, hz, wz, None)
+}
+
+/// [`analysis_tiles`], with the region grid (in this component's plane coordinates) when
+/// independent regions force the tile size and the region-aware layout
+/// (`_init_image_tiles` + `_add_overlap`, and the region branch of
+/// `_get_core_of_overlapping_tile`).
+#[allow(clippy::too_many_arguments)]
+pub fn analysis_tiles_with(
+    ccs: usize,
+    h: usize,
+    w: usize,
+    lh: usize,
+    lw: usize,
+    hz: usize,
+    wz: usize,
+    regions: Option<(&[Area], usize)>,
+) -> Result<Vec<AnalysisTile>> {
+    if let Some((areas, size)) = regions {
+        return region_analysis_tiles(ccs, h, w, lh, lw, hz, wz, areas, size);
+    }
     let Some(size) = tile_size(ccs, h, w) else {
         return Ok(alloc::vec![AnalysisTile {
             image: Area::new(0, 0, w, h),
@@ -134,6 +155,105 @@ pub fn analysis_tiles(
     Ok(tiles)
 }
 
+/// `_init_image_tiles` + `_add_overlap` and the region branch of `_get_core_of_overlapping_tile`,
+/// at this component's resolution. `areas` are the regions in plane coordinates.
+#[allow(clippy::too_many_arguments)]
+fn region_analysis_tiles(
+    ccs: usize,
+    h: usize,
+    w: usize,
+    lh: usize,
+    lw: usize,
+    hz: usize,
+    wz: usize,
+    areas: &[Area],
+    size: usize,
+) -> Result<Vec<AnalysisTile>> {
+    let overlap = IND_REGION_TILE_OVERLAP[ccs];
+    let (yd, zd) = (LATENT_DOWNSCALE[ccs], HYPER_DOWNSCALE[ccs]);
+    let half = overlap / 2;
+    let (tile_h, tile_w) = (size.min(h), size.min(w));
+    let mut tiles = Vec::new();
+    for ty in (0..h).step_by(tile_h) {
+        for tx in (0..w).step_by(tile_w) {
+            let (mut x, mut y) = (tx, ty);
+            let (mut tw, mut th) = (tile_w.min(w - tx), tile_h.min(h - ty));
+            let (x_end, y_end) = (x + tw - 1, y + th - 1);
+            for r in areas {
+                if !(contains(r, x, y) && contains(r, x_end, y_end)) {
+                    continue;
+                }
+                if y > r.y {
+                    y -= half.min(y);
+                    th += half;
+                }
+                if x > r.x {
+                    x -= half.min(x);
+                    tw += half;
+                }
+                if y_end < r.y + r.height - 1 {
+                    th += half.min(h.saturating_sub(y + th));
+                }
+                if x_end < r.x + r.width - 1 {
+                    tw += half.min(w.saturating_sub(x + tw));
+                }
+            }
+            let image = Area::new(x, y, tw, th);
+            let grid = |down: usize, full_h: usize, full_w: usize| -> Result<Area> {
+                Ok(Area::new(
+                    image.x / down,
+                    image.y / down,
+                    extent(image.x, image.width, down, full_w)?,
+                    extent(image.y, image.height, down, full_h)?,
+                ))
+            };
+            let latent = grid(yd, lh, lw)?;
+            let hyper = grid(zd, hz, wz)?;
+            // The region branch trims only the sides that face another region.
+            let core = |a: Area, down: usize| -> (Area, (usize, usize)) {
+                let o = overlap / 2 / down;
+                let (mut cx, mut cy) = (a.x, a.y);
+                let (mut cw, mut ch) = (a.width, a.height);
+                let (mut left, mut top) = (0, 0);
+                for r in areas {
+                    if !(contains(r, x, y) && contains(r, x + tw - 1, y + th - 1)) {
+                        continue;
+                    }
+                    if cy * down > r.y {
+                        top += o;
+                        cy += o;
+                        ch = ch.saturating_sub(o);
+                    }
+                    if cx * down > r.x {
+                        left += o;
+                        cx += o;
+                        cw = cw.saturating_sub(o);
+                    }
+                    ch = ch.min(tile_h.div_ceil(down));
+                    cw = cw.min(tile_w.div_ceil(down));
+                }
+                (Area::new(cx, cy, cw, ch), (left, top))
+            };
+            let (latent_core, latent_core_offset) = core(latent, yd);
+            let (hyper_core, hyper_core_offset) = core(hyper, zd);
+            tiles.push(AnalysisTile {
+                image,
+                latent,
+                latent_core,
+                latent_core_offset,
+                hyper,
+                hyper_core,
+                hyper_core_offset,
+            });
+        }
+    }
+    Ok(tiles)
+}
+
+fn contains(r: &Area, x: usize, y: usize) -> bool {
+    r.x <= x && x < r.x + r.width && r.y <= y && y < r.y + r.height
+}
+
 /// `_get_latent_tile_from_image_tile` for one axis: a tile whose size is not a multiple of the
 /// downscale factor must end at the plane border.
 fn extent(pos: usize, len: usize, down: usize, full: usize) -> Result<usize> {
@@ -145,9 +265,47 @@ fn extent(pos: usize, len: usize, down: usize, full: usize) -> Result<usize> {
     Ok(len.div_ceil(down))
 }
 
+/// `cfg/tools/IndependentRegions.json`: `numSamplesTileOverlap` of `tile_manager_enc` per
+/// component, and of `tile_manager_synthesis`.
+pub const IND_REGION_TILE_OVERLAP: [usize; 2] = [128, 64];
+pub const IND_REGION_SYNTHESIS_OVERLAP: u32 = 128;
+
+/// `sep_chan_tool.py::cfg_update_for_conformance`: with independent regions the synthesis (and
+/// analysis) tile size is forced so that a whole number of tiles fits in a region. Note that the
+/// reference divides the *vertical* region size by `numHorRegions` and vice versa.
+pub fn conformance_tile_size(height: usize, width: usize, num_ver: usize, num_hor: usize) -> usize {
+    let ver = (height.div_ceil(128) / num_hor) * 128;
+    let hor = (width.div_ceil(128) / num_ver) * 128;
+    match (ver <= height, hor <= width) {
+        (true, true) => gcd(ver, hor),
+        (true, false) => ver,
+        (false, true) => hor,
+        (false, false) => 10000,
+    }
+}
+
+fn gcd(a: usize, b: usize) -> usize {
+    if b == 0 { a } else { gcd(b, a % b) }
+}
+
 /// `tile_manager_synthesis` of both components, computed from the coded luma picture size: the
-/// `synthesis_tiling` the picture header must carry, or `None`.
-pub fn synthesis_tiling(height: usize, width: usize) -> Option<crate::header::SynthesisTiling> {
+/// `synthesis_tiling` the picture header must carry, or `None`. With independent regions the
+/// size comes from [`conformance_tile_size`] instead of `numSamplesPerTile`.
+pub fn synthesis_tiling(
+    height: usize,
+    width: usize,
+    independent_regions: Option<(usize, usize)>,
+) -> Option<crate::header::SynthesisTiling> {
+    if let Some((num_ver, num_hor)) = independent_regions {
+        let size = conformance_tile_size(height, width, num_ver, num_hor);
+        if size * size >= height * width {
+            return None;
+        }
+        return Some(crate::header::SynthesisTiling {
+            tile_size: (size as u32).div_ceil(16) * 16,
+            overlap: IND_REGION_SYNTHESIS_OVERLAP,
+        });
+    }
     if SYNTHESIS_SAMPLES_PER_TILE >= height * width {
         return None;
     }
@@ -231,8 +389,11 @@ mod tests {
 
     #[test]
     fn synthesis_tiling_matches_the_reference_header() {
-        assert_eq!(synthesis_tiling(888, 560), None);
-        let t = synthesis_tiling(1400, 2096).unwrap();
+        assert_eq!(synthesis_tiling(888, 560, None), None);
+        let t = synthesis_tiling(1400, 2096, None).unwrap();
         assert_eq!((t.tile_size, t.overlap), (1024, 64));
+        // Two independent regions side by side force 640 / 128 (`cfg_update_for_conformance`).
+        let t = synthesis_tiling(1400, 2096, Some((1, 2))).unwrap();
+        assert_eq!((t.tile_size, t.overlap), (640, 128));
     }
 }

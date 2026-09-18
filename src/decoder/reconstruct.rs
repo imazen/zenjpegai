@@ -29,7 +29,7 @@ pub struct Latent {
 /// It is not signalled: both managers are built with the parameter's default, and with dependent
 /// regions it decides how much of each region's result is dropped before merging
 /// (`48 / 2 / 32 = 0` psi samples, `48 / 2 / 16 = 1` latent sample per interior side).
-const HD_MCM_TILE_OVERLAP: usize = 48;
+pub(crate) const HD_MCM_TILE_OVERLAP: usize = 48;
 
 /// `tiling.get_data` + `tiling.assign_data`: copy `src[:, oy.., ox..]` into `dst` at `core`,
 /// clamped the way tensor slicing clamps.
@@ -55,7 +55,7 @@ fn assign(dst: &mut Tensor<f32>, core: Area, src: &Tensor<f32>, (ox, oy): (usize
 /// Rows/columns the hyper-decoder crops after its transposed convolution
 /// (`cropping_layer(.., depth = 5)`, `parse_size_diff`); `divider` is 32 for luma and 16 for
 /// chroma (`skip_depth_step`).
-fn hyper_crop(len: usize, divider: usize) -> usize {
+pub(crate) fn hyper_crop(len: usize, divider: usize) -> usize {
     2 * len.div_ceil(2 * divider) - len.div_ceil(divider)
 }
 
