@@ -19,6 +19,7 @@ use crate::mans::AnsTables;
 use crate::model::synthesis::{SynthesisPrimary, SynthesisSecondary};
 use crate::model::{self, CommonModel, ModelDir, ModelSource};
 use crate::nn::fast::Engine;
+use crate::tensor::Tensor;
 
 /// Networks of one (model, operating point) pair, packed for the decoder's engine.
 struct ModelSet {
@@ -261,8 +262,25 @@ impl Decoder {
         record(probe.map(|p| &p.models), t);
         let eng = &self.engine;
 
-        // Entropy decode, latent reconstruction and LSBS run as two per-component chains
-        // (luma ‖ chroma): chroma's entropy decode overlaps luma's reconstruction. Only the
+        // Synthesis geometry comes from the header alone (`latent_size(0)` is what
+        // `y_hat[0]`'s dimensions will be): set the tiles and output planes up before the
+        // chains so the luma chain can run its synthesis while chroma is still decoding.
+        let (lat_h, lat_w) = hdr.latent_size(0);
+        let (tiles, out_h, out_w) =
+            reconstruct::synthesis_geometry(hdr, (lat_h as usize, lat_w as usize))
+                .map_err(|e| at!(e))?;
+        let (sv, sh) = (hdr.c_ver as usize, hdr.c_hor as usize);
+        if sv == 0 || sh == 0 {
+            return Err(at!(Error::InvalidData("chroma subsampling factor")));
+        }
+        let (ch, cw) = (out_h.div_ceil(sv), out_w.div_ceil(sh));
+        let mut rec_y = Tensor::<f32>::zeros(1, out_h, out_w).map_err(|e| at!(e))?;
+        let mut rec_u = Tensor::<f32>::zeros(1, ch, cw).map_err(|e| at!(e))?;
+        let mut rec_v = Tensor::<f32>::zeros(1, ch, cw).map_err(|e| at!(e))?;
+
+        // Entropy decode, latent reconstruction, LSBS and the luma synthesis run as two
+        // per-component chains (luma ‖ chroma): chroma's entropy decode overlaps luma's
+        // reconstruction, and luma's synthesis overlaps the chroma chain's tail. Only the
         // luma scale map survives the stage, and only when the post-filters read it.
         let t = Tick::now();
         let filters_on = headers.tools.any_post_filter();
@@ -275,6 +293,13 @@ impl Decoder {
             [&set.common[0], &set.common[1]],
             self.max_channels,
             filters_on,
+            Some(reconstruct::LumaSynth {
+                tiles: &tiles,
+                model: &set.luma,
+                out_h,
+                out_w,
+                rec_y: &mut rec_y,
+            }),
             probe,
             stop,
         )
@@ -282,15 +307,31 @@ impl Decoder {
         record(probe.map(|p| &p.chains), t);
 
         let t = Tick::now();
-        let planes = reconstruct::synthesize_with(
+        if ly.y_hat.h != luv.y_hat.h || ly.y_hat.w != luv.y_hat.w {
+            return Err(at!(Error::InvalidArgument(
+                "luma / chroma latent size mismatch"
+            )));
+        }
+        reconstruct::synthesize_chroma_into(
             eng,
-            hdr,
-            &set.luma,
+            &tiles,
             &set.chroma,
-            [&ly.y_hat, &luv.y_hat],
+            &ly.y_hat,
+            &luv.y_hat,
+            sv,
+            sh,
+            out_h,
+            out_w,
+            &mut rec_u,
+            &mut rec_v,
             stop,
         )
         .map_err(|e| at!(e))?;
+        let planes = reconstruct::Planes {
+            y: rec_y,
+            u: rec_u,
+            v: rec_v,
+        };
         drop((ly, luv));
         record(probe.map(|p| &p.synthesis), t);
         // Coded chroma format -> source chroma format, then the post-filters, then colour.

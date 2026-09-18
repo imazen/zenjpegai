@@ -377,6 +377,7 @@ fn decode_residual_single(
 
 /// [`decode_residual_strided`], writing the thread's symbols compactly: `out[k]` is the
 /// symbol at position `first + n * k`. Same reads, same order — only the writes differ.
+#[cfg(feature = "parallel")]
 #[allow(clippy::too_many_arguments)]
 fn decode_residual_compact(
     tables: &ResidualTables,

@@ -1,0 +1,10 @@
+command: THREADS="1 8 16" RUNS=3 scripts/bench/decode_end_to_end.sh   (no -C target-cpu=native; runtime dispatch)
+source: d4serial workspace — parallel entropy bodies/regions, region-parallel latent
+        reconstruction, per-phase synthesis with the luma transform overlapped with the
+        chroma chain, chunked-parallel output. Baseline for the deltas is
+        decode_end_to_end_2026-09-18_d2native{,_base}.tsv plus an interleaved A/B run
+        (same binaries back to back) recorded in the d4serial report.
+host: dev workstation, AMD Ryzen 9 9950X3D (16c/32T), Linux 7.0, rustc 1.98.1
+date: 2026-09-18
+notes: the box is shared; parts of this run overlapped a GPU benchmark — per-row mins
+       are load-inflated on BOTH decoders. The interleaved A/B mins are the clean delta.

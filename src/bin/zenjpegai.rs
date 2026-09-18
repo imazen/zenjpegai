@@ -726,6 +726,7 @@ fn print_decode_stats(run: usize, s: &zenjpegai::DecodeStats) {
     row("post_process_0", s.post_process[0]);
     row("post_process_1", s.post_process[1]);
     row("chains", s.chains);
+    row("synthesis_luma", s.synthesis_luma);
     row("synthesis", s.synthesis);
     row("chroma_convert", s.chroma_convert);
     row("filters", s.filters);

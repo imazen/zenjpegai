@@ -247,9 +247,9 @@ fn convert_pixels(
     b: &mut [f32],
     f: impl Fn((f32, f32, f32)) -> (f32, f32, f32) + Sync + Send,
 ) {
-    const BLK: usize = 16384;
     #[cfg(feature = "parallel")]
     if parallel {
+        const BLK: usize = 16384;
         use rayon::prelude::*;
         r.par_chunks_mut(BLK)
             .zip(g.par_chunks_mut(BLK))

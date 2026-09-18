@@ -1,0 +1,15 @@
+command: THREADS="1 8 16" RUNS=4 scripts/bench/decode_stages.sh
+         (no -C target-cpu=native; runtime dispatch) — then wasip1 rows appended:
+         wasmtime --dir $MODELS --dir $VEC target/wasm32-wasip1/release/zenjpegai.wasm
+           decode $VEC/<s>/stream.bits /dev/null --discard --stats --repeat 3 --models $MODELS
+source: d4serial workspace — decoder stage timing + parallel entropy/latent/synthesis;
+        `threads` column is the rayon pool size; `wasip1` = wasmtime 40, single thread,
+        Wasm128 tier (std clock; bare wasm32-unknown-unknown has none — probes are no-ops there)
+host: dev workstation, AMD Ryzen 9 9950X3D (16c/32T), Linux 7.0, rustc 1.98.1
+date: 2026-09-18
+notes: run 0 includes model load (see `models` row); steady state is min over runs 1...
+       Per-component rows (*_0 luma, *_1 chroma) are task times inside the joined chains —
+       they overlap each other and can sum past the `chains` wall row. `synthesis_luma` is
+       inside `chains` (it overlaps the chroma chain's tail); `synthesis` is the chroma
+       transform after the join. `decode_wall` is the CLI's per-run total.
+       The box was shared during this run — treat per-row mins as load-inflated.

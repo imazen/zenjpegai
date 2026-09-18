@@ -17,7 +17,7 @@ use crate::nn::fast::{BTensor, Engine};
 use crate::tensor::Tensor;
 use crate::tools::lsbs;
 use crate::tools::regions::{Area, Plane, region_grid};
-use crate::tools::tiles::synthesis_tiles;
+use crate::tools::tiles::{SynthesisTile, synthesis_tiles};
 
 /// Latent-domain result for one component.
 #[derive(Clone, Debug)]
@@ -113,7 +113,6 @@ pub(crate) fn reconstruct_latent_timed(
     stop: &dyn Stop,
     probe: Option<&Probe>,
 ) -> Result<Latent> {
-    let t_lat = Tick::now();
     let (h, w) = (e.residual.h, e.residual.w);
     let chs = e.residual.c;
     let independent = hdr.regions.is_some_and(|r| r.independent);
@@ -224,7 +223,6 @@ pub(crate) fn reconstruct_latent_timed(
         assign_par(eng.parallel, &mut y_hat, core, y, offset);
     }
     record(Probe::field(probe, ccs, |p| &p.mcm), t);
-    record(Probe::field(probe, ccs, |p| &p.latent), t_lat);
     Ok(Latent { psi, y_hat })
 }
 
@@ -293,35 +291,11 @@ pub fn synthesize_with(
 ) -> Result<Planes> {
     let gate = Gate::new(stop);
     let stop = &gate;
-    let (h, w) = (hdr.height as usize, hdr.width as usize);
-    let out_h = h - hdr.diff_display_height as usize;
-    let out_w = w - hdr.diff_display_width as usize;
-
-    // The reference looks the luma tile's y_hat up by the chroma tile's picture area, so both
-    // components must be tiled identically.
-    if hdr.components[0].synthesis_tiling != hdr.components[1].synthesis_tiling {
-        return Err(Error::Unsupported(
-            "different synthesis tiling for luma and chroma",
-        ));
-    }
     if y_hat[0].h != y_hat[1].h || y_hat[0].w != y_hat[1].w {
         return Err(Error::InvalidArgument("luma / chroma latent size mismatch"));
     }
-    // Tiles only respect region borders when regions are independently decodable.
-    let independent_regions = hdr
-        .regions
-        .filter(|r| r.independent)
-        .map(|_| region_grid(hdr, 0, Plane::Image));
-    let tiles = synthesis_tiles(
-        h,
-        w,
-        y_hat[0].h,
-        y_hat[0].w,
-        hdr.components[0].synthesis_tiling,
-        independent_regions.as_ref(),
-    )?;
+    let (tiles, out_h, out_w) = synthesis_geometry(hdr, (y_hat[0].h, y_hat[0].w))?;
 
-    let v = eng.tier.block();
     // Tiles are written straight into the output planes: luma cropped to the displayed size,
     // chroma subsampled (`rec_UV[:, :, :out_h:c_ver, :out_w:c_hor]`). Full-size staging planes
     // would triple the memory held here.
@@ -333,34 +307,95 @@ pub fn synthesize_with(
     let mut rec_y = Tensor::<f32>::zeros(1, out_h, out_w)?;
     let mut rec_u = Tensor::<f32>::zeros(1, ch, cw)?;
     let mut rec_v = Tensor::<f32>::zeros(1, ch, cw)?;
-    for tile in &tiles {
+    // The two component phases share only their inputs: all luma tiles on one side of the
+    // join, all chroma tiles on the other, so the tail of one overlaps the ramp-up of the
+    // other. Tiles inside a phase are independent (disjoint core writes) and map in parallel.
+    let (ry, ruv) = join2(
+        eng.parallel,
+        || synthesize_luma_into(eng, &tiles, luma, y_hat[0], out_h, out_w, &mut rec_y, stop),
+        || {
+            synthesize_chroma_into(
+                eng, &tiles, chroma, y_hat[0], y_hat[1], sv, sh, out_h, out_w, &mut rec_u,
+                &mut rec_v, stop,
+            )
+        },
+    );
+    ry?;
+    ruv?;
+    Ok(Planes {
+        y: rec_y,
+        u: rec_u,
+        v: rec_v,
+    })
+}
+
+/// The geometry half of [`synthesize_with`]: output size + tile list, from the header and the
+/// luma latent size `lat_hw` (which `hdr.latent_size(0)` gives before any decoding — letting
+/// [`crate::Decoder`] set synthesis up early so luma synthesis overlaps the chroma chain).
+pub(crate) fn synthesis_geometry(
+    hdr: &PictureHeader,
+    lat_hw: (usize, usize),
+) -> Result<(Vec<SynthesisTile>, usize, usize)> {
+    let (h, w) = (hdr.height as usize, hdr.width as usize);
+    let out_h = h - hdr.diff_display_height as usize;
+    let out_w = w - hdr.diff_display_width as usize;
+    // The reference looks the luma tile's y_hat up by the chroma tile's picture area, so both
+    // components must be tiled identically.
+    if hdr.components[0].synthesis_tiling != hdr.components[1].synthesis_tiling {
+        return Err(Error::Unsupported(
+            "different synthesis tiling for luma and chroma",
+        ));
+    }
+    // Tiles only respect region borders when regions are independently decodable.
+    let independent_regions = hdr
+        .regions
+        .filter(|r| r.independent)
+        .map(|_| region_grid(hdr, 0, Plane::Image));
+    let tiles = synthesis_tiles(
+        h,
+        w,
+        lat_hw.0,
+        lat_hw.1,
+        hdr.components[0].synthesis_tiling,
+        independent_regions.as_ref(),
+    )?;
+    Ok((tiles, out_h, out_w))
+}
+
+/// Everything the luma component chain needs to run its synthesis while the chroma chain is
+/// still decoding: tile list + model + the `rec_y` plane to write (displayed size).
+pub(crate) struct LumaSynth<'a> {
+    pub tiles: &'a [SynthesisTile],
+    pub model: &'a SynthesisPrimary,
+    pub out_h: usize,
+    pub out_w: usize,
+    pub rec_y: &'a mut Tensor<f32>,
+}
+
+/// Luma synthesis of every tile into `rec_y` (`SynthesisPrimary`, cropped to the displayed
+/// size). The tile work is independent — disjoint core rectangles — and runs on the pool.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn synthesize_luma_into(
+    eng: &Engine,
+    tiles: &[SynthesisTile],
+    luma: &SynthesisPrimary,
+    y_hat: &Tensor<f32>,
+    out_h: usize,
+    out_w: usize,
+    rec_y: &mut Tensor<f32>,
+    stop: &dyn Stop,
+) -> Result<()> {
+    let v = eng.tier.block();
+    let tiles_out = par_map(eng.parallel, tiles.len(), |i| {
         stop.check()?;
+        let tile = &tiles[i];
         let (img, lat) = (tile.image, tile.latent);
-        let whole = lat.width == y_hat[0].w && lat.height == y_hat[0].h;
-        let blocked = |t: &Tensor<f32>| -> Result<BTensor> {
-            let win;
-            let src = if whole {
-                t
-            } else {
-                win = t.window(lat.x, lat.y, lat.width, lat.height)?;
-                &win
-            };
-            BTensor::from_planar_par(eng, src, v)
-        };
-        let (by, buv) = join2(eng.parallel, || blocked(y_hat[0]), || blocked(y_hat[1]));
-        let (by, buv) = (by?, buv?);
+        let by = blocked_latent(eng, y_hat, lat, v)?;
+        luma.forward_with(eng, &by, img.height, img.width, stop)
+    })?;
+    for (tile, ty) in tiles.iter().zip(&tiles_out) {
         let (ox, oy) = tile.core_offset;
         let core = tile.core;
-
-        // The two transforms share only their inputs: run them side by side so the tail of
-        // one overlaps the ramp-up of the other.
-        let (ty, tuv) = join2(
-            eng.parallel,
-            || luma.forward_with(eng, &by, img.height, img.width, stop),
-            || chroma.forward_with(eng, &by, &buv, img.height, img.width, stop),
-        );
-        let (ty, tuv) = (ty?, tuv?);
-        drop((by, buv));
         let cols = core.width.min(out_w.saturating_sub(core.x));
         if ty.h < oy + core.height || ty.w < ox + core.width {
             return Err(Error::InvalidData("synthesis tile smaller than its core"));
@@ -370,11 +405,47 @@ pub fn synthesize_with(
             let d = (core.y + y) * out_w + core.x;
             rec_y.data[d..d + cols].copy_from_slice(s);
         }
-        drop(ty);
+    }
+    Ok(())
+}
+
+/// Chroma synthesis of every tile into `rec_u`/`rec_v` (`SynthesisSecondary` reads both
+/// components' blocked latents), subsampled per `sv`/`sh`. Independent per tile.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn synthesize_chroma_into(
+    eng: &Engine,
+    tiles: &[SynthesisTile],
+    chroma: &SynthesisSecondary,
+    y_hat_y: &Tensor<f32>,
+    y_hat_uv: &Tensor<f32>,
+    sv: usize,
+    sh: usize,
+    out_h: usize,
+    out_w: usize,
+    rec_u: &mut Tensor<f32>,
+    rec_v: &mut Tensor<f32>,
+    stop: &dyn Stop,
+) -> Result<()> {
+    let v = eng.tier.block();
+    let cw = out_w.div_ceil(sh);
+    let tiles_out = par_map(eng.parallel, tiles.len(), |i| {
+        stop.check()?;
+        let tile = &tiles[i];
+        let (img, lat) = (tile.image, tile.latent);
+        let (by, buv) = join2(
+            eng.parallel,
+            || blocked_latent(eng, y_hat_y, lat, v),
+            || blocked_latent(eng, y_hat_uv, lat, v),
+        );
+        chroma.forward_with(eng, &by?, &buv?, img.height, img.width, stop)
+    })?;
+    for (tile, tuv) in tiles.iter().zip(&tiles_out) {
+        let (ox, oy) = tile.core_offset;
+        let core = tile.core;
         if tuv.c != 2 || tuv.h < oy + core.height || tuv.w < ox + core.width {
             return Err(Error::InvalidData("synthesis tile smaller than its core"));
         }
-        for (c, dst) in [&mut rec_u, &mut rec_v].into_iter().enumerate() {
+        for (c, dst) in [&mut *rec_u, &mut *rec_v].into_iter().enumerate() {
             let src = tuv.plane(c);
             // Picture rows / columns of this tile's core that survive the subsampling.
             for py in (core.y.next_multiple_of(sv)..(core.y + core.height).min(out_h)).step_by(sv) {
@@ -388,9 +459,17 @@ pub fn synthesize_with(
             }
         }
     }
-    Ok(Planes {
-        y: rec_y,
-        u: rec_u,
-        v: rec_v,
-    })
+    Ok(())
+}
+
+/// A tile's `y_hat` window as a blocked tensor (whole tensor when the tile spans it).
+fn blocked_latent(eng: &Engine, t: &Tensor<f32>, lat: Area, v: usize) -> Result<BTensor> {
+    let win;
+    let src = if lat.width == t.w && lat.height == t.h {
+        t
+    } else {
+        win = t.window(lat.x, lat.y, lat.width, lat.height)?;
+        &win
+    };
+    BTensor::from_planar_par(eng, src, v)
 }

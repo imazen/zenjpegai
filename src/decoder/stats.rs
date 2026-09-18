@@ -14,11 +14,16 @@ use core::time::Duration;
 use crate::error::Result;
 
 /// A monotonic timestamp for stage timing. On `std` builds this wraps
-/// [`std::time::Instant`]; without `std` it is a zero-sized value whose
-/// [`elapsed`](Self::elapsed) is always [`Duration::ZERO`].
+/// [`std::time::Instant`]; without `std` — and on bare `wasm32-unknown-unknown`, where
+/// `std` exists but `Instant::now()` panics (no clock in that std) — it is a zero-sized
+/// value whose [`elapsed`](Self::elapsed) is always [`Duration::ZERO`]. `wasm32-wasip1`
+/// keeps a real clock (WASI provides one).
 #[derive(Clone, Copy)]
 pub(crate) struct Tick {
-    #[cfg(feature = "std")]
+    #[cfg(all(
+        feature = "std",
+        not(all(target_arch = "wasm32", target_os = "unknown"))
+    ))]
     t: std::time::Instant,
 }
 
@@ -26,16 +31,25 @@ impl Tick {
     #[inline]
     pub(crate) fn now() -> Self {
         Self {
-            #[cfg(feature = "std")]
+            #[cfg(all(
+                feature = "std",
+                not(all(target_arch = "wasm32", target_os = "unknown"))
+            ))]
             t: std::time::Instant::now(),
         }
     }
 
     #[inline]
     pub(crate) fn elapsed(self) -> Duration {
-        #[cfg(feature = "std")]
+        #[cfg(all(
+            feature = "std",
+            not(all(target_arch = "wasm32", target_os = "unknown"))
+        ))]
         return self.t.elapsed();
-        #[cfg(not(feature = "std"))]
+        #[cfg(any(
+            not(feature = "std"),
+            all(target_arch = "wasm32", target_os = "unknown")
+        ))]
         Duration::ZERO
     }
 }
@@ -80,9 +94,11 @@ pub(crate) struct Probe {
     pub mcm: [AtomicU64; 2],
     /// `post_process_latent` (LSBS) per component.
     pub lsbs: [AtomicU64; 2],
-    /// The joined per-component chains (entropy + latent + LSBS), wall time.
+    /// The joined per-component chains (entropy + latent + LSBS + luma synthesis), wall time.
     pub chains: AtomicU64,
-    /// Synthesis transform.
+    /// Luma synthesis transform, run inside the luma chain (task time).
+    pub synthesis_luma: AtomicU64,
+    /// Chroma synthesis transform after the chains join, wall time.
     pub synthesis: AtomicU64,
     /// Coded chroma format → source chroma format.
     pub chroma: AtomicU64,
@@ -129,6 +145,7 @@ impl Probe {
             latent_mcm: pair(&self.mcm),
             post_process: pair(&self.lsbs),
             chains: d(&self.chains),
+            synthesis_luma: d(&self.synthesis_luma),
             synthesis: d(&self.synthesis),
             chroma_convert: d(&self.chroma),
             filters: d(&self.filters),
@@ -297,9 +314,13 @@ pub struct DecodeStats {
     pub latent_mcm: [Duration; 2],
     /// LSBS latent post-processing per component.
     pub post_process: [Duration; 2],
-    /// The joined per-component chains, wall time (≈ the longer of the two).
+    /// The joined per-component chains (entropy + latent + LSBS + luma synthesis), wall time
+    /// (≈ the longer of the two).
     pub chains: Duration,
-    /// Synthesis transform.
+    /// Luma synthesis transform; it runs inside the luma chain, overlapped with the chroma
+    /// chain's tail (task time, already inside `chains`).
+    pub synthesis_luma: Duration,
+    /// Chroma synthesis transform after the chains join, wall time.
     pub synthesis: Duration,
     /// Coded chroma format → source chroma format (e.g. 4:4:4 → 4:2:0 upsampling).
     pub chroma_convert: Duration,

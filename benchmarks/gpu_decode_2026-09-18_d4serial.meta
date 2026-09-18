@@ -1,0 +1,7 @@
+command: RAYON_NUM_THREADS=8 nice -n 19 ./target/release/examples/gpu_bench --adapter "RTX 2080" \
+           --models $ZENJPEGAI_REF/models --vectors /mnt/v/output/zenjpegai/reference/vectors \
+           --max-size 2048 --rounds 5 --out benchmarks/gpu_decode_2026-09-18_d4serial.tsv
+source: d4serial — the GPU decoder's CPU stages (entropy, latent reconstruction) run on the
+        rayon pool now; compare `decode` rows against gpu_decode_2026-09-18_rtx2080.tsv.
+host: dev workstation, AMD Ryzen 9 9950X3D, NVIDIA RTX 2080 (Vulkan, NVIDIA 580.178.04)
+date: 2026-09-18

@@ -253,8 +253,9 @@ fn decode_entropy_impl(
 /// Entropy stage + latent reconstruction + LSBS as two per-component chains
 /// (luma ‖ chroma), the arrangement [`crate::Decoder`] uses. Chaining keeps the chroma
 /// entropy decode overlapped with the luma reconstruction — a bigger overlap than decoding
-/// both entropies and then both latents. Returns the latents and the luma scale map (the
-/// post-filters read it).
+/// both entropies and then both latents. When `luma_synth` is given, the luma chain continues
+/// into its synthesis (it only needs the luma latent) while the chroma chain is still
+/// running. Returns the latents and the luma scale map (the post-filters read it).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn decode_components(
     tables: &AnsTables,
@@ -265,6 +266,7 @@ pub(crate) fn decode_components(
     models: [&CommonModel; 2],
     max_channels: [Option<u16>; 2],
     keep_luma_scale: bool,
+    luma_synth: Option<reconstruct::LumaSynth<'_>>,
     probe: Option<&Probe>,
     stop: &dyn enough::Stop,
 ) -> Result<(reconstruct::Latent, reconstruct::Latent, Tensor<i32>)> {
@@ -274,7 +276,8 @@ pub(crate) fn decode_components(
     let [regions0, regions1] = front.regions;
     let chain = |ccs: usize,
                  z: Tensor<i8>,
-                 regions: &[Option<&[u8]>]|
+                 regions: &[Option<&[u8]>],
+                 luma_synth: Option<reconstruct::LumaSynth<'_>>|
      -> Result<(reconstruct::Latent, Tensor<i32>)> {
         let mut e = entropy::decode_component_body(
             tables,
@@ -308,12 +311,19 @@ pub(crate) fn decode_components(
         record(Probe::field(probe, ccs, |p| &p.lsbs), t2);
         record(Probe::field(probe, ccs, |p| &p.latent), t);
         l.psi = Tensor::zeros(0, 0, 0)?;
+        if let Some(s) = luma_synth {
+            let t = Tick::now();
+            reconstruct::synthesize_luma_into(
+                eng, s.tiles, s.model, &l.y_hat, s.out_h, s.out_w, s.rec_y, stop,
+            )?;
+            record(probe.map(|p| &p.synthesis_luma), t);
+        }
         Ok((l, scale_log))
     };
     let (y, uv) = join2(
         parallel,
-        || chain(0, z0, &regions0),
-        || chain(1, z1, &regions1),
+        || chain(0, z0, &regions0, luma_synth),
+        || chain(1, z1, &regions1, None),
     );
     let (ly, scale_log) = y?;
     let (luv, _) = uv?;
