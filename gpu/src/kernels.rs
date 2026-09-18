@@ -245,9 +245,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{
 
 /// Direct convolution with the workgroup's input halo staged in workgroup memory: the
 /// `((WG - 1) * stride + KH)²` pixels load once — coalesced — per `ICH`-block chunk instead of
-/// every lane walking its own `KH x KW` window of scattered `vec4` loads. Each output element's
-/// accumulation order (ky, kx, ic ascending, one multiply-add at a time) is the direct
-/// kernel's exactly. `px` is always 1 here.
+/// every lane walking its own `KH x KW` window of scattered `vec4` loads. For `KH = 1` each
+/// output's accumulation order is the direct kernel's exactly (ic ascending); for `KH > 1` the
+/// loop is `ic0`-chunk outer, tap inner, so the order is chunked over input channels — a
+/// different summation association, measured against the reference (PORTING.md, `gpu/` row),
+/// never loosened. `px` is always 1 here.
 /// Params: `in_h in_w in_c4 out_h out_w out_c4 pad_y pad_x icg4 ocg4` (same as [`conv`]).
 pub fn conv_tiled(v: &ConvVariant, ich: u32) -> String {
     debug_assert!(v.px == 1 && v.icg4.is_multiple_of(ich));

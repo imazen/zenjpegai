@@ -628,8 +628,10 @@ struct Queries {
 /// GPU memory that outlives a picture: activation pool, latent upload buffers, the picture
 /// buffer, the readback staging buffer. Reused across pictures and across models; buffers only
 /// ever grow. One workspace serves one decode at a time.
-#[derive(Default)]
 pub struct Workspace {
+    /// Identity in the plan-cache stamp: plans bind this workspace's buffers, so a second
+    /// workspace must never reuse them even when its generation counters happen to match.
+    id: u64,
     pool: Arc<Mutex<Pool>>,
     latents: [Option<wgpu::Buffer>; 2],
     rec: Option<wgpu::Buffer>,
@@ -678,6 +680,23 @@ fn fit(
     Ok(true)
 }
 
+impl Default for Workspace {
+    fn default() -> Self {
+        static NEXT_ID: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
+        Self {
+            id: NEXT_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed),
+            pool: Default::default(),
+            latents: Default::default(),
+            rec: None,
+            out: None,
+            staging: None,
+            queries: None,
+            generation: 0,
+            profile: false,
+        }
+    }
+}
+
 impl Workspace {
     pub fn new() -> Self {
         Self::default()
@@ -718,8 +737,9 @@ impl Workspace {
             .sum::<u64>()
     }
 
-    fn stamp(&self) -> (u64, u64) {
+    fn stamp(&self) -> (u64, u64, u64) {
         (
+            self.id,
             self.generation,
             self.pool.lock().map(|p| p.generation).unwrap_or(0),
         )
@@ -1070,8 +1090,9 @@ impl GpuPicture {
     }
 }
 
-/// Cached plans and the workspace stamp they were built against.
-type PlanCache = (HashMap<PlanKey, Arc<Plan>>, (u64, u64));
+/// Cached plans and the workspace stamp they were built against (workspace id + buffer
+/// generations).
+type PlanCache = (HashMap<PlanKey, Arc<Plan>>, (u64, u64, u64));
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 struct PlanKey {
@@ -1121,7 +1142,7 @@ impl GpuSynthesis {
             op,
             luma,
             chroma,
-            plans: Mutex::new((HashMap::new(), (0, 0))),
+            plans: Mutex::new((HashMap::new(), (0, 0, 0))),
         })
     }
 
