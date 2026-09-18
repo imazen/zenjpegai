@@ -87,6 +87,19 @@
 - `mans`: me-tANS entropy coder (tables, decoder, encoder), bit-exact against the reference C++ extension.
 
 ### Fixed
+- Browser decode scheduling (`web/`): `DecoderPool` now runs all decodes through one shared
+  priority queue instead of posting every job to a worker at once — at most
+  `min(navigator.hardwareConcurrency, N)` in-flight on the simd build and exactly one on the
+  threads build — and the polyfill + demo only enqueue an image once it is within one viewport
+  height of the viewport, in visibility order (`IntersectionObserver`, re-evaluated function
+  priorities), with a pre-sized placeholder while queued. `pool.stats()` and
+  `timings.queued` expose the scheduling for tests; `web/tests/scheduling.spec.ts` covers the
+  bounds (first-image bound, `maxInflight`, per-image decode <= 2x solo).
+- Demo: the `coi-loader.js` service-worker promotion wait is bounded at 1.5 s so a stalled or
+  blocked SW install can no longer hang the page's top-level await.
+- Demo: the Art Institute of Chicago slot is now corpus item 3008 (a Van der Spelt
+  flower-garland trompe-l'oeil, CC0), replacing the removed dead-chicken still life
+  (`web/demo/IMAGES.md`, `demo-assets-v1` release updated and hash-verified).
 - GPU presentation on hardware (711233ad): the `rgba8unorm` texture is rounded in the shader (half to even, like the CPU output stage) instead of relying on the driver's float-to-unorm conversion, which on NVIDIA disagreed with the CPU output stage on 46,533 of 1,491,840 samples (28 after the fix, all by one step). llvmpipe had agreed, so it only showed on hardware.
 - `Decoder::decode` rejected LSBS streams although LSBS was ported (a stale check; the staged test path did not go through `Decoder`). `tests/decode_ref.rs` now also decodes every stream through `Decoder` and requires identical samples.
 - Tool header: `icci_enable_flag` is not coded for 4:2:0 sources; streams with EFE non-linear or LEF data after it parsed wrongly.

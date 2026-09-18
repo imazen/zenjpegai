@@ -465,8 +465,20 @@ measured numbers in the status table above when you close an item.
 ### Browser and GPU
 
 - **B1** WebGPU synthesis in the worker/polyfill/demo behind feature detection (in progress on a
-  SWE-2 agent; `gpu/README.md` has the API). **B2** demo throttling + viewport-priority queue and
-  the AIC image swap (in progress). **B3** GPU kernels: convolutions reach 4–7 % of f32 peak —
+  SWE-2 agent; `gpu/README.md` has the API). **B2 done 2026-09-18** — demo throttling +
+  viewport-priority queue landed: one shared queue in `web/src/pool.js` (threads build: exactly
+  one decode in flight; simd build: at most `min(navigator.hardwareConcurrency, 4)`), the
+  polyfill and demo only enqueue decodes once an image is within one viewport height
+  (`IntersectionObserver`, `rootMargin '100% 0px'`, visibility-ordered, re-evaluated function
+  priorities), and every queued image shows a pre-sized placeholder. The AIC artwork swap also
+  landed (corpus item 3008, flower-garland still life, CC0 — replaces the removed dead-chicken
+  still life; `web/demo/IMAGES.md`, release `demo-assets-v1` updated and hash-verified).
+  Measured on the demo page in chromium (`web/tests/scheduling.spec.ts`,
+  `benchmarks/wasm_demo_scheduling_2026-09-18.tsv`): pre-fix vs post-fix simd path
+  first-image 1123/1097 ms and all-eight-images 2073/2082 ms — on this 32-core box the change
+  is about ordering, laziness and the bounded-inflight guarantee, not throughput; on a
+  smaller-core-count machine the queue is what prevents decode oversubscription.
+  **B3** GPU kernels: convolutions reach 4–7 % of f32 peak —
   profile with `ncu` before writing more kernels; 8-bit readback; `f16`; cancellation and
   `max_channels` on the GPU path (details in `gpu/README.md` "Status").
 

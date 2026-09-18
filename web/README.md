@@ -100,6 +100,12 @@ after `sudo npx playwright install-deps` for `libmanette-0.2-0`), **33 passed in
 - `strict-csp.spec.ts`: default mode clean (zero CSP violations reported via
   `securitypolicyviolation`), `img` mode's `blob:` load is blocked and reported as an `img-src`
   violation, exactly as designed.
+- `scheduling.spec.ts`: the decode-scheduling contract — bounded concurrency
+  (`maxInflight <= min(navigator.hardwareConcurrency, 4)` on the simd pool, exactly 1 on the
+  threads pool), viewport-gated demo decodes with pre-sized placeholders, first-image bound,
+  and "per-image decode under 8x load stays <= 2x a solo decode". Appends to
+  `benchmarks/wasm_demo_scheduling_<date>.tsv`; chromium-only. `JAI_BASE_PLAIN` /
+  `JAI_BASE_ISOLATED` env vars point it at another site tree (used for the pre-fix comparison).
 - `benchmark.spec.ts`: decodes all 16 demo streams per browser, appends timings to
   `benchmarks/wasm_decode_<date>.tsv` + a `.meta` (commit/host/command). `just web-test` or the
   Pages CI workflow run it; `npm test` in `web/` runs the whole suite.
@@ -127,13 +133,20 @@ it's private today) into `web/.demo-assets/` (gitignored), and `web/scripts/buil
 assembles the servable tree at `web/dist/site/` (also gitignored) that both Playwright and the
 Pages workflow serve.
 
-`web/demo/demo.js`: per-image card, decode-on-load for the low-rate variant, click the other rate
-to decode it too; shows fetch/model/decode timing, build variant (`simd`/`threads`), SIMD tier,
-and a WebGPU feature-detection note (see the "Not done" table). `web/demo/sw-coi.js` +
+`web/demo/demo.js`: per-image card; the low-rate variant decodes once the card is within one
+viewport height of the viewport (`IntersectionObserver`, `rootMargin: '100% 0px'`, in
+visibility order — a synchronous rect check starts already-near cards without waiting for the
+first observer callback), and clicking the other rate decodes it with queue-jumping priority.
+Each card's canvas is pre-sized from the manifest so the layout never shifts while a decode is
+queued (`data-state`: pending/queued/decoding/done/error). Timing shows fetch, queue wait,
+model-load, and decode ms, plus build variant (`simd`/`threads`), SIMD tier, and a WebGPU
+feature-detection note (see the "Not done" table). `web/demo/sw-coi.js` +
 `coi-loader.js`: an own-written (not vendored) from-scratch implementation of the
 `coi-serviceworker` technique — a service worker that adds COOP/COEP to every same-origin
 response so a static host that can't send those headers (GitHub Pages) still gets
-`crossOriginIsolated === true` after one reload, enabling the `threads` package there. Demo-only
+`crossOriginIsolated === true` after one reload, enabling the `threads` package there. The
+promotion wait is bounded (1.5 s) so a stalled or blocked service-worker install can't hang
+the top-level await in `demo.js`. Demo-only
 by design: wired into `demo.js`, **not** into `src/polyfill.js` — a general-purpose polyfill
 embedded on someone else's page has no business unilaterally installing a service worker that
 rewrites every response on their origin. `DecoderPool` re-checks `crossOriginIsolated` itself
