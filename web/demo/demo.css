@@ -11,6 +11,9 @@ h1 { font-size: 1.4rem; }
 .gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 20px; margin-top: 20px; }
 .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 12px; }
 .card canvas, .card img { width: 100%; height: auto; border-radius: 6px; background: repeating-conic-gradient(#8883 0% 25%, transparent 0% 50%) 50% / 16px 16px; display: block; }
+.card[data-state="pending"] canvas, .card[data-state="queued"] canvas { opacity: 0.45; }
+.card[data-state="decoding"] canvas { opacity: 0.75; }
+.card[data-state="error"] canvas { outline: 2px solid #c33; }
 .card h3 { margin: 8px 0 2px; font-size: 0.95rem; }
 .card .meta { font-size: 0.78rem; opacity: 0.75; }
 .card .rates { display: flex; gap: 6px; margin: 8px 0; }
