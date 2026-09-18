@@ -1,6 +1,7 @@
 name: Pages demo
 
-# Builds both wasm packages (simd + threads), the web bundle, fetches the demo-assets-v1
+# Builds all four wasm packages (simd, threads, webgpu, webgpu-threads), the web bundle,
+# fetches the demo-assets-v1
 # release assets (bakes them into the published site so visitors never need private-repo
 # access), runs the Playwright suite against the built site, and deploys to GitHub Pages.
 #
