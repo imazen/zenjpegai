@@ -39,9 +39,10 @@ const SELECTOR = [
  * @property {Document|ShadowRoot} [root] - defaults to `document`.
  * @property {Object<string,string>} [bundleVersions] - passed to `DecoderPool`: model-bundle
  *   file name -> version token, appended to bundle URLs as `?v=` (see pool.js/worker.js).
- * @property {'auto'|'software'|'force-software'|'off'} [gpu] - passed to `DecoderPool`:
- *   'auto' (default) presents through WebGPU without a CPU readback where the browser and the
- *   stream allow it.
+ * @property {'auto'|'on'|'software'|'force-software'|'off'} [gpu] - passed to `DecoderPool`:
+ *   'auto' (default) stays on the CPU engine (the GPU path does not beat it at typical sizes);
+ *   'on' opts into WebGPU, which also presents through it without a CPU readback where the
+ *   browser and the stream allow it.
  */
 
 // Scheduling (see pool.js's contract): every decode enters the pool's shared queue ordered by

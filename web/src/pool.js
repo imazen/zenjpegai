@@ -28,11 +28,13 @@ export class DecoderPool {
    * @param {Object<string,string>} [bundleVersions] - file name -> version token (the demo
    *   passes each bundle's sha256 from manifest.json). Appended to bundle URLs as `?v=` so a
    *   bundle swapped under the same file name can't be served stale from the Cache API.
-   * @param {'auto'|'software'|'force-software'|'off'} [gpu] - WebGPU synthesis: 'auto' (default)
-   *   uses the `pkg-webgpu` package when `navigator.gpu` yields a non-software adapter and falls
-   *   back to the CPU packages otherwise; 'software' additionally accepts software adapters
-   *   (exercises the GPU code path on a GPU-less host); 'force-software' always takes the
-   *   software adapter; 'off' never loads `pkg-webgpu`.
+   * @param {'auto'|'on'|'software'|'force-software'|'off'} [gpu] - WebGPU synthesis: 'auto'
+   *   (default) keeps the CPU engine — measured on an RTX 2080 the WebGPU path does not beat
+   *   the threads engine at ~1 MP demo sizes, so `auto` does not pay the pkg-webgpu download
+   *   (web/README §7); 'on' opts in and uses `pkg-webgpu` when `navigator.gpu` yields a
+   *   non-software adapter, the CPU packages otherwise; 'software' additionally accepts
+   *   software adapters (exercises the GPU code path on a GPU-less host); 'force-software'
+   *   always takes the software adapter; 'off' never loads `pkg-webgpu`.
    * @param {number} [threads] - rayon pool size of each `threads`-variant worker (isolated
    *   pages only; `worker.js` reads it off `?threads=` on its own URL). Default:
    *   `min(navigator.hardwareConcurrency, 16)` — measured optimum on a 32-hwc host

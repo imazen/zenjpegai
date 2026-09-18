@@ -72,7 +72,8 @@ Updated 2026-09-18. What follows is exact: missing things first.
 
 ### 2. Playwright suite (`web/tests/*.spec.ts`), 3 static servers (`web/scripts/serve.mjs`)
 
-`playwright.config.ts` starts all three (ports 3031/3032/3033, in the required 3000-3999 range)
+`playwright.config.ts` starts all three (three consecutive ports derived from the checkout's
+absolute path, in the required 3000-3999 range)
 via `webServer: [...]` before any test:
 - **`plain`**: no headers. Proves the `simd`-package fallback.
 - **`isolated`**: COOP `same-origin` + COEP `require-corp`. Proves the `threads` package (the
@@ -86,16 +87,19 @@ via `webServer: [...]` before any test:
   silently blocked. `img-src` deliberately has no `blob:`/`data:`: proves the `canvas` render
   mode needs neither, and that the opt-in `img` mode is BLOCKED under this policy (its own test).
 
-96 tests across 4 projects — chromium, firefox, **webkit**, and `chromium-webgpu` (a second
+84 tests across 4 projects — chromium, firefox, **webkit**, and `chromium-webgpu` (a second
 Chromium launch with WebGPU flags; see §7). All installed and ran clean — no "if it installs"
 fallback needed this run, `npx playwright install chromium firefox webkit` succeeded after
-`sudo npx playwright install-deps` for `libmanette-0.2-0`. **83 passed, 13 project-gated skips
-in ~2 min** (`npx playwright test`).
+`sudo npx playwright install-deps` for `libmanette-0.2-0`. **84 passed, 0 skipped in ~3 min**
+(`npx playwright test`). Browser-specific tests are gated by `testIgnore`/`testMatch` in
+`playwright.config.ts`, not by runtime `test.skip` — a gated-out test is excluded from the run
+entirely, so anything listed as running must pass.
 
-Port note: the three servers default to 3031-3033; `JAI_PORT_BASE=<n>` shifts all three.
-On this shared box a sibling workspace's leftover `serve.mjs` on a default port gets adopted
-by `reuseExistingServer` and your tests then run against THEIR `dist/site` — set `JAI_PORT_BASE`
-whenever another workspace is running tests (seen live: a foreign server on 3032 made
+Port note: the port base is derived deterministically from the checkout's absolute path, so a
+sibling jj workspace's servers can never collide with this one's; `JAI_PORT_BASE=<n>` shifts
+all three when the derivation itself collides. `reuseExistingServer` can still adopt a stale
+server of THIS workspace squatting on the derived port — cache-swap.spec.ts' manifest-identity
+assertion guards against exactly that (seen live: a foreign server on the isolated port made
 "isolated/strict" tests exercise a build that wasn't this tree's).
 
 - `wasm-decode.spec.ts`: plain->simd, isolated->threads, strict->still decodes; every decode
@@ -289,7 +293,8 @@ plus `zenjpegai-gpu` (wgpu 30 web backend) behind the `gpu` cargo feature. `pkg-
 - **No-readback present**: `pool.decodeToCanvas(stream, canvas)` transfers an
   `OffscreenCanvas` to the worker once (cached on the element as `__jaiCanvasId`/`__jaiWorker`;
   repeat calls address it by id — re-transferring a neutered canvas throws). The worker calls
-  `present()`, which hands the canvas to wgpu's `SurfaceTarget::Canvas` and blits the decoder's
+  `present()`, which hands the canvas to wgpu's `SurfaceTarget::OffscreenCanvas` and blits the
+  decoder's
   `rgba8unorm` texture without any CPU readback (`presented: 'gpu'`). Non-presentable pictures
   or any present failure decode on CPU and `putImageData` on a 2d context (`presented: '2d'`).
   `verify` asks the worker to also return a PNG of the canvas for tests.

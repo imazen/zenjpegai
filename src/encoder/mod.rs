@@ -12,7 +12,8 @@
 //! of them, 8- and 10-bit (16-bit sources parse and code `bit_depth_idc` 4 but have no parity
 //! vectors yet). What is not: the EFE / eICCI post-filters on the encode side (the LEF is
 //! signalled, `EncodeParams::lef`), `num_chs` below the model's channel count, and the rate
-//! matcher's likelihood estimator (`ECLibLH` / `hyperopt`). See `PORTING.md`.
+//! matcher's hyperopt displacement search (`find_UV_beta_with_hyperopt`; the `ECLibLH`
+//! likelihood measure IS ported as `RateEstimate::Likelihood`). See `PORTING.md`.
 
 // The per-channel loops index several parallel arrays with one counter, like the reference's
 // tensor expressions; an iterator chain over one of them would hide that.

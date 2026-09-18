@@ -8,20 +8,25 @@ the [JPEG AI reference software](https://gitlab.com/wg1/jpeg-ai/jpeg-ai-referenc
 with `#![forbid(unsafe_code)]`, SIMD through [archmage](https://lib.rs/crates/archmage) and
 [magetypes](https://lib.rs/crates/magetypes), and no Python or PyTorch at runtime.
 
-**Status: decoder complete for the reference's feature set, encoder complete for RGB 4:4:4
-sources.** Decoder: SOP / BOP / HOP operating points, any picture size (synthesis tiling, dependent
-and independent regions), RGB (BT.709) and YUV streams in 4:4:4 / 4:2:2 / 4:2:0 at 8 and 10 bit,
-RVS, GRFS, LSBS, quality maps, cube flags, progressive decode, all four post-filters (EFE linear,
-EFE non-linear, eICCI, LEF), UDI. Encoder: the same coding tools and regions, tiling above 1 MP,
-fixed-model and target-bpp rate control; it reproduces the reference encoder's streams byte for
-byte on 13 of 17 fixed-model vectors (same length on the rest). Not ported: post-filter decisions
-on the encode side, subsampled / 10-bit / YUV encoder inputs, the user-defined colour transform
-(the reference's own implementation is inconsistent — see `PORTING.md`), eICCI on subsampled
+**Status: decoder complete for the reference's feature set; encoder covers RGB and YUV
+sources.** Decoder: SOP / BOP / HOP operating points, any picture size (synthesis tiling,
+dependent and independent regions), RGB (BT.709) and YUV streams in 4:4:4 / 4:2:2 / 4:2:0 at
+8 and 10 bit, RVS, GRFS, LSBS, quality maps, cube flags, progressive decode, all four
+post-filters (EFE linear, EFE non-linear, eICCI, LEF), UDI. Encoder: interleaved-RGB (8/16 bit)
+and planar-YUV (4:4:4 / 4:2:2 / 4:2:0, 8/10 bit) sources, the same coding tools and regions,
+analysis tiling above 1 MP, fixed-model and target-bpp rate control with the reference's
+`ECLibLH` likelihood measure or the coded stream (`RateEstimate`), resource limits and a
+memory estimate (`EncodeLimits`, `estimate_encode_memory`); it reproduces the reference
+encoder's streams byte for byte on 14 of 18 fixed-model vectors (same length on the rest).
+Not ported: the EFE / eICCI post-filter decisions on the encode side (the LEF channel IS
+signalled), the hyperopt displacement search, the user-defined colour transform (the
+reference's own implementation is inconsistent — see `PORTING.md`), eICCI on subsampled
 pictures. Anything unsupported is rejected with `Error::Unsupported`; nothing is silently
 approximated. The entropy stage is bit-exact; the reconstructed 8-bit picture differs from the
-reference decoder's in about 0.005 % of samples, each by one step (convolution summation order).
-Also here: a WebAssembly build with a browser polyfill and demo (`web/`, live at
-https://imazen.github.io/zenjpegai/) and a wgpu compute backend (`gpu/`).
+reference decoder's in about 0.005 % of samples, each by one step (convolution summation
+order). Also here: a WebAssembly build with a browser polyfill and demo (`web/`, live at
+https://imazen.github.io/zenjpegai/) and a wgpu compute backend (`gpu/`, verified in-browser on
+hardware WebGPU).
 `PORTING.md` tracks every module, what is missing, and which test proves each piece.
 
 New here? Start with [`CONTRIBUTING.md`](CONTRIBUTING.md): setup, code map, how parity is proven, what to do next.
