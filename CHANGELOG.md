@@ -6,6 +6,17 @@
 <!-- Breaking changes that will ship together in the next major (or minor for 0.x) release. -->
 
 ### Added
+- Encoder: the EFE linear post-filter (`E1`) — `EncodeParams::efe_linear` / CLI
+  `--efe-linear` run the reference's `EFElinear.compress` on the final reconstruction
+  (`src/encoder/filters/efe_linear.rs`): region-split candidate search x filter lengths,
+  `LumaAidedUpsampler_encoder` least-squares solves (coded 4:4:4 / 4:2:2 / 4:2:0, the
+  luma-aided refine, the >2 M-sample subsample-averaging), `integerize`,
+  `minSymbol`/`maxSymbol` and the second "up-sampled" filter set, all behind the existing
+  TON header. The solver is a deterministic f64 pivoted-QR `gelsy`: identical integerised
+  codes to the reference wherever its MKL f32 `gelsy` is well-posed (64/146 dumped solves;
+  every design matrix bit-identical), and documented deviation where MKL's rank estimate
+  is nondeterministic — on `img30_base_efelin_bpp050` our stream is +0.28 % and **+0.099 dB**
+  through the reference decoder.
 - Encoder: `RateEstimate::Likelihood` (`EncodeParams::rate_estimate`, CLI
   `--rate-estimate likelihood`) — the reference bitrate matcher's `ECLibLH` trial measure
   (`src/encoder/lh.rs`: the factorized `z` model's float `forward` as per-channel likelihood
