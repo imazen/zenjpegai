@@ -61,8 +61,7 @@ test('decode every demo stream on the GPU path and record timings', async ({ pag
   const rows: string[] = [];
   for (const img of manifest.images) {
     for (const v of img.variants) {
-      const bpp2 = String(Math.round(v.bpp * 100)).padStart(2, '0');
-      const stream = `streams/${img.slug}_bpp${bpp2}.jai`;
+      const stream = streamUrl(img, v);
       for (const call of ['decode', 'present']) {
         const r = await page.evaluate(
           async ({ stream, call }) => {
@@ -98,8 +97,7 @@ test('decode every demo stream on the GPU path and record timings', async ({ pag
     await page.evaluate(() => window.__ready);
     for (const img of manifest.images) {
       for (const v of img.variants) {
-        const bpp2 = String(Math.round(v.bpp * 100)).padStart(2, '0');
-        const stream = `streams/${img.slug}_bpp${bpp2}.jai`;
+        const stream = streamUrl(img, v);
         const r = await page.evaluate(async (stream) => {
           const f0 = performance.now();
           const bytes = await fetch(stream).then((res) => res.arrayBuffer());
@@ -117,6 +115,14 @@ test('decode every demo stream on the GPU path and record timings', async ({ pag
   appendFileSync(tsvPath, rows.join('\n') + '\n');
   await testInfo.attach('wasm-decode-gpu-rows', { body: rows.join('\n'), contentType: 'text/tab-separated-values' });
 });
+
+// Same content-addressed URL the demo and benchmark.spec.ts build: `?v=<sha256>` keeps the
+// fetch honest if a stream file was swapped under its name; the name convention is the
+// fallback for manifests from before the `file`/`sha256` fields.
+function streamUrl(img, v) {
+  const file = v.file || `${img.slug}_bpp${String(Math.round(v.bpp * 100)).padStart(2, '0')}.jai`;
+  return `streams/${file}${v.sha256 ? `?v=${v.sha256}` : ''}`;
+}
 
 function safeExec(cmd: string): string | null {
   try {

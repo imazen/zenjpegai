@@ -19,9 +19,9 @@ fn car_bpp75_returns_error_not_panic() {
     for id in 0..4usize {
         for part in ["common", "bop"] {
             let p = dir.join(format!("m{id}_{part}.zjb"));
-            if p.exists() {
-                bundle.add(std::fs::read(&p).unwrap()).unwrap();
-            }
+            bundle
+                .add(std::fs::read(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display())))
+                .unwrap();
         }
     }
     let ctx = GpuContext::new(&ContextOptions {

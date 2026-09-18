@@ -31,8 +31,8 @@ const DECODE_ALL = `async (threads) => {
   try {
     for (const img of ${JSON.stringify(manifest)}.images) {
       for (const v of img.variants) {
-        const bpp2 = String(Math.round(v.bpp * 100)).padStart(2, '0');
-        const bytes = await fetch(\`streams/\${img.slug}_bpp\${bpp2}.jai\`).then((r) => r.arrayBuffer());
+        const file = v.file || \`\${img.slug}_bpp\${String(Math.round(v.bpp * 100)).padStart(2, '0')}.jai\`;
+        const bytes = await fetch(\`streams/\${file}\${v.sha256 ? \`?v=\${v.sha256}\` : ''}\`).then((r) => r.arrayBuffer());
         const r = await pool.decode(bytes);
         out.push({ slug: img.slug, bpp: v.bpp, modelId: v.modelId, width: r.width, height: r.height, bytes: bytes.byteLength, decode_ms: r.timings.decode });
       }
@@ -43,8 +43,10 @@ const DECODE_ALL = `async (threads) => {
   return out;
 }`;
 
+// Chromium-only by project configuration (testIgnore in playwright.config.ts), not a runtime
+// skip: the wasm bytes are identical across engines and a shared box makes cross-engine
+// scaling runs prohibitively long.
 test('rayon thread scaling on the threads package', async ({ page, browserName, browser }, testInfo) => {
-  test.skip(browserName !== 'chromium', 'thread-scaling numbers are chromium-only');
   test.setTimeout(600_000);
   await page.goto(`http://127.0.0.1:${PORTS.isolated}/decode.html`);
   await page.evaluate(() => window.__ready);

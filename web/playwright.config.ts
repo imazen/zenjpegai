@@ -31,19 +31,20 @@ export default defineConfig({
     timeout: 20_000,
   })),
   projects: [
-    // benchmark-gpu.spec.ts' rows only make sense from the WebGPU-enabled launch below, and
-    // scheduling.spec.ts' timing bounds are calibrated to chromium's scheduler — those files
-    // are simply not part of the other projects rather than skipped at run time.
+    // benchmark-gpu.spec.ts' rows only make sense from the WebGPU-enabled launch below,
+    // scheduling.spec.ts' timing bounds are calibrated to chromium's scheduler, and
+    // threads.spec.ts' scaling numbers are chromium-only (its header) — those files are
+    // simply not part of the other projects rather than skipped at run time.
     { name: 'chromium', use: { ...devices['Desktop Chrome'] }, testIgnore: '**/benchmark-gpu.spec.ts' },
     {
       name: 'firefox',
       use: { ...devices['Desktop Firefox'] },
-      testIgnore: ['**/scheduling.spec.ts', '**/benchmark-gpu.spec.ts'],
+      testIgnore: ['**/scheduling.spec.ts', '**/benchmark-gpu.spec.ts', '**/threads.spec.ts'],
     },
     {
       name: 'webkit',
       use: { ...devices['Desktop Safari'] },
-      testIgnore: ['**/scheduling.spec.ts', '**/benchmark-gpu.spec.ts'],
+      testIgnore: ['**/scheduling.spec.ts', '**/benchmark-gpu.spec.ts', '**/threads.spec.ts'],
     },
     {
       // WebGPU-enabled Chromium: `--enable-unsafe-webgpu` exposes navigator.gpu without an
@@ -55,6 +56,7 @@ export default defineConfig({
       //               adapter, never as hardware)
       //   unset       default WebGPU behaviour — whatever Dawn hands back (non-fatal either way)
       name: 'chromium-webgpu',
+      testIgnore: '**/threads.spec.ts',
       use: {
         ...devices['Desktop Chrome'],
         launchOptions: {

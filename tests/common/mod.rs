@@ -38,11 +38,6 @@ pub fn vectors_root() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/mnt/v/output/zenjpegai/reference/vectors"))
 }
 
-/// Whether the vector's stream exists — for tests that skip absent vectors instead of failing.
-pub fn vector_present(name: &str) -> bool {
-    vectors_root().join(name).join("stream.bits").is_file()
-}
-
 /// Directory holding the reference decoder dumps produced by
 /// `scripts/ref_vectors/make_reference_streams.sh`. Hard failure if a vector is missing.
 pub fn vector_dir(name: &str) -> PathBuf {

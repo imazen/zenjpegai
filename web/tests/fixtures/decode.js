@@ -5,9 +5,7 @@ import { DecoderPool } from './src/pool.js';
 const gpuMode = new URLSearchParams(location.search).get('gpu') || 'auto';
 const pool = new DecoderPool({ modelsBaseUrl: 'models/', gpu: gpuMode });
 window.__pool = pool;
-window.__gpuMode = gpuMode;
 window.__ready = pool.ready();
-window.__hasGpu = typeof navigator !== 'undefined' && 'gpu' in navigator && !!navigator.gpu;
 
 // In-page pixel-parity check against a browser-decodable reference PNG: avoids serialising a
 // multi-megabyte RGBA array back to the Node test process, and needs no custom PNG decoder (the
@@ -53,8 +51,11 @@ async function pngPixels(src) {
 }
 
 function compare(a, ref) {
+  if (a.length !== ref.pixels.length) {
+    throw new Error(`pixel count differs: ${a.length} decoded vs ${ref.pixels.length} reference`);
+  }
   let differing = 0, samples = 0, max = 0;
-  for (let i = 0; i < a.length && i < ref.pixels.length; i++) {
+  for (let i = 0; i < a.length; i++) {
     if (i % 4 === 3) continue; // alpha
     samples++;
     const d = Math.abs(a[i] - ref.pixels[i]);

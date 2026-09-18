@@ -96,6 +96,10 @@ test('canvas presentation: GPU blit or 2d fallback, pixels verified', async ({ p
   if (r.png) {
     expect(r.differing / r.samples).toBeLessThan(MAX_DIFFERING_RATIO);
     expect(r.max).toBeLessThanOrEqual(1);
+  } else {
+    // convertToBlob may legitimately refuse on a canvas whose frame already presented; a
+    // 2d canvas must always verify, so absent PNG + presented '2d' is a failure.
+    expect(r.presented).toBe('gpu');
   }
 });
 
@@ -115,5 +119,7 @@ test('canvas presentation on the software GPU path exercises the WebGPU blit', a
   if (r.png) {
     expect(r.differing / r.samples).toBeLessThan(MAX_DIFFERING_RATIO);
     expect(r.max).toBeLessThanOrEqual(1);
+  } else {
+    expect(r.presented).toBe('gpu');
   }
 });

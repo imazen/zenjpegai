@@ -358,7 +358,6 @@ fn vectors() -> Vec<Vector> {
                     tools,
                 }),
         )
-        .filter(|v| present(v.name))
         .collect()
 }
 
@@ -414,17 +413,12 @@ fn source(image: &str) -> zenjpegai::RgbImage {
     read_png_rgb8(&bytes).unwrap()
 }
 
-fn present(vector: &str) -> bool {
-    vector_dir(vector).join("enc2/enc_manifest.txt").is_file()
-}
-
 /// Colour pre-processing: bit-exact against the reference's own analysis-transform inputs.
 ///
 /// The reference records one input per analysis call, so on a tiled picture this also checks
 /// that our analysis tile grid is the reference's, tile for tile.
 #[test]
 fn colour_preprocessing_matches_reference() {
-    let mut ran = 0;
     for v in vectors() {
         let (vector, image) = (v.name, v.image);
         let dump = load_encoder_dump(&vector_dir(vector).join("enc2"));
@@ -462,9 +456,7 @@ fn colour_preprocessing_matches_reference() {
                 "{vector} {net}: the reference used more tiles than we do"
             );
         }
-        ran += 1;
     }
-    assert!(ran > 0, "no encoder vectors on disk");
 }
 
 /// Compare one encode's decisions with the reference encoder's own.
@@ -531,7 +523,6 @@ fn compare_decisions(vector: &str, traces: &[zenjpegai::encoder::ComponentTrace;
 /// rounding-boundary residual symbols move.
 #[test]
 fn decisions_match_reference_given_its_latents() {
-    let mut ran = 0;
     for v in vectors() {
         let vector = v.name;
         let dump = load_encoder_dump(&vector_dir(vector).join("enc2"));
@@ -572,16 +563,13 @@ fn decisions_match_reference_given_its_latents() {
                 "{vector}: same decisions must give the same bytes"
             );
         }
-        ran += 1;
     }
-    assert!(ran > 0, "no encoder vectors on disk");
 }
 
 /// Gate 3: a whole encode from the PNG. The stream must be the reference's size to within
 /// 0.5 %, and decode to the same picture through our own decoder.
 #[test]
 fn encoder_end_to_end_matches_reference() {
-    let mut ran = 0;
     for v in vectors() {
         let (vector, params) = (v.name, v.params());
         let enc = Encoder::new(ref_root().join("models"));
@@ -631,9 +619,7 @@ fn encoder_end_to_end_matches_reference() {
             "   vs a decode of the reference stream: {differing} of {} samples differ, worst {worst}",
             ours.data.len()
         );
-        ran += 1;
     }
-    assert!(ran > 0, "no encoder vectors on disk");
 }
 
 /// Run `cmd` inside the upstream checkout's Python venv (PYTHONPATH set). Hard failure on
@@ -739,24 +725,20 @@ fn reference_decoder_accepts_our_streams() {
 #[test]
 fn lef_channel_matches_reference() {
     use zenjpegai::encoder::filters::lef::reference_channel;
-    let mut ran = 0;
 
     let dir = vector_dir("enc_img30_bop_m1_b0_lef");
-    if dir.join("enc2/enc_manifest.txt").is_file() {
-        let dump = load_encoder_dump(&dir.join("enc2"));
-        let s = &dump["y.scale_log"];
-        let scale_log = Tensor::from_vec(s.shape[1], s.shape[2], s.shape[3], s.i32()).unwrap();
-        let want = dump["lef.ch_idx"].i32()[0];
-        let got = reference_channel(&scale_log).unwrap();
-        assert_eq!(got as i32, want, "enc_img30_bop_m1_b0_lef: LEF_chIdx");
-        // The means the argmax sees are torch's (`scale_log.float()` then `mean`): the planes
-        // are small enough that the f32 sums are exact, so they must agree bit for bit.
-        let n = (scale_log.h * scale_log.w) as f32;
-        for (ch, &w) in dump["lef.avg_sig"].f32().iter().enumerate() {
-            let m = scale_log.plane(ch).iter().map(|&v| v as f32).sum::<f32>() / n;
-            assert_eq!(m.to_bits(), w.to_bits(), "lef.avg_sig[{ch}]");
-        }
-        ran += 1;
+    let dump = load_encoder_dump(&dir.join("enc2"));
+    let s = &dump["y.scale_log"];
+    let scale_log = Tensor::from_vec(s.shape[1], s.shape[2], s.shape[3], s.i32()).unwrap();
+    let want = dump["lef.ch_idx"].i32()[0];
+    let got = reference_channel(&scale_log).unwrap();
+    assert_eq!(got as i32, want, "enc_img30_bop_m1_b0_lef: LEF_chIdx");
+    // The means the argmax sees are torch's (`scale_log.float()` then `mean`): the planes
+    // are small enough that the f32 sums are exact, so they must agree bit for bit.
+    let n = (scale_log.h * scale_log.w) as f32;
+    for (ch, &w) in dump["lef.avg_sig"].f32().iter().enumerate() {
+        let m = scale_log.plane(ch).iter().map(|&v| v as f32).sum::<f32>() / n;
+        assert_eq!(m.to_bits(), w.to_bits(), "lef.avg_sig[{ch}]");
     }
 
     for name in [
@@ -766,9 +748,6 @@ fn lef_channel_matches_reference() {
         "img01_base_eiccitiles_lef_bpp050",
     ] {
         let dir = vector_dir(name);
-        if !dir.join("manifest.txt").is_file() {
-            continue;
-        }
         let stream = std::fs::read(dir.join("stream.bits")).unwrap();
         let headers = zenjpegai::decoder::read_headers(
             &zenjpegai::container::Codestream::parse(&stream).unwrap(),
@@ -783,9 +762,7 @@ fn lef_channel_matches_reference() {
         let scale_log = Tensor::from_vec(s.shape[1], s.shape[2], s.shape[3], s.i32()).unwrap();
         let got = reference_channel(&scale_log).unwrap();
         assert_eq!(got, want, "{name}: LEF_chIdx");
-        ran += 1;
     }
-    assert!(ran > 0, "no LEF vectors on disk");
 }
 
 /// Rate matching: the model and displacement `--bpp` settles on, against the reference
@@ -808,12 +785,8 @@ fn rate_matching_hits_the_target() {
         (0.75, "img30_base_off_bpp075"),
         (1.00, "img30_base_off_bpp100"),
     ];
-    let mut ran = 0;
     for (target, vector) in cases {
         let path = vector_dir(vector).join("stream.bits");
-        if !path.is_file() {
-            continue;
-        }
         let (stream, m) = enc
             .encode_to_bpp(
                 &picture,
@@ -854,9 +827,7 @@ fn rate_matching_hits_the_target() {
         // The stream must still be a stream.
         let ours = dec.decode(&stream).unwrap();
         assert_eq!((ours.width, ours.height), (picture.width, picture.height));
-        ran += 1;
     }
-    assert!(ran > 0, "no reference streams on disk");
 }
 
 /// E7: `RateEstimate::Likelihood` — the `ECLibLH` estimator the reference's bitrate matcher
@@ -889,11 +860,7 @@ fn likelihood_estimate_picks_the_references_displacements() {
         (img01, 0.75, "img01_base_off_bpp075"),
         (img01, 1.00, "img01_base_off_bpp100"),
     ];
-    let mut ran = 0;
     for (image, target, vector) in cases {
-        if !common::vector_present(vector) {
-            continue;
-        }
         let dir = vector_dir(vector);
         let path = dir.join("stream.bits");
         let picture = source(image);
@@ -945,25 +912,33 @@ fn likelihood_estimate_picks_the_references_displacements() {
         // estimate at the winning beta must be ours (the log prints four decimals).
         let log = std::fs::read_to_string(dir.join("encoder.log")).unwrap();
         let marker = format!("beta = {},", m.beta_displacement_log);
-        if let Some(line) = log
+        match log
             .lines()
             .rfind(|l| l.contains(&marker) && l.contains("bits = tensor"))
         {
-            let ref_est: f64 = line
-                .split("bits = tensor([")
-                .nth(1)
-                .and_then(|s| s.split(']').next())
-                .and_then(|s| s.trim().parse().ok())
-                .expect("encoder.log: unparseable trial line");
-            assert!(
-                (estimate - ref_est).abs() < 2e-3,
-                "{vector}: estimate {estimate:.6} vs the reference's {ref_est} at beta {}",
-                m.beta_displacement_log
-            );
+            Some(line) => {
+                let ref_est: f64 = line
+                    .split("bits = tensor([")
+                    .nth(1)
+                    .and_then(|s| s.split(']').next())
+                    .and_then(|s| s.trim().parse().ok())
+                    .expect("encoder.log: unparseable trial line");
+                assert!(
+                    (estimate - ref_est).abs() < 2e-3,
+                    "{vector}: estimate {estimate:.6} vs the reference's {ref_est} at beta {}",
+                    m.beta_displacement_log
+                );
+            }
+            // The reference logs the per-trial estimates only while its search iterates; when
+            // the first candidate lands inside tolerance the log carries just the "best model"
+            // decision (img30_base_off_bpp100), so there is no trial number to check — assert
+            // the decision is logged rather than silently passing.
+            None => assert!(
+                log.contains("best model is"),
+                "{vector}: encoder.log has neither a trial estimate nor the matcher's decision"
+            ),
         }
-        ran += 1;
     }
-    assert!(ran > 0, "no reference streams on disk");
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1071,7 +1046,6 @@ fn formats_source(file: &str) -> SourceImage {
 fn formats_streams_match_reference() {
     let enc = Encoder::new(ref_root().join("models"));
     let dec = zenjpegai::Decoder::new("");
-    let mut ran = 0;
     for &FormatVector {
         name: vector,
         file,
@@ -1144,9 +1118,7 @@ fn formats_streams_match_reference() {
                 "{vector}: same decisions must give the same bytes"
             );
         }
-        ran += 1;
     }
-    assert!(ran > 0, "no formats vectors on disk");
 }
 
 /// The `formats` streams must decode in the reference decoder. Its output is compared with
