@@ -1,0 +1,137 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # No reference data (upstream checkpoints, reference vectors) is available in CI, so the
+  # `reference-tests` feature must never be turned on here: it turns a missing-data skip into a
+  # hard failure by design (see CONTRIBUTING.md / CLAUDE.md).
+  CI: true
+
+jobs:
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  # Native lint + test matrix. clippy runs per-OS (not just Linux) because this crate has real
+  # target_arch-conditional code (archmage/magetypes SIMD tiers): a cfg mismatch that is only
+  # visible on aarch64 or a non-x86_64 target does not show up on ubuntu-latest alone.
+  test:
+    name: Test (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, name: Linux x64 }
+          - { os: windows-11-arm, name: Windows arm64 }
+          - { os: macos-15-intel, name: macOS x64 }
+          - { os: macos-latest, name: macOS arm64 }
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy (default + cli features)
+        run: cargo clippy --all-targets --features cli -- -D warnings
+
+      - name: Test (default + cli features)
+        run: cargo test --lib --tests --features cli
+
+  # 32-bit x86 via QEMU (cross-rs/cross): required primary target for pointer-width and
+  # bounds-check correctness, per repo policy.
+  i686:
+    name: Test (i686)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@cross
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: cross-i686
+
+      - name: Clippy (i686, default + cli features)
+        run: cross clippy --target i686-unknown-linux-gnu --all-targets --features cli -- -D warnings
+
+      - name: Test (i686, default + cli features)
+        run: cross test --target i686-unknown-linux-gnu --lib --tests --features cli
+
+  # no_std + alloc: default-features-off must build and lint clean, natively and on
+  # wasm32-unknown-unknown (the polyfill's non-nightly baseline target).
+  no-std:
+    name: no_std
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo check --no-default-features
+      - run: cargo clippy --no-default-features -- -D warnings
+      - run: cargo check --no-default-features --target wasm32-unknown-unknown
+
+  # zenjpegai-gpu (wgpu synthesis backend): only needs to type-check in CI (no GPU adapter here).
+  gpu:
+    name: gpu crate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo check -p zenjpegai-gpu
+
+  # zenjpegai-wasm (browser polyfill core): needs the pinned nightly (-Z build-std is only
+  # required by the `threads` feature; the default SIMD build checks on stable's wasm target,
+  # but the crate is developed and built against this pinned nightly per web/README.md, so pin
+  # CI to the same toolchain rather than stable's wasm32-unknown-unknown).
+  wasm:
+    name: wasm crate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-09-02
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo check -p zenjpegai-wasm --target wasm32-unknown-unknown
+
+  # rust-version in Cargo.toml (currently 1.89) is the floor for the library with default
+  # features. `--all-features` needs a newer toolchain (zenpng 0.1.4 requires rustc 1.93) because
+  # the `cli` feature pulls in a PNG codec with its own newer MSRV; that is a real, separate
+  # floor for `--features cli`, not a misconfiguration of this crate's own `rust-version`. Verified
+  # by bisecting installed rustc 1.85/1.89/1.90/1.91/1.92/1.93 on 2026-09-17: `cargo check` first
+  # succeeds at 1.89 with default features (archmage 0.9.29 itself requires 1.89).
+  msrv:
+    name: MSRV (1.89)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo check
