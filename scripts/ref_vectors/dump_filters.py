@@ -17,6 +17,14 @@ OUT_DIR (use `<vector>/filters/`) receives `tensors.bin` + `manifest.txt` in the
 
 `timing.txt` gets the wall time of each filter's `decompress`. The decoder itself is untouched:
 the hooks only copy tensors.
+
+`--msssim` skips the decode entirely and instead dumps an oracle set for the encoder's
+MS-SSIM port (`pytorch_msssim == 0.2.1`, `data_range = 1`): deterministic `msssim.<i>.x` /
+`.y` planes at eICCI-relevant sizes (the untiled 560x888 picture, the 1024 filter tile, a
+minimum-size 176x296 boundary tile, odd and near-minimum shapes), each with the reference's
+`ms_sssim.<i>.val` scalar. Usage:
+
+    python dump_filters.py --msssim OUT_DIR
 """
 import argparse
 import contextlib
@@ -32,13 +40,48 @@ from src.reco.coders.decoder import RecoDecoder, def_base_parser, process_decode
 from src.codec.coders import def_decoder_parser_decorator  # noqa: E402
 
 
+def dump_msssim_oracle(dump):
+    """`pytorch_msssim == 0.2.1` `ms_ssim(x, y, data_range=1.)` on deterministic planes."""
+    import torch
+    from pytorch_msssim import ms_ssim
+
+    torch.manual_seed(0)
+    # (height, width): the untiled 560x888 picture, the 1024 filter tile, a 176x296
+    # minimum-size boundary tile, then odd and near-minimum shapes.
+    for i, (h, w) in enumerate(
+        [(560, 888), (1024, 1024), (176, 296), (201, 301), (161, 161)]
+    ):
+        x = torch.rand(1, 1, h, w)
+        # A plausible reconstruction: mostly the source, locally biased, mildly noisy.
+        y = (x * 0.97 + 0.02 + 0.03 * torch.rand(1, 1, h, w)).clamp(0.0, 1.0)
+        if i == 0:
+            y = x.clone()  # identical planes: ms_ssim == 1 exactly
+        dump.add(f"msssim.{i}.x", x)
+        dump.add(f"msssim.{i}.y", y)
+        dump.add(f"msssim.{i}.val", ms_ssim(x, y, data_range=1.0).reshape(1))
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("bits")
-    ap.add_argument("out_dir")
+    ap.add_argument("bits", nargs="?", default=None)
+    ap.add_argument("out_dir", nargs="?", default=None)
+    ap.add_argument(
+        "--msssim",
+        action="store_true",
+        help="dump the pytorch_msssim oracle set (no decode; BITS unused)",
+    )
     args = ap.parse_args()
+    if args.out_dir is None:
+        args.bits, args.out_dir = None, args.bits
+    if args.out_dir is None or (args.bits is None and not args.msssim):
+        ap.error("usage: dump_filters.py BITS OUT_DIR, or --msssim OUT_DIR")
     os.makedirs(args.out_dir, exist_ok=True)
     dump = Dumper(args.out_dir)
+    if args.msssim:
+        dump_msssim_oracle(dump)
+        dump.close()
+        print(open(os.path.join(args.out_dir, "manifest.txt")).read())
+        return
 
     base_parser = def_base_parser()
     coder = RecoDecoder(base_parser, def_decoder_parser_decorator(base_parser))

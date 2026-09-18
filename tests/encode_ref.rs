@@ -147,6 +147,8 @@ fn analysis_tiers_agree_bit_for_bit() {
 // through both decoders.
 
 use std::path::Path;
+use zenjpegai::decoder::reconstruct::Planes;
+use zenjpegai::encoder::filters::icci::EicciConfig;
 use zenjpegai::encoder::{
     EncodeParams, Encoder, RegionMode, SourceImage, preprocess_rgb, read_png_rgb8,
 };
@@ -1225,5 +1227,312 @@ fn reference_decoder_accepts_formats_streams() {
             worst <= 1 && n * 5000 < got.len(),
             "{vector}: reference output differs by {worst} in {n} samples"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Gate 4: eICCI encoder-side model selection (`icci_filter.py::compress` +
+// `model_idxes.py::encode_header`) and the MS-SSIM loss it scores with.
+
+/// `pytorch_msssim == 0.2.1`'s `ms_ssim(x, y, data_range = 1)` as the oracle:
+/// `scripts/ref_vectors/dump_filters.py --msssim` wrote deterministic planes and the
+/// reference's scores to `msssim_oracle/`. Tolerance covers torch's blocked f32 reductions vs
+/// this port's f64 ones (measured in `PORTING.md`).
+#[test]
+fn msssim_matches_pytorch_msssim() {
+    use zenjpegai::encoder::msssim::ms_ssim;
+    let dump = common::load_dump(&vectors_root().join("msssim_oracle"));
+    let eng = Engine::new();
+    let (mut worst, mut n) = (0.0f32, 0);
+    for i in 0..usize::MAX {
+        let Some(x) = dump.get(&format!("msssim.{i}.x")) else {
+            break;
+        };
+        let y = &dump[&format!("msssim.{i}.y")];
+        let want = dump[&format!("msssim.{i}.val")].f32()[0];
+        let x = Tensor::from_vec(1, x.shape[2], x.shape[3], x.f32()).unwrap();
+        let y = Tensor::from_vec(1, y.shape[2], y.shape[3], y.f32()).unwrap();
+        let got = ms_ssim(&eng, &x, &y).unwrap();
+        println!(
+            "msssim.{i}: reference {want} ours {got} (diff {:e})",
+            got - want
+        );
+        worst = worst.max((got - want).abs());
+        n += 1;
+    }
+    assert!(n >= 5, "msssim_oracle: {n} pairs dumped");
+    assert!(worst <= 1e-5, "MS-SSIM vs pytorch_msssim: {worst:e}");
+}
+
+/// `eicci.selection` parity: `select` fed the reference's own `eicci.in` planes (the decoder
+/// dump's filter input — the same picture `compress` decided on, EFE output included for the
+/// tools_on vectors) must signal the stream's per-tile model indices. Mismatches are counted
+/// and printed per channel for the PORTING.md tie/near-tie forensics.
+fn check_eicci_selection(name: &str, image: &str, cfg: EicciConfig) -> (usize, usize) {
+    use zenjpegai::decoder::read_headers;
+    use zenjpegai::encoder::filters::icci;
+    use zenjpegai::model::icci::NetCache;
+
+    let dir = vector_dir(name);
+    let stream = std::fs::read(dir.join("stream.bits")).unwrap();
+    let cs = zenjpegai::container::Codestream::parse(&stream).unwrap();
+    let headers = read_headers(&cs).unwrap();
+    let want = headers.tools.icci.as_ref().expect("stream without eICCI");
+    let dump = common::load_dump(&dir.join("filters_lef_icci"));
+    let rec = Planes {
+        y: plane(&dump["eicci.in.a"]),
+        u: plane(&dump["eicci.in.b"]),
+        v: plane(&dump["eicci.in.c"]),
+    };
+    let src = SourceImage::Rgb(source(image));
+    let meta = src.meta(None, None).unwrap();
+    let org = icci::org_planes(&src, &meta).unwrap();
+    let models = ModelDir::new(ref_root().join("models"));
+    let got = icci::select(
+        &Engine::new(),
+        &models,
+        &NetCache::default(),
+        &headers.picture,
+        headers.picture.synthesis_transforms[0],
+        &org,
+        &rec,
+        &cfg,
+        &enough::Unstoppable,
+    )
+    .unwrap()
+    .expect("eICCI selection");
+    assert_eq!(got.tiling, want.tiling, "{name}: eICCI tiling");
+    assert_eq!(
+        got.tiles.len(),
+        want.tiles.len(),
+        "{name}: eICCI tile count"
+    );
+    let mut mismatched = 0usize;
+    for (t, (g, w)) in got.tiles.iter().zip(&want.tiles).enumerate() {
+        if g != w {
+            mismatched += 1;
+            println!("{name} tile {t}: ours {g:?} reference {w:?}");
+        }
+    }
+    (mismatched, want.tiles.len())
+}
+
+/// One channel of a reference-dump plane (`eicci.in.*` etc., `[1, 1, h, w]` f32).
+fn plane(t: &common::RefTensor) -> Tensor<f32> {
+    assert_eq!(t.shape.len(), 4);
+    Tensor::from_vec(t.shape[1], t.shape[2], t.shape[3], t.f32()).unwrap()
+}
+
+/// The vectors the reference encoder's eICCI search actually produced a selection for (the
+/// forced 4:2:0/4:2:2 streams carry an override — `force_icci_encode.py` — not a search).
+#[test]
+fn eicci_selection_matches_reference() {
+    let shipped = EicciConfig::default();
+    let mut bad = 0usize;
+    let mut total = 0usize;
+    for (name, cfg) in [
+        ("img30_base_eicci_bpp050", shipped),
+        ("img30_base_on_bpp025", shipped),
+        ("img30_base_on_bpp100", shipped),
+        (
+            "img01_base_eiccitiles_lef_bpp050",
+            EicciConfig {
+                tile_samples: 1_048_576,
+                ..shipped
+            },
+        ),
+    ] {
+        let image = if name.starts_with("img01") {
+            IMG01
+        } else {
+            IMG30
+        };
+        let (m, n) = check_eicci_selection(name, image, cfg);
+        println!("{name}: {m} of {n} tile selections differ from the reference");
+        bad += m;
+        total += n;
+    }
+    println!("eICCI selection: {bad} of {total} tile selections differ");
+    assert_eq!(bad, 0, "eICCI model selection diverges from the reference");
+}
+
+/// The reference decoder must accept our eICCI stream — the grammar puts `icci_enable_flag`
+/// and the per-tile indices inside the tool header, so a desynchronising write would fail
+/// loudly. Encodes `img30_base_eicci_bpp050`'s settings and hands the stream to
+/// `src.reco.coders.decoder`.
+#[test]
+#[ignore = "runs the reference decoder (Python); enable with --ignored"]
+fn reference_decoder_accepts_eicci_stream() {
+    let dec = zenjpegai::Decoder::new(ref_root().join("models"));
+    let reference =
+        std::fs::read(vector_dir("img30_base_eicci_bpp050").join("stream.bits")).unwrap();
+    let want = dec.read_headers(&reference).unwrap();
+    let stream = Encoder::new(ref_root().join("models"))
+        .encode(
+            source(IMG30),
+            EncodeParams {
+                model_id: want.picture.model_id,
+                beta_displacement_log: want.picture.beta_displacement_log,
+                op: want.picture.synthesis_transforms[0],
+                eicci: Some(EicciConfig::default()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let scratch = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/refdec");
+    std::fs::create_dir_all(&scratch).unwrap();
+    let bits = scratch.join("img30_eicci.bits");
+    let png = scratch.join("img30_eicci.png");
+    std::fs::write(&bits, &stream).unwrap();
+    ref_decode(&bits, &png, "img30_eicci");
+    let theirs = read_png_rgb8(&std::fs::read(&png).unwrap()).unwrap();
+    let ours = dec.decode(&stream).unwrap();
+    let worst = ours
+        .data
+        .iter()
+        .zip(&theirs.data)
+        .map(|(a, b)| (*a as i32 - *b as i32).abs())
+        .max()
+        .unwrap();
+    println!("reference decode of our eICCI stream: worst diff {worst}");
+    assert!(worst <= 1);
+}
+
+/// LEF on top of eICCI (`img01_base_eiccitiles_lef_bpp050` ran both tools).
+fn lef_on(p: EncodeParams) -> EncodeParams {
+    EncodeParams { lef: true, ..p }
+}
+
+/// A whole encode with eICCI on: the tool header our stream carries must be the reference
+/// stream's, and the stream must still decode.
+#[test]
+fn eicci_encode_end_to_end() {
+    use zenjpegai::decoder::read_headers;
+    let enc = Encoder::new(ref_root().join("models"));
+    let dec = zenjpegai::Decoder::new(ref_root().join("models"));
+    for (name, image, cfg, tools) in [
+        (
+            "img30_base_eicci_bpp050",
+            IMG30,
+            EicciConfig::default(),
+            plain as Tools,
+        ),
+        (
+            "img01_base_eiccitiles_lef_bpp050",
+            IMG01,
+            EicciConfig {
+                tile_samples: 1_048_576,
+                ..EicciConfig::default()
+            },
+            lef_on as Tools,
+        ),
+    ] {
+        let reference = std::fs::read(vector_dir(name).join("stream.bits")).unwrap();
+        let want = dec.read_headers(&reference).unwrap();
+        let want_icci = want.tools.icci.as_ref().expect("stream without eICCI");
+        let stream = enc
+            .encode(
+                source(image),
+                tools(EncodeParams {
+                    model_id: want.picture.model_id,
+                    beta_displacement_log: want.picture.beta_displacement_log,
+                    op: want.picture.synthesis_transforms[0],
+                    eicci: Some(cfg),
+                    ..Default::default()
+                }),
+            )
+            .unwrap();
+        let got = read_headers(&zenjpegai::container::Codestream::parse(&stream).unwrap())
+            .unwrap()
+            .tools
+            .icci
+            .expect("our stream has no eICCI header");
+        assert_eq!(
+            got, *want_icci,
+            "{name}: eICCI tool header differs from the reference's"
+        );
+        // And our stream still decodes to the reference picture's neighbourhood.
+        let ours = dec.decode(&stream).unwrap();
+        let theirs = dec.decode(&reference).unwrap();
+        let worst = ours
+            .data
+            .iter()
+            .zip(&theirs.data)
+            .map(|(a, b)| (*a as i32 - *b as i32).abs())
+            .max()
+            .unwrap();
+        assert!(worst <= 1, "{name}: decoded output differs by {worst}");
+        println!("{name}: eICCI encode end-to-end, decode worst diff {worst}");
+    }
+}
+
+/// The reference only ever ships `process_short_list = 1`; the long list (all ten networks)
+/// has no vector. Exercise it end to end: the stream must carry a parseable long-list header
+/// and decode.
+#[test]
+fn eicci_long_list_encodes() {
+    let enc = Encoder::new(ref_root().join("models"));
+    let dec = zenjpegai::Decoder::new(ref_root().join("models"));
+    let want = dec
+        .read_headers(
+            &std::fs::read(vector_dir("img30_base_eicci_bpp050").join("stream.bits")).unwrap(),
+        )
+        .unwrap();
+    let stream = enc
+        .encode(
+            source(IMG30),
+            EncodeParams {
+                model_id: want.picture.model_id,
+                beta_displacement_log: want.picture.beta_displacement_log,
+                op: want.picture.synthesis_transforms[0],
+                eicci: Some(EicciConfig {
+                    short_list: false,
+                    ..EicciConfig::default()
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let got = dec.read_headers(&stream).unwrap();
+    let icci = got.tools.icci.expect("our stream has no eICCI header");
+    for t in &icci.tiles {
+        assert!(!t.short_list, "long-list encode signalled the short list");
+        if t.use_yuv[0] {
+            assert!(t.index_y < 10);
+        }
+        if t.use_yuv[1] || t.use_yuv[2] {
+            assert!(t.index_uv < 10);
+        }
+    }
+    dec.decode(&stream).unwrap();
+}
+
+/// Selection is deterministic: every SIMD tier and thread mode must produce the identical
+/// stream — the nets are bit-identical across tiers and `ms_ssim` reduces in `f64`.
+#[test]
+fn eicci_tiers_agree_bit_for_bit() {
+    let src = source(IMG30);
+    let want = zenjpegai::Decoder::new(ref_root().join("models"))
+        .read_headers(
+            &std::fs::read(vector_dir("img30_base_eicci_bpp050").join("stream.bits")).unwrap(),
+        )
+        .unwrap();
+    let params = EncodeParams {
+        model_id: want.picture.model_id,
+        beta_displacement_log: want.picture.beta_displacement_log,
+        op: want.picture.synthesis_transforms[0],
+        eicci: Some(EicciConfig::default()),
+        ..Default::default()
+    };
+    let mut first: Option<Vec<u8>> = None;
+    for tier in Tier::available() {
+        for parallel in [false, true] {
+            let enc = Encoder::with_engine(ref_root().join("models"), Engine::with(tier, parallel));
+            let stream = enc.encode(src.clone(), params).unwrap();
+            match &first {
+                None => first = Some(stream),
+                Some(f) => assert_eq!(*f, stream, "{tier:?} parallel={parallel}"),
+            }
+        }
     }
 }

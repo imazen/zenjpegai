@@ -4,8 +4,21 @@
 
 ### QUEUED BREAKING CHANGES
 <!-- Breaking changes that will ship together in the next major (or minor for 0.x) release. -->
+- `EncodeParams` no longer derives `Eq` (the new `eicci` config carries `f32` loss weights).
 
 ### Added
+- Encoder: the eICCI model-selection search (`E3`) — `EncodeParams::eicci` / CLI
+  `--eicci [--eicci-loss mse|ms-ssim|mixed] [--eicci-long-list] [--eicci-tile-samples N]`
+  run the reference's `icci_filter.py::compress` + `model_idxes.py::encode_header` once on
+  the final reconstruction (`src/encoder/filters/icci.rs`, `src/encoder/msssim.rs`):
+  per-tile luma/chroma candidate search over the decoder's own eICCI networks, the shipped
+  `mixed` loss or pure `mse` / `ms-ssim` with configurable weights, the short lists or the
+  whole bank, the filter's `numSamplesPerTile` tiling, and the 4:4:4-source gate. `ms_ssim`
+  is a fixed-order `pytorch_msssim 0.2.1` port (f32 elementwise ops, f64 reductions) —
+  max abs error 2.0e-6 against the reference's own scores and bit-identical on every SIMD
+  tier. Selection parity: 0 of 9 tile selections differ from the reference on the four
+  eICCI vectors; our streams carry the identical `IcciHeader`, decode with worst diff 0,
+  and the reference decoder reads them.
 - Encoder: the EFE linear post-filter (`E1`) — `EncodeParams::efe_linear` / CLI
   `--efe-linear` run the reference's `EFElinear.compress` on the final reconstruction
   (`src/encoder/filters/efe_linear.rs`): region-split candidate search x filter lengths,

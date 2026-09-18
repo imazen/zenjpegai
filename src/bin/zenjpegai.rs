@@ -50,6 +50,13 @@ OPTIONS:
     --rvs --grfs       encode: residual variance scaling / channel gain flags
     --lsbs             encode: latent scaling before synthesis (a decoder-side tool)
     --lef              encode: signal the luma edge post-filter (LEF_chIdx is derived)
+    --eicci            encode: search and signal the eICCI post-filter (4:4:4 sources)
+    --eicci-loss <mse|ms-ssim|mixed>
+                       encode: eICCI selection loss (default: the shipped `mixed`)
+    --eicci-long-list  encode: eICCI candidates from the whole bank, not the short lists
+    --eicci-tile-samples <n>
+                       encode: eICCI tile budget (numSamplesPerTile; default 4194304,
+                       -1 tiles never)
     --efe-linear       encode: search and signal the EFE linear post-filter
     --efe-dctif-only   encode: signal EFE linear with no filters (DCTIF_only)
     --efe-nonlinear    encode: also fit the up-sampled set EFE non-linear needs
@@ -93,6 +100,7 @@ struct Args {
     grfs: bool,
     lsbs: bool,
     lef: bool,
+    eicci: Option<zenjpegai::encoder::EicciConfig>,
     efe_linear: bool,
     efe_dctif_only: bool,
     efe_nonlinear: bool,
@@ -127,6 +135,7 @@ fn parse_args() -> Result<Args, String> {
         grfs: false,
         lsbs: false,
         lef: false,
+        eicci: None,
         efe_linear: false,
         efe_dctif_only: false,
         efe_nonlinear: false,
@@ -184,6 +193,29 @@ fn parse_args() -> Result<Args, String> {
             "--grfs" => a.grfs = true,
             "--lsbs" => a.lsbs = true,
             "--lef" => a.lef = true,
+            "--eicci" => a.eicci = Some(Default::default()),
+            "--eicci-loss" => {
+                let cfg = a.eicci.get_or_insert_with(Default::default);
+                cfg.loss = match value("--eicci-loss")?.as_str() {
+                    "mse" => zenjpegai::encoder::EicciLoss::Mse,
+                    "ms-ssim" => zenjpegai::encoder::EicciLoss::MsSsim,
+                    "mixed" => zenjpegai::encoder::EicciLoss::Mixed,
+                    other => return Err(format!("--eicci-loss: unknown loss `{other}`")),
+                };
+            }
+            "--eicci-long-list" => {
+                a.eicci.get_or_insert_with(Default::default).short_list = false;
+            }
+            "--eicci-tile-samples" => {
+                let v = value("--eicci-tile-samples")?;
+                let cfg = a.eicci.get_or_insert_with(Default::default);
+                cfg.tile_samples = if v == "-1" {
+                    u32::MAX
+                } else {
+                    v.parse()
+                        .map_err(|e| format!("--eicci-tile-samples: {e}"))?
+                };
+            }
             "--efe-linear" => a.efe_linear = true,
             "--efe-dctif-only" => {
                 a.efe_linear = true;
@@ -385,6 +417,7 @@ fn run() -> Result<(), String> {
                 grfs: args.grfs,
                 lsbs: args.lsbs,
                 lef: args.lef,
+                eicci: args.eicci,
                 efe_linear: args.efe_linear,
                 efe_dctif_only: args.efe_dctif_only,
                 efe_nonlinear: args.efe_nonlinear,

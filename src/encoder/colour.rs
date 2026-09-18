@@ -388,10 +388,23 @@ pub(crate) struct SourcePlanes {
 
 /// `EFElinear.compress`'s `org_img_i` — see [`SourcePlanes`].
 pub(crate) fn source_planes(src: &SourceImage, meta: &SourceMeta) -> Result<SourcePlanes> {
-    let (w, h) = (src.width(), src.height());
-    let max = ((1u32 << meta.bit_depth) - 1) as f32;
     // The three components in `[0, 255]` (`convert_range_` to [0, 1], `to_YUV_`, then
     // `convert_range_` to the internal range). Chroma starts at the source's subsampling.
+    let mut planes = source_planes_01(src, meta)?;
+    for p in [&mut planes.luma, &mut planes.u, &mut planes.v] {
+        for v in p.iter_mut() {
+            *v *= 255.0;
+        }
+    }
+    Ok(planes)
+}
+
+/// `eICCI.compress`'s `org_img_i` — the same conversion [`source_planes`] performs, but left
+/// in the filter's internal `[0, 1]` range (its `convert_range_((0., 1.))` is the whole
+/// normalization; scaling through `[0, 255]` first would double-round).
+pub(crate) fn source_planes_01(src: &SourceImage, meta: &SourceMeta) -> Result<SourcePlanes> {
+    let (w, h) = (src.width(), src.height());
+    let max = ((1u32 << meta.bit_depth) - 1) as f32;
     let planes = match src {
         SourceImage::Rgb(rgb) => {
             if rgb.data.len() != w * h * 3 {
@@ -403,14 +416,14 @@ pub(crate) fn source_planes(src: &SourceImage, meta: &SourceMeta) -> Result<Sour
                 alloc::vec![0f32; w * h],
             );
             for i in 0..w * h {
-                // `to_YUV_`: [0, 1] -> BT.709 -> back to the internal range.
+                // `to_YUV_`: [0, 1] -> BT.709.
                 let r = rgb.data[3 * i] as f32 / max;
                 let g = rgb.data[3 * i + 1] as f32 / max;
                 let b = rgb.data[3 * i + 2] as f32 / max;
                 let y = KR * r + KG * g + KB * b;
-                yp[i] = y * 255.0;
-                up[i] = ((b - y) / KBY + 0.5) * 255.0;
-                vp[i] = ((r - y) / KRY + 0.5) * 255.0;
+                yp[i] = y;
+                up[i] = (b - y) / KBY + 0.5;
+                vp[i] = (r - y) / KRY + 0.5;
             }
             SourcePlanes {
                 luma: yp,
@@ -425,8 +438,8 @@ pub(crate) fn source_planes(src: &SourceImage, meta: &SourceMeta) -> Result<Sour
             if yuv.y.len() != w * h || yuv.u.len() != cw * ch || yuv.v.len() != cw * ch {
                 return Err(Error::InvalidArgument("YUV plane size does not match"));
             }
-            // `read_yuv` keeps the [0, 1] range; `convert_range_` to the internal range.
-            let scale = |p: &[u16]| p.iter().map(|&v| v as f32 / max * 255.0).collect();
+            // `read_yuv` keeps the [0, 1] range.
+            let scale = |p: &[u16]| p.iter().map(|&v| v as f32 / max).collect();
             SourcePlanes {
                 luma: scale(&yuv.y),
                 u: scale(&yuv.u),
