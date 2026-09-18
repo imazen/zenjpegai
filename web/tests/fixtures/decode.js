@@ -1,7 +1,7 @@
 import { DecoderPool } from './src/pool.js';
 
-// `?gpu=` selects the pool's adapter policy (auto|software|force-software|off); the tests use
-// it to force the software-adapter GPU path on hosts without hardware WebGPU.
+// `?gpu=` selects the pool's adapter policy (auto|on|software|force-software|off); the tests
+// use it to force the software-adapter GPU path on hosts without hardware WebGPU.
 const gpuMode = new URLSearchParams(location.search).get('gpu') || 'auto';
 const pool = new DecoderPool({ modelsBaseUrl: 'models/', gpu: gpuMode });
 window.__pool = pool;

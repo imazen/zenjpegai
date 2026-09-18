@@ -2,8 +2,11 @@
 //
 // Package selection: the `?gpu=` query param on the worker URL (set by `pool.js`) chooses
 //   off             -> `threads` (cross-origin isolated) or `simd`, exactly the historical choice
-//   auto (default)  -> try `pkg-webgpu` + `initGpu(0)` when `navigator.gpu` exists; a non-software
-//                      adapter keeps that package, anything else falls back to the CPU packages
+//   auto (default)  -> same CPU packages: measured on an RTX 2080 (2026-09-18, demo streams
+//                      ~1 MP) the WebGPU path's wall-clock decode does not beat the threads
+//                      engine, so `auto` does not pay the pkg-webgpu download (see web/README §7)
+//   on              -> try `pkg-webgpu` + `initGpu(0)`; a non-software adapter keeps that
+//                      package, anything else falls back to the CPU packages
 //   software        -> `pkg-webgpu` + `initGpu(1)`: software adapters accepted (test/debug mode —
 //                      the GPU code path runs even on a GPU-less host, slower than the CPU engine)
 //   force-software  -> `pkg-webgpu` + `initGpu(2)`: additionally passes WebGPU's
@@ -25,6 +28,9 @@
 // {type: 'ready-error', message} if wasm itself failed to load/instantiate (e.g. this browser
 // has no wasm SIMD128 and the build requires it — see web/README.md caniuse note). `gpu` is the
 // initGpu() result ({ok, adapter, backend, software}) or null; `gpuError` says why it is null.
+// `adapterProbe` is the JS-side `GPUAdapter.info` from the pre-download probe ({vendor,
+// architecture, device, description, isFallbackAdapter}) — the wgpu-side `gpu.adapter` only
+// carries `description`, which Chrome leaves empty for hardware adapters.
 
 const isolated = typeof crossOriginIsolated !== 'undefined' && crossOriginIsolated === true;
 const cpuVariant = isolated ? 'threads' : 'simd';
@@ -110,6 +116,7 @@ let mod = null;
 let variant = cpuVariant;
 let gpuInfo = null;
 let gpuError = null;
+let adapterProbe = null;
 const queue = [];
 let draining = false;
 // In-flight call and its trap-detector: a Rust panic in the wasm build is panic=abort, so it
@@ -144,8 +151,19 @@ const ready = (async () => {
         // whole pkg-webgpu download when the only adapter is software (a CPU rasteriser is
         // slower than this decoder's own CPU engine, so that adapter is never worth it).
         const probe = await navigator.gpu.requestAdapter().catch(() => null);
-        const fallbackOnly = !!(probe && probe.info && probe.info.isFallbackAdapter);
-        if (probe && (gpuSoftwareMode >= 1 || !fallbackOnly)) {
+        const pi = probe && probe.info;
+        adapterProbe = pi
+          ? {
+              vendor: pi.vendor || '',
+              architecture: pi.architecture || '',
+              device: pi.device || '',
+              description: pi.description || '',
+              isFallbackAdapter: !!pi.isFallbackAdapter,
+            }
+          : null;
+        const fallbackOnly = !!adapterProbe?.isFallbackAdapter;
+        const wantGpu = gpuMode === 'on' || gpuSoftwareMode >= 1;
+        if (probe && wantGpu && (gpuSoftwareMode >= 1 || !fallbackOnly)) {
           try {
             const m = await import(new URL('../dist/pkg-webgpu/zenjpegai.js', import.meta.url).href);
             await m.default(); // fetches `zenjpegai_bg.wasm` next to zenjpegai.js
@@ -155,10 +173,12 @@ const ready = (async () => {
           } catch (err) {
             gpuError = `no usable GPU context: ${String((err && err.message) || err)}`;
           }
+        } else if (!probe) {
+          gpuError = 'requestAdapter returned null';
+        } else if (!wantGpu) {
+          gpuError = 'gpu=auto keeps the CPU engine (see web/README §7); ?gpu=on opts in';
         } else {
-          gpuError = probe
-            ? `only a software WebGPU adapter (${probe.info?.description || 'fallback'})`
-            : 'requestAdapter returned null';
+          gpuError = `only a software WebGPU adapter (${probe.info?.description || 'fallback'})`;
         }
       } else {
         gpuError = 'navigator.gpu is absent';
@@ -173,7 +193,7 @@ const ready = (async () => {
         await mod.initThreadPool(rayonThreads());
       }
     }
-    self.postMessage({ type: 'ready', variant, tier: mod.simdTier(), gpu: gpuInfo, gpuError });
+    self.postMessage({ type: 'ready', variant, tier: mod.simdTier(), gpu: gpuInfo, gpuError, adapterProbe });
   } catch (err) {
     mod = null;
     self.postMessage({ type: 'ready-error', variant, message: String((err && err.message) || err) });

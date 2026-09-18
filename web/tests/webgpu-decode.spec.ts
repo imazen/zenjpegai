@@ -1,5 +1,7 @@
 // WebGPU synthesis path coverage. `decode.html?gpu=<mode>` picks the pool's adapter policy:
-//   auto            default — GPU only on a non-software adapter, else the CPU packages
+//   auto            default — the CPU packages (measured: hardware GPU does not beat the
+//                   threads engine at demo sizes, web/README §7)
+//   on              GPU opt-in — pkg-webgpu on a non-software adapter, else the CPU packages
 //   software        accept software adapters too (Dawn SwiftShader on GPU-less hosts)
 //   off             never load pkg-webgpu
 // `path` in each decode's timings says what actually ran ('gpu' = WebGPU synthesis, 'cpu' =
@@ -34,15 +36,23 @@ function annotate(testInfo, label: string, value: unknown) {
   testInfo.annotations.push({ type: label, description: String(value) });
 }
 
-test('gpu=auto: decode parity on whichever path the adapter allows', async ({ page }, testInfo) => {
-  const { info, r } = await decodeOnce(page, PORTS.isolated, 'auto');
+test('gpu=on: decode parity on whichever path the adapter allows', async ({ page }, testInfo) => {
+  const { info, r } = await decodeOnce(page, PORTS.isolated, 'on');
   annotate(testInfo, 'decode-path', r.timings.path);
   annotate(testInfo, 'adapter', info.gpu ? `${info.gpu.adapter} (${info.gpu.backend})` : info.gpuError || 'none');
+  if (process.env.WEBGPU_ADAPTER === 'hardware') {
+    // A hardware run must not silently downgrade to a fallback adapter or a CPU path.
+    expect(
+      info.gpu?.ok && info.gpu.software === false && info.adapterProbe?.isFallbackAdapter === false,
+      `WEBGPU_ADAPTER=hardware but no hardware WebGPU adapter: ${JSON.stringify({ gpu: info.gpu, gpuError: info.gpuError, adapterProbe: info.adapterProbe })}`,
+    ).toBeTruthy();
+    expect(r.timings.path, `expected the GPU path, got cpu: ${r.timings.gpuError || ''}`).toBe('gpu');
+  }
   expect(r.timings.path === 'gpu' || r.timings.gpuError || info.gpuError).toBeTruthy();
   expect(r.differing / r.samples).toBeLessThan(MAX_DIFFERING_RATIO);
   expect(r.max).toBeLessThanOrEqual(1);
   console.log(
-    `[auto/${r.timings.path}] adapter=${info.gpu ? info.gpu.adapter : 'none'} ${r.differing}/${r.samples} differ (max ${r.max}), decode ${r.timings.decode.toFixed(1)}ms`,
+    `[on/${r.timings.path}] adapter=${info.gpu ? info.gpu.adapter : 'none'} probe=${JSON.stringify(info.adapterProbe)} ${r.differing}/${r.samples} differ (max ${r.max}), decode ${r.timings.decode.toFixed(1)}ms`,
   );
 });
 
@@ -74,7 +84,7 @@ test('gpu=off: never loads the webgpu package', async ({ page }) => {
 });
 
 test('canvas presentation: GPU blit or 2d fallback, pixels verified', async ({ page }, testInfo) => {
-  const info = await setup(page, PORTS.isolated, 'auto');
+  const info = await setup(page, PORTS.isolated, 'on');
   const r = await page.evaluate(
     ({ stream, png }) => window.__presentAndCompare(stream, png),
     { stream: STREAM, png: PNG },

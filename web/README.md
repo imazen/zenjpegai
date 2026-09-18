@@ -12,7 +12,7 @@ Updated 2026-09-18. What follows is exact: missing things first.
 | --- | --- | --- |
 | 6 | GitHub Pages | **enabled** (checked 2026-09-18: `gh api repos/imazen/zenjpegai/pages` returns `build_type: workflow`, site live at `https://imazen.github.io/zenjpegai/`; repo is public). The Pages deploy makes PUBLIC: the 16 demo `.jai` streams, the 8 packed model-bundle halves (`m{0,1,2,3}_{common,bop}.zjb`, BSD-licensed upstream weights — notice text embedded in every bundle and shown on the demo page + `upstream-notices/LICENSE`), the reference-decoder PNGs used as the test oracle, and this wasm build of the AGPL/commercial-licensed crate. Nothing else. |
 | 6 | GPU (`gpu/`) wiring into the web build | **not started, and correctly so per the brief's own fallback clause**: `gpu/README.md` does not exist on `main` (checked 2026-09-18: `find gpu -type f` lists no README), so there is no documented usable async API to wire in yet. `gpu/src/decoder.rs` exists (native wgpu, not built for `wasm32-unknown-unknown` by anything in this session) — the demo (`web/demo/demo.js`) feature-detects `navigator.gpu` and reports whether WebGPU is available in the browser, but always decodes via the CPU/wasm path. Wire a real WebGPU path once `gpu/README.md` lands. |
-| 6 | GPU (`gpu/`) wiring into the web build | **wired, with one real upstream-shaped caveat** (see §7): `pkg-webgpu` exists and the full GPU decode + no-readback present path runs in a browser (verified through SwiftShader — **the browser GPU path has still never run on a hardware WebGPU adapter** (the `gpu/` crate itself has since run on hardware natively — its own README)). Known wgpu-30 web-backend limitation: `GpuDecoder`'s `create_buffer_init` buffers map at creation, Dawn caps those, and wgpu **unwraps the JS error into a wasm trap** instead of a `GpuError` — recovered transparently by worker-side trap handling (`disableGpu` + retry on CPU), documented in `gpu/README.md` "Known limitations". Never observed on a hardware adapter (none available). |
+| 6 | GPU (`gpu/`) wiring into the web build | **wired and verified on hardware** (2026-09-18, RTX 2080 via Dawn/Vulkan in headless Chromium — §7): the `mappedAtCreation` trap is fixed at the root in `gpu/` (unmapped `create_buffer` + chunked `queue.write_buffer`); worker-side trap recovery stays as defence in depth but no longer fires. Remaining limitation: Dawn's SwiftShader adapter loses its device at model-2 (bpp75) load — the GPU path then falls back per call to the CPU engine (§7). `auto` deliberately stays on the CPU engine: measured GPU vs threads wall decode at demo sizes is parity-or-slower (§7). |
 
 | 1 | Bundle fetched **exactly** once per (model, op) actually needed | Done at the pool/worker level (`ensureModels` in `web/src/worker.js` checks `hasModels` before fetching, and the Cache API means a repeat visit skips the network entirely) but each `simd`-variant Worker in the pool has its OWN wasm memory, so if the pool spawns >1 simd worker (it does, up to `hardwareConcurrency`, capped at 4) and two images on the page need the same model, **that model's bundle is fetched+parsed once per worker that needs it**, not once globally. Acceptable (HTTP/Cache-API means only the first worker pays the network cost; the rest hit cache) but not "exactly once" in the strict sense — documented, not fixed. |
 | — | wasm SIMD128 caniuse | not independently re-checked this session (Firefox 155 / Chrome 153 / Safari 26 — the three actually installed and tested below — all ran the `simd` package correctly, which is itself evidence, but no browsers older than "currently installed by Playwright" were probed). |
@@ -115,15 +115,16 @@ whenever another workspace is running tests (seen live: a foreign server on 3032
   and "per-image decode under 8x load stays <= 2x a solo decode". Appends to
   `benchmarks/wasm_demo_scheduling_<date>.tsv`; chromium-only. `JAI_BASE_PLAIN` /
   `JAI_BASE_ISOLATED` env vars point it at another site tree (used for the pre-fix comparison).
-- `webgpu-decode.spec.ts` (added 2026-09-18): `gpu=auto` / `software` / `off` package selection
+- `webgpu-decode.spec.ts` (added 2026-09-18): `gpu=on` / `software` / `off` package selection
   and canvas presentation, GPU-path parity reported separately — details in §7.
 
 - `benchmark.spec.ts`: decodes all 16 demo streams per browser, appends timings to
   `benchmarks/wasm_decode_<date>.tsv` + a `.meta` (commit/host/command). `just web-test` or the
   Pages CI workflow run it; `npm test` in `web/` runs the whole suite.
-- `benchmark-gpu.spec.ts` (added 2026-09-18): same corpus through the `gpu=software` pool on the
-  `chromium-webgpu` project, decode and present timed separately, appends to
-  `benchmarks/wasm_decode_<date>_gpu.tsv` + `.meta` (adapter name and launch flags included).
+- `benchmark-gpu.spec.ts` (added 2026-09-18): same corpus through the GPU pool (`gpu=on`, or
+  `software` under `WEBGPU_ADAPTER=swiftshader`) on the `chromium-webgpu` project plus
+  `gpu=off` rows on the threads and simd packages, decode and present timed separately, appends
+  to `benchmarks/wasm_decode_<date>_gpu.tsv` + `.meta` (adapter name and launch flags).
 
 Measured decode times (isolated server, `threads` package — Ryzen 9 9950X3D, shared box):
 **~95-130 ms** median per ~1 MP image in chromium/firefox, ~130 ms in webkit — roughly half of
@@ -264,13 +265,24 @@ plus `zenjpegai-gpu` (wgpu 30 web backend) behind the `gpu` cargo feature. `pkg-
 `pkg-threads` are unchanged.
 
 - **Package selection** (`web/src/worker.js`, driven by `?gpu=` on the worker URL from
-  `DecoderPool`'s `gpu` option): `auto` (default) probes `navigator.gpu.requestAdapter()` in JS
-  first — `pkg-webgpu` is downloaded only when a **non-software** adapter answers (a software
-  rasteriser is slower than this decoder's own CPU engine, so software-only browsers skip the
-  ~214 KB brotli download entirely). `initGpu(mode)` inside wasm then builds a `GpuContext`;
-  any failure discards the package and loads `simd`/`threads` as before. `software` /
-  `force-software` accept software adapters (test/debug; `force-software` also sets WebGPU's
-  `forceFallbackAdapter`). `off` never touches `pkg-webgpu`.
+  `DecoderPool`'s `gpu` option): the worker probes `navigator.gpu.requestAdapter()` in JS first
+  and reports `adapterProbe` (vendor / architecture / `isFallbackAdapter`) in its `ready`
+  message — the wgpu-side adapter name comes back empty under Chrome's Dawn mapping, so tests
+  and the demo read the probe. `on` downloads `pkg-webgpu` only when a **non-software** adapter
+  answers (a software rasteriser is slower than this decoder's own CPU engine, so software-only
+  browsers skip the ~214 KB brotli download entirely). `initGpu(mode)` inside wasm then builds
+  a `GpuContext`; any failure discards the package and loads `simd`/`threads` as before.
+  `software` / `force-software` accept software adapters (test/debug; `force-software` also
+  sets WebGPU's `forceFallbackAdapter`). `off` never touches `pkg-webgpu`.
+- **`auto` (the default) is the CPU engine, measured**: on an RTX 2080 (2026-09-18, Chromium
+  153, Dawn/Vulkan) the WebGPU path's wall-clock `decode_ms` ran 178-302 ms across the ~1 MP
+  demo streams vs 158-287 ms for the `threads` CPU engine — at parity or slower on every
+  stream, because the per-call upload/dispatch/readback latency (~150 ms) dwarfs the 20-130 ms
+  of device time at these sizes. The native sweep (`benchmarks/gpu_decode_2026-09-17_rtx2080`)
+  shows the GPU pulling ahead only past ~0.25-1 MP of synthesis work per picture; the demo
+  streams sit right at that boundary. So `auto` does not pay the pkg-webgpu download; `?gpu=on`
+  opts in (and on a non-isolated page where only `pkg-simd` is available the GPU does win,
+  ~4-8x — `on` is worth it there).
 - **Decode**: `decode()` is async in the webgpu build. It runs `GpuDecoder` (CPU entropy +
   latent stages, GPU synthesis); any `GpuError` or adapter problem falls back to the CPU engine
   inside the same call and reports `path: 'cpu'` + `gpuError` in timings. Non-GPU packages keep
@@ -282,37 +294,39 @@ plus `zenjpegai-gpu` (wgpu 30 web backend) behind the `gpu` cargo feature. `pkg-
   `rgba8unorm` texture without any CPU readback (`presented: 'gpu'`). Non-presentable pictures
   or any present failure decode on CPU and `putImageData` on a 2d context (`presented: '2d'`).
   `verify` asks the worker to also return a PNG of the canvas for tests.
-- **Trap recovery** (needed because of the `create_buffer_init` issue in `gpu/README.md`): a
+- **Trap recovery** is now defence in depth, not load-bearing: the `create_buffer_init` /
+  `mappedAtCreation` trap was fixed at the root in `gpu/` (unmapped `create_buffer` + chunked
+  `queue.write_buffer` — see `gpu/README.md` "Known limitations"). The handler stays because a
   Rust panic in this build is `panic=abort`, which escapes the wasm-bindgen promise as an
-  uncaught `RuntimeError` instead of rejecting it. `self.onerror` catches it, calls
-  `disableGpu()`, fails the in-flight message with `trapped: true`, and `pool.js` retries the
-  call once — the retry runs on the CPU engine and its `timings.gpuError` records the trap.
-  Verified live: `car_bpp25` decode+present on GPU, then `car_bpp75` trapped in
-  `GPUDevice.createBuffer` and retried on CPU with the trap noted in `gpuError`.
-- **Playwright**: `chromium-webgpu` project (`--enable-unsafe-webgpu --enable-features=Vulkan`,
-  `--use-webgpu-adapter=$WEBGPU_ADAPTER` when set). `webgpu-decode.spec.ts` covers `auto`,
-  `software`, `off`, and canvas presentation; test names/log lines print which path ran
-  (`[software/gpu (software adapter)]`, `[present-software/gpu/gpu]`, `[auto/cpu]` …). On this
-  host (no hardware adapter): `WEBGPU_ADAPTER=swiftshader` ran the real GPU path — 201 of
-  3,000,000 samples differ from the reference PNG, all by 1 — and `presented: 'gpu'` confirmed
-  the no-readback blit. The same parity bound as the CPU tests, reported separately because GPU
-  output is not bit-identical to CPU output.
+  uncaught `RuntimeError`: `self.onerror` catches it, calls `disableGpu()`, fails the in-flight
+  message with `trapped: true`, and `pool.js` retries the call once on the CPU engine.
+- **Playwright**: `chromium-webgpu` project takes `WEBGPU_ADAPTER=hardware|swiftshader`.
+  `hardware` adds `--use-angle=vulkan --ignore-gpu-blocklist` and the specs **fail loudly** if
+  `adapterProbe.isFallbackAdapter !== false` or the decode did not take `path: 'gpu'`;
+  `swiftshader` adds `--use-webgpu-adapter=swiftshader` for the software path;
+  unset keeps the base flags. `webgpu-decode.spec.ts` covers `on`, `software`, `off`, and
+  canvas presentation. Hardware run (this host's RTX 2080): all decodes on `path: 'gpu'`,
+  `presented: 'gpu'`, 195 of 3,000,000 samples differ from the reference PNG (all by 1 — same
+  bound as the CPU tests; GPU output is not bit-identical to CPU output).
 - **Benchmarks**: `tests/benchmark-gpu.spec.ts` writes `benchmarks/wasm_decode_<date>_gpu.tsv`
-  (+ `.meta` with adapter name / launch flags). SwiftShader numbers: GPU decode ~4.5 s at
-  1 MP vs ~290 ms CPU — a software rasteriser is predictably slower; the run also captured the
-  trap recovery (first stream's decode+present on GPU, subsequent streams on CPU after the
-  `createBuffer` trap). Package sizes appended to `benchmarks/wasm_size_2026-09-18.md` §7:
-  `pkg-webgpu` is 651,502 bytes after `wasm-opt` (+74% over `pkg-simd`), 213,817 brotli.
+  (+ `.meta` with adapter name / launch flags) — GPU rows plus `off (threads)` / `off (simd)`
+  CPU rows for the crossover above. SwiftShader (`WEBGPU_ADAPTER=swiftshader`): bpp25 streams
+  run the GPU path (~2 s per decode); at model-2 (bpp75) load Dawn's SwiftShader device is lost
+  ("async map a buffer" device error — a tighter software-adapter ceiling, requests are already
+  clamped to adapter limits) and remaining rows are honest per-call CPU fallbacks.
+- **Package sizes** appended to `benchmarks/wasm_size_2026-09-18.md` §7: `pkg-webgpu` is
+  651,502 bytes after `wasm-opt` (+74% over `pkg-simd`), 213,817 brotli.
 
 ## Next steps, in order
 
 1. Enable GitHub Pages (human decision — see "Not done" table) and watch `.github/workflows/pages.yml`
    run for real; the workflow itself has never executed (this session only ran the equivalent
    steps locally).
-2. Re-run §7's benchmark on a host with a **hardware** WebGPU adapter (every number above is
-   SwiftShader/llvmpipe — no hardware GPU has ever run this path), and fix the
-   `create_buffer_init` staging-buffer trap in `gpu/src/layers.rs` (plan in `gpu/README.md`
-   "Known limitations") — until then long GPU sessions degrade to CPU mid-run.
+2. ~~Re-run §7's benchmark on a hardware adapter + fix the `create_buffer_init` trap~~ — done
+   2026-09-18 (§7): RTX 2080 through Dawn/Vulkan, all decodes on the GPU path, trap removed at
+   the root. Open leftovers: Dawn's SwiftShader device loss at model-2 load, and `auto` stays
+   on the CPU engine because the GPU does not beat it at demo sizes — revisit the default if a
+   fast-path closes the ~150 ms per-call upload/readback gap.
 3. Speed: the `Wasm128` micro-kernel is still slower than native AVX-512 on one thread (measured
    2026-09-17: 0.35s vs 0.093s). Untried: relaxed-simd is ruled out by the numeric policy, a wider
    register block for 1x1 convolutions and a `node --cpu-prof` profile are not.

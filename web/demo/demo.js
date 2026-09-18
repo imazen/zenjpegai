@@ -31,9 +31,10 @@ const variantCell = statusRow('build', '…');
 const tierCell = statusRow('SIMD tier', '…');
 const workersCell = statusRow('workers', '…');
 
-// WebGPU: `DecoderPool` (default `gpu: 'auto'`) loads the pkg-webgpu build when this browser
-// offers a non-software adapter; the note below is filled in once the pool reports ready —
-// until then it only says what the browser advertises.
+// WebGPU: `DecoderPool`'s default `gpu: 'auto'` keeps the CPU engine — measured on an RTX
+// 2080 the WebGPU path does not beat it at these sizes (web/README §7); `?gpu=on` opts in.
+// The note below is filled in once the pool reports ready — until then it only says what the
+// browser advertises.
 if ('gpu' in navigator) {
   navigator.gpu.requestAdapter().then((adapter) => {
     $gpuNote.textContent = adapter
@@ -58,7 +59,7 @@ const manifest = await fetch('manifest.json', { cache: 'no-cache' }).then((r) =>
 // under the same file name still gets a fresh cache entry.
 const bundleVersions = {};
 for (const [name, info] of Object.entries(manifest.models || {})) bundleVersions[name] = info.sha256;
-// `?gpu=off|auto|software|force-software` overrides the pool's adapter policy (default auto).
+// `?gpu=off|auto|on|software|force-software` overrides the pool's adapter policy (default auto).
 const gpuMode = new URLSearchParams(location.search).get('gpu') || 'auto';
 const pool = new DecoderPool({ modelsBaseUrl: 'models/', bundleVersions, gpu: gpuMode });
 // Test/debug hooks: the Playwright specs read these.

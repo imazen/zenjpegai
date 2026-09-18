@@ -47,10 +47,13 @@ export default defineConfig({
     },
     {
       // WebGPU-enabled Chromium: `--enable-unsafe-webgpu` exposes navigator.gpu without an
-      // origin trial. `WEBGPU_ADAPTER=swiftshader` adds --use-webgpu-adapter=swiftshader for
-      // GPU-less hosts (exercises the GPU code path through Dawn's software adapter; tests
-      // report it as a software adapter, never as hardware). On a host with a real GPU leave
-      // WEBGPU_ADAPTER unset so Dawn picks the hardware adapter.
+      // origin trial. `WEBGPU_ADAPTER` selects the adapter policy:
+      //   hardware    Vulkan + ANGLE-on-Vulkan + ignore-gpu-blocklist; Dawn must hand back a
+      //               real (non-fallback) adapter — the specs FAIL when it doesn't
+      //   swiftshader --use-webgpu-adapter=swiftshader for GPU-less hosts (exercises the GPU
+      //               code path through Dawn's software adapter; tests report it as a software
+      //               adapter, never as hardware)
+      //   unset       default WebGPU behaviour — whatever Dawn hands back (non-fatal either way)
       name: 'chromium-webgpu',
       use: {
         ...devices['Desktop Chrome'],
@@ -58,7 +61,9 @@ export default defineConfig({
           args: [
             '--enable-unsafe-webgpu',
             '--enable-features=Vulkan',
-            ...(process.env.WEBGPU_ADAPTER ? [`--use-webgpu-adapter=${process.env.WEBGPU_ADAPTER}`] : []),
+            '--ignore-gpu-blocklist',
+            ...(process.env.WEBGPU_ADAPTER === 'hardware' ? ['--use-angle=vulkan'] : []),
+            ...(process.env.WEBGPU_ADAPTER === 'swiftshader' ? ['--use-webgpu-adapter=swiftshader'] : []),
           ],
         },
       },

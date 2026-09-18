@@ -74,7 +74,7 @@ export class DecoderPool {
         const msg = ev.data;
         if (msg.type === 'ready') {
           w.removeEventListener('message', onFirst);
-          resolve({ ok: true, variant: msg.variant, tier: msg.tier, gpu: msg.gpu || null, gpuError: msg.gpuError || null });
+          resolve({ ok: true, variant: msg.variant, tier: msg.tier, gpu: msg.gpu || null, gpuError: msg.gpuError || null, adapterProbe: msg.adapterProbe || null });
         } else if (msg.type === 'ready-error') {
           w.removeEventListener('message', onFirst);
           resolve({ ok: false, variant: msg.variant, error: msg.message });
