@@ -13,6 +13,18 @@
   reference's effective -10 %/+5 % tolerances and unclamped bisection window). It picks the
   reference's `(model, beta)` exactly at all five CTC rates on both test pictures; the coded
   measure stays the default.
+- `zencodec` encode bridge (`E9`): `JpegAiEncoderConfig` → `JpegAiEncodeJob` →
+  `JpegAiEncoder` behind the `zencodec` feature, mirroring the decoder side — the config
+  carries `Arc<dyn ModelSource>` + `Engine` + `EncodeParams` + `EncodeLimits` and shares one
+  `Encoder`'s model cache across clones/jobs. `with_generic_quality(q)` rate-matches to
+  `q / 100` bits per pixel (`Encoder::encode_to_bpp`, the `RateMatch` reported back as an
+  output extension); `estimate_encode_resources` reports the calibrated
+  `estimate_encode_memory`; per-job `with_limits`/`with_stop` layer onto the config's.
+  Accepted input: full-range RGB8/RGB16 `PixelSlice` (sRGB-tagged or untagged) and
+  padding-alpha RGBA8 via `encode_srgba8`; other descriptors, row-push and animation are
+  rejected with `UnsupportedOperation`. Proven byte-identical to `Encoder::encode` /
+  `encode_to_bpp` (`tests/codec_ref.rs`).
+
 - Encoder resource limits and a memory estimate, mirroring the decoder's (`E8`):
   `EncodeLimits` (max pixels / dimensions / estimated heap; default 120 MP and 4 GiB),
   `Encoder::limits`, `estimate_encode_memory` / `Encoder::estimate_memory` (fixed-model or

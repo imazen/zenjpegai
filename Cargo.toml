@@ -38,10 +38,11 @@ unstable-internals = []
 # The `zenjpegai` command line tool (PNG output through zenpng). Needs unstable-internals: the
 # CLI reaches nn::fast::{Engine, Tier, set_pool_limit}, model::*, weights::packed::*.
 cli = ["std", "pth", "dep:zenpng", "dep:imgref", "dep:rgb", "unstable-internals"]
-# zencodec trait implementations (DecoderConfig / DecodeJob / Decode) for dispatch through
-# zencodecs and other zencodec-driven pipelines. RGB output only today (see src/codec.rs).
-# Needs unstable-internals: JpegAiDecoderConfig's public API takes model::ModelSource +
-# nn::fast::Engine.
+# zencodec trait implementations (decode: DecoderConfig / DecodeJob / Decode; encode:
+# EncoderConfig / EncodeJob / Encoder) for dispatch through zencodecs and other
+# zencodec-driven pipelines. Decode is RGB output only, encode RGB input only (src/codec.rs).
+# Needs unstable-internals: JpegAiDecoderConfig/JpegAiEncoderConfig's public API takes
+# model::ModelSource + nn::fast::Engine.
 zencodec = ["std", "dep:zencodec", "dep:zenpixels", "unstable-internals"]
 # Reading raw upstream PyTorch `.pth` checkpoints (a ZIP + a data-only pickle interpreter,
 # `src/weights/{pickle,zip}.rs`) straight from a model directory, as opposed to only the packed

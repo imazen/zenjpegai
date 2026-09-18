@@ -516,8 +516,25 @@ measured numbers in the status table above when you close an item.
   `encoder_end_to_end_matches_reference`, `rate_matching_hits_the_target` and the `formats`
   vectors still pass. CLI `--pool-mb` now applies to `encode` too. Still unmeasured: HOP
   encodes (the estimate pads HOP's fixed cost from the decoder-side model ratio).
-- **E9 zencodec encoder trait.** Mirror `src/codec.rs` for encoding (config carries the model
-  source and `EncodeParams`); test bit-identity with `Encoder::encode`.
+- ~~**E9 zencodec encoder trait.**~~ **Done 2026-09-18**: `JpegAiEncoderConfig` /
+  `JpegAiEncodeJob` / `JpegAiEncoder` in `src/codec.rs`, the encode-side mirror of the decoder
+  bridge (config = `Arc<dyn ModelSource>` + `Engine` + `EncodeParams` + `EncodeLimits`, cheap
+  `Clone` sharing the encoder's model cache). `EncoderConfig::with_generic_quality` maps `q`
+  to `q / 100` bpp and selects `Encoder::encode_to_bpp`; `estimate_encode_resources` reports
+  E8's calibrated `estimate_encode_memory` (live → `peak_memory_bytes_est`, live + pool →
+  `peak_memory_bytes_max`) plus a wall-time model from
+  `benchmarks/encode_end_to_end_2026-09-18.tsv`. Per-job `with_limits` layers a check in front
+  of the shared encoder (strictest of job vs config wins) plus `max_output_bytes` on the
+  stream; `with_stop` drives the same `enough` token as the decode side. Inputs: interleaved
+  RGB8/RGB16 full-range sRGB-or-untagged `PixelSlice`s (the `RDI` written carries no CICP, so
+  other tagging is refused rather than mislabelled), `encode_srgba8` for padding-alpha RGBA8.
+  Row-push, pull and animation encode are rejected via `UnsupportedOperation`. Byte-identity
+  gate: `tests/codec_ref.rs` — `encode_matches_the_plain_api_byte_for_byte`,
+  `encode_16bit_matches_the_plain_api`, `rate_matched_encode_matches_the_plain_api` (with the
+  `RateMatch` surfaced as an output extension) and `encode_srgba8_strips_padding_alpha` all
+  compare against `Encoder::encode` / `encode_to_bpp` on a decoded source; limits, stop and
+  estimate paths covered alongside. Still open: forwarding a descriptor's CICP into `RDI`,
+  and `Metadata` is dropped, not embedded (no ICC/EXIF/XMP carrier is declared).
 
 ### Browser and GPU
 
