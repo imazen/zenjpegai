@@ -275,6 +275,9 @@ impl ContextModel {
     /// deriving each stage's skip-mode cube flags from its own reconstruction error and
     /// re-quantising with the cubes it must not skip.
     ///
+    /// `num_chs` is the header's coded channel count: channels at or above it take `diff = 0`
+    /// (`context.py::pred` zeroes `diff[:, num_decode_chs:]`), so they contribute nothing to
+    /// the cube flags and their quantised / dequantised residuals are zero.
     #[allow(clippy::too_many_arguments)]
     pub fn compress<Q: Quantiser>(
         &self,
@@ -283,6 +286,7 @@ impl ContextModel {
         psi: &BTensor,
         q: &Q,
         mask: &Tensor<bool>,
+        num_chs: usize,
         cube_thr: f32,
         stop: &dyn enough::Stop,
     ) -> Result<Compressed> {
@@ -323,7 +327,8 @@ impl ContextModel {
             let (py, px) = STAGE_POSITIONS[s];
 
             // Pass 1: quantise with the sigma-threshold mask only, and record the error the
-            // cube flags are decided on (zeroed on the padded row / column).
+            // cube flags are decided on (zeroed on the padded row / column). Uncoded channels
+            // take `diff = 0`, so their error is zero and they never clear a cube flag.
             for ch in 0..c {
                 let (b, lane) = (ch / v, ch % v);
                 for yy in 0..hh {
@@ -335,7 +340,9 @@ impl ContextModel {
                         // positions of the mask with false.
                         let inside = sy < h && sx < w;
                         let m = inside && mask.data[(ch * h + sy) * w + sx];
-                        let d = if inside {
+                        let d = if ch >= num_chs {
+                            0.0
+                        } else if inside {
                             y.data[(ch * h + sy) * w + sx] - row[xx * v + lane]
                         } else {
                             -row[xx * v + lane]

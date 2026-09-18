@@ -335,6 +335,72 @@ const VECTORS_TOOLS: &[ToolVector] = &[
             ..p
         },
     ),
+    // `num_chs` below the model's channel count (`-model.CCS_SGMM.tools_common.model_{y,uv}
+    // .common_modules.num_chs` in the reference): the residual substream codes the first N
+    // channels and the header signals N; the rest are reconstructed from the mean.
+    (
+        "enc_img30_bop_m1_b0_y64u32",
+        IMG30,
+        1,
+        OperatingPoint::Bop,
+        0,
+        |p| EncodeParams {
+            num_chs: [64, 32],
+            ..p
+        },
+    ),
+    // Low rate: the tail channels' cube-flag contribution is observable — none for the
+    // context-module luma (`diff[:, num_chs:] = 0`), the full `|y - psi|` for chroma.
+    (
+        "enc_img30_bop_m1_bm300_y96u48",
+        IMG30,
+        1,
+        OperatingPoint::Bop,
+        -300,
+        |p| EncodeParams {
+            num_chs: [96, 48],
+            ..p
+        },
+    ),
+    // RVS+GRFS: `analyzeCWG` ranks all channels, `encode_header` writes `cwgf[:num_chs]`.
+    (
+        "enc_img30_bop_m1_b0_y96u48_rvs",
+        IMG30,
+        1,
+        OperatingPoint::Bop,
+        0,
+        |p| EncodeParams {
+            rvs: true,
+            grfs: true,
+            num_chs: [96, 48],
+            ..p
+        },
+    ),
+    // num_chs = 0 for chroma: every channel is uncoded, so every cube's error is the full
+    // residual and `use_cube_flags` is signalled.
+    (
+        "enc_img30_bop_m1_b0_uv0",
+        IMG30,
+        1,
+        OperatingPoint::Bop,
+        0,
+        |p| EncodeParams {
+            num_chs: [160, 0],
+            ..p
+        },
+    ),
+    // 2096x1400: the tiled analysis path with reduced channels.
+    (
+        "enc_img01_bop_m1_b0_y80u40",
+        IMG01,
+        1,
+        OperatingPoint::Bop,
+        0,
+        |p| EncodeParams {
+            num_chs: [80, 40],
+            ..p
+        },
+    ),
 ];
 
 fn vectors() -> Vec<Vector> {

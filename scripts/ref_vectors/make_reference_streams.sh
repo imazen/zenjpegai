@@ -336,20 +336,20 @@ if [ "$SET" = icci420 ] || [ "$SET" = all ]; then
         > "$OUT/$v/dump_filters_lef_icci.log" 2>&1
   done
 fi
+# Oracles for the ENCODER port: fixed-model encodes whose analysis-side tensors are dumped
+# into <vector>/enc2 (dump_encode.py --enc2). tests/encode_ref.rs reads the first two.
+enc_fixed() { # name image model_id beta_disp_log cfg...
+  local name=$1 image=$2 tool=$3 beta=$4; shift 4
+  local dir="$OUT/$name"
+  if [ -f "$dir/enc2/enc_manifest.txt" ]; then echo "== $name: exists"; return; fi
+  mkdir -p "$dir/enc2"
+  echo "== $name: encoding + dumping analysis side, fixed model $tool beta_disp $beta"
+  nice -n 19 python "$HERE/dump_encode.py" "$dir/enc2" --enc2 --lef -- "data/test/$image" "$dir/stream.bits" \
+      --cfg "$@" -target_device cpu -model.bitrate_matcher.enabled 0 \
+      -model.bitrate_matcher.target_tool_idx "$tool" -model.bitrate_matcher.target_beta_disp_Y "$beta" \
+      > "$dir/encoder.log" 2>&1
+}
 if [ "$SET" = encoder ] || [ "$SET" = all ]; then
-  # Oracles for the ENCODER port: fixed-model encodes whose analysis-side tensors are dumped
-  # into <vector>/enc2 (dump_encode.py --enc2). tests/encode_ref.rs reads the first two.
-  enc_fixed() { # name image model_id beta_disp_log cfg...
-    local name=$1 image=$2 tool=$3 beta=$4; shift 4
-    local dir="$OUT/$name"
-    if [ -f "$dir/enc2/enc_manifest.txt" ]; then echo "== $name: exists"; return; fi
-    mkdir -p "$dir/enc2"
-    echo "== $name: encoding + dumping analysis side, fixed model $tool beta_disp $beta"
-    nice -n 19 python "$HERE/dump_encode.py" "$dir/enc2" --enc2 --lef -- "data/test/$image" "$dir/stream.bits" \
-        --cfg "$@" -target_device cpu -model.bitrate_matcher.enabled 0 \
-        -model.bitrate_matcher.target_tool_idx "$tool" -model.bitrate_matcher.target_beta_disp_Y "$beta" \
-        > "$dir/encoder.log" 2>&1
-  }
   enc_fixed enc_img30_bop_m1_b0 $IMG30 1 0 cfg/tools_off.json cfg/profiles/base.json
   enc_fixed enc_img30_hop_m2_b0 $IMG30 2 0 cfg/tools_off.json cfg/profiles/high.json
   # Low rates: the reconstruction error inside a cube exceeds skip_cube_thr, so cube flags go
@@ -383,6 +383,29 @@ JSON
   enc_fixed enc_img30_bop_m1_b0_qmap $IMG30 1 0 cfg/tools_off.json "$MASKS/qmap_img30.json" cfg/profiles/base.json
   enc_fixed enc_img30_bop_m1_b0_qmap_rvs $IMG30 1 0 cfg/tools_off.json cfg/tools/ResVarScale.json "$MASKS/qmap_img30.json" cfg/profiles/base.json
   # Not generated yet (see PORTING.md "Work queue"): odd picture sizes.
+fi
+if [ "$SET" = numchs ] || [ "$SET" = all ]; then
+  # E10: `num_chs` below the model's channel count (a residual substream over the first N
+  # latent channels; the decoder reconstructs the rest from the mean). The reference flag is
+  # the per-component common_modules attribute, broadcast to all four rate tools through
+  # tools_common: -model.CCS_SGMM.tools_common.model_{y,uv}.common_modules.num_chs.
+  P=-model.CCS_SGMM.tools_common
+  enc_fixed enc_img30_bop_m1_b0_y64u32 $IMG30 1 0 cfg/tools_off.json cfg/profiles/base.json \
+      $P.model_y.common_modules.num_chs 64 $P.model_uv.common_modules.num_chs 32
+  # Low rate: cube flags are exercised (use_cube_flags signalled), so the tail channels'
+  # cube-flag contribution (MCM: none; context-free: |y - psi|) is observable.
+  enc_fixed enc_img30_bop_m1_bm300_y96u48 $IMG30 1 -300 cfg/tools_off.json cfg/profiles/base.json \
+      $P.model_y.common_modules.num_chs 96 $P.model_uv.common_modules.num_chs 48
+  # RVS+GRFS: analyzeCWG ranks all channels, so a gain flag can land on an uncoded channel;
+  # encode_header writes only cwgf[:num_chs].
+  enc_fixed enc_img30_bop_m1_b0_y96u48_rvs $IMG30 1 0 cfg/tools_off.json cfg/tools/ResVarScale.json cfg/profiles/base.json \
+      $P.model_y.common_modules.num_chs 96 $P.model_uv.common_modules.num_chs 48
+  # num_chs = 0 for chroma: no residual substream content at all.
+  enc_fixed enc_img30_bop_m1_b0_uv0 $IMG30 1 0 cfg/tools_off.json cfg/profiles/base.json \
+      $P.model_uv.common_modules.num_chs 0
+  # 2096x1400: the tiled analysis path with reduced channels.
+  enc_fixed enc_img01_bop_m1_b0_y80u40 $IMG01 1 0 cfg/tools_off.json cfg/profiles/base.json \
+      $P.model_y.common_modules.num_chs 80 $P.model_uv.common_modules.num_chs 40
 fi
 if [ "$SET" = cubeflags ] || [ "$SET" = all ]; then
   # Decoder-side dumps for the encoder set's use_cube_flags = 1 streams (beta -1069; the

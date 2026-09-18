@@ -17,14 +17,14 @@ and planar-YUV (4:4:4 / 4:2:2 / 4:2:0, 8/10 bit) sources, the same coding tools 
 analysis tiling above 1 MP, fixed-model and target-bpp rate control with the reference's
 `ECLibLH` likelihood measure or the coded stream (`RateEstimate`), resource limits and a
 memory estimate (`EncodeLimits`, `estimate_encode_memory`); it reproduces the reference
-encoder's streams byte for byte on 21 of 27 reference encodes (same length on the rest)
+encoder's streams byte for byte on 25 of 32 reference encodes (same length on the rest)
 and the `tools_on` tool set (`--tools-on`, or the individual `--rvs`/`--grfs`/`--lsbs`/
 `--lef`/`--efe-linear`/`--eicci`/`--efe-nonlinear` flags) with the post-filter decisions
 the reference's searches would make — modulo MKL `lstsq` nondeterminism that costs the
-reference up to 0.12 dB (`PORTING.md`). Not ported: `num_chs` below the model's channel
-count, the hyperopt UV displacement search, the user-defined colour transform (the
-reference's own implementation is inconsistent — see `PORTING.md`), eICCI on subsampled
-pictures. Anything unsupported is rejected with `Error::Unsupported`; nothing is silently
+reference up to 0.12 dB (`PORTING.md`). `num_chs` below the model's channel count is
+supported too (`--num-chs y,uv`). Not ported: the hyperopt UV displacement search and the
+user-defined colour transform (both are dead code in the pinned reference commit — see
+`PORTING.md`), eICCI on subsampled pictures. Anything unsupported is rejected with `Error::Unsupported`; nothing is silently
 approximated. The entropy stage is bit-exact; the reconstructed 8-bit picture differs from the
 reference decoder's in about 0.005 % of samples, each by one step (convolution summation
 order). Also here: a WebAssembly build with a browser polyfill and demo (`web/`, live at

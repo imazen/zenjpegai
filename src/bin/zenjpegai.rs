@@ -67,6 +67,8 @@ OPTIONS:
                        pictures only; the grid follows the picture size)
     --quality-map <p>  encode: RGB mask PNG; white areas are coded at a higher quality
                        (the reference's qp_map_type 3)
+    --num-chs <y,uv>   encode: code only the first y / uv latent channels (the stream's
+                       num_chs; the decoder reconstructs the rest from the mean)
     --max-channels <y,uv>  progressive decode: read only the first latent channels
     --single-thread    do not use the thread pool
     --scalar           no SIMD (for debugging; every tier produces identical pixels)
@@ -109,6 +111,7 @@ struct Args {
     tools_on: bool,
     ans_threads: u8,
     regions: Option<zenjpegai::encoder::RegionMode>,
+    num_chs: Option<(u16, u16)>,
     quality_map: Option<PathBuf>,
     single_thread: bool,
     scalar: bool,
@@ -145,6 +148,7 @@ fn parse_args() -> Result<Args, String> {
         tools_on: false,
         ans_threads: 1,
         regions: None,
+        num_chs: None,
         quality_map: None,
         single_thread: false,
         scalar: false,
@@ -269,6 +273,12 @@ fn parse_args() -> Result<Args, String> {
                 a.beta_disp = value("--beta-disp")?
                     .parse()
                     .map_err(|e| format!("--beta-disp: {e}"))?;
+            }
+            "--num-chs" => {
+                let v = value("--num-chs")?;
+                let (y, uv) = v.split_once(',').ok_or("--num-chs wants <y,uv>")?;
+                let parse = |s: &str| s.parse::<u16>().map_err(|e| format!("--num-chs: {e}"));
+                a.num_chs = Some((parse(y)?, parse(uv)?));
             }
             "--max-channels" => {
                 let v = value("--max-channels")?;
@@ -440,6 +450,9 @@ fn run() -> Result<(), String> {
             params.c_hor = args.c_hor;
             params.diff_display = args.diff_display;
             params.rate_estimate = args.rate_estimate;
+            if let Some((y, uv)) = args.num_chs {
+                params.num_chs = [y, uv];
+            }
             // `--quality-map`: an RGB mask at picture resolution, white = region of interest.
             let quality_map = match &args.quality_map {
                 None => None,

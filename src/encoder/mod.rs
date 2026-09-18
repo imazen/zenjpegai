@@ -10,10 +10,12 @@
 //! independent regions, rate matching (`--bpp`), RVS / GRFS / LSBS / quality maps and 1..16
 //! ANS threads per substream; RGB or planar-YUV sources at 4:4:4 / 4:2:2 / 4:2:0, coded at any
 //! of them, 8- and 10-bit (16-bit sources parse and code `bit_depth_idc` 4 but have no parity
-//! vectors yet). What is not: the EFE / eICCI post-filters on the encode side (the LEF is
-//! signalled, `EncodeParams::lef`), `num_chs` below the model's channel count, and the rate
-//! matcher's hyperopt displacement search (`find_UV_beta_with_hyperopt`; the `ECLibLH`
-//! likelihood measure IS ported as `RateEstimate::Likelihood`). See `PORTING.md`.
+//! vectors yet), and `num_chs` below the model's channel count (`EncodeParams::num_chs`). What
+//! is not: the EFE / eICCI post-filters on the encode side (the LEF is signalled,
+//! `EncodeParams::lef`). The rate matcher's hyperopt displacement search
+//! (`find_UV_beta_with_hyperopt`) is unreachable in the pinned reference commit — it needs the
+//! uninstalled `hyperopt` package and an `MSSSIM` that module never imports (see `PORTING.md`);
+//! the `ECLibLH` likelihood measure IS ported as `RateEstimate::Likelihood`.
 
 // The per-channel loops index several parallel arrays with one counter, like the reference's
 // tensor expressions; an iterator chain over one of them would hide that.
@@ -140,6 +142,12 @@ pub struct EncodeParams {
     /// search also fits the up-sampled-picture filter set (`filtersBest2`, the first set in
     /// the tool header) that `EFEnonlinear` needs.
     pub efe_nonlinear: bool,
+    /// `num_chs` per component (`common_modules.py::_params_loaded`): the residual substream
+    /// codes only the first N latent channels and the header signals N, so a decoder that
+    /// honours it reconstructs the rest from the mean alone (the same mechanism progressive
+    /// decode truncates to `num_decode_chs` at playback). Clamped to the model's channel
+    /// count (160 luma / 96 chroma); 0 codes no residual at all.
+    pub num_chs: [u16; 2],
 }
 
 /// How a region's residual reaches the codestream
@@ -193,6 +201,7 @@ impl Default for EncodeParams {
             efe_dctif_only: false,
             efe_nonlinear: false,
             eicci: None,
+            num_chs: LATENT_CHANNELS.map(|c| c as u16),
         }
     }
 }
@@ -263,6 +272,8 @@ struct Component {
     residual_q: Tensor<i16>,
     mask: Tensor<bool>,
     cube_flag: Vec<bool>,
+    /// The header's `num_chs`: the residual substream's coded channel count.
+    num_chs: usize,
 }
 
 /// What one component committed to the codestream: exactly the tensors
@@ -722,7 +733,7 @@ impl Encoder {
                         .iter()
                         .zip(&components)
                         .map(|(lh, c)| {
-                            lh.bits(&c.z_hat, &c.scales.scale_log, &c.residual_q, c.residual_q.c)
+                            lh.bits(&c.z_hat, &c.scales.scale_log, &c.residual_q, c.num_chs)
                         })
                         .sum::<f64>()
                         / pixels
@@ -1030,8 +1041,9 @@ impl Encoder {
                 scales: &scales,
                 quality_map,
             };
+            let num_chs = hdr.components[ccs].num_chs as usize;
             let out = compress_regions(
-                eng, &hdr, ccs, model, z_hat, latent, &mask, &q, lh, lw, stop,
+                eng, &hdr, ccs, model, z_hat, latent, &mask, &q, num_chs, lh, lw, stop,
             )?;
             let mcm::Compressed {
                 mut residual_q,
@@ -1065,7 +1077,13 @@ impl Encoder {
             });
             efe_likely.push((post_filters && params.lsbs).then(|| scales.likely.clone()));
             hdr.components[ccs].rvs_enabled = params.rvs;
-            hdr.components[ccs].grfs_channel_flags = scales.grfs_flags.clone();
+            // `ResVarScale.encode_header` writes `cwgf[:num_chs]` — the derived flags keep
+            // their full length inside `scales` (`analyzeCWG` ranks all channels, so a flag
+            // can land on an uncoded channel and is then simply not written).
+            hdr.components[ccs].grfs_channel_flags = scales
+                .grfs_flags
+                .clone()
+                .map(|f| f[..num_chs.min(f.len())].to_vec());
             hdr.components[ccs].cube_flags = cube_flags.clone();
             let mut c = Component {
                 z_hat: z_hats[ccs].clone(),
@@ -1074,6 +1092,7 @@ impl Encoder {
                 residual_q,
                 mask,
                 cube_flag,
+                num_chs,
             };
             // 7a. This component's residual payload is coded now so that the big tensors it is
             //     built from can die here instead of after the other component's compress.
@@ -1402,6 +1421,7 @@ fn png_err<E>(_e: E) -> &'static str {
 /// `common_modules.py::compress`: the hyper-decoder and the context model region by region,
 /// merged the way `merge_psi_overlaps_of_tiles` / `compress_ar_scale_tile` merge them. The
 /// mirror of `decoder::reconstruct::reconstruct_latent_with`, and it must stay one.
+/// `num_chs` is the header's coded channel count (`common_modules.num_chs`).
 #[allow(clippy::too_many_arguments)]
 fn compress_regions<Q: mcm::Quantiser>(
     eng: &Engine,
@@ -1412,6 +1432,7 @@ fn compress_regions<Q: mcm::Quantiser>(
     y: &Tensor<f32>,
     mask: &Tensor<bool>,
     q: &Q,
+    num_chs: usize,
     lh: usize,
     lw: usize,
     stop: &dyn enough::Stop,
@@ -1485,8 +1506,8 @@ fn compress_regions<Q: mcm::Quantiser>(
             }
         };
         let out = match &model.context {
-            Some(ctx) => ctx.compress(eng, yt, &psi_b, q, mt, SKIP_CUBE_THR, stop)?,
-            None => compress_context_free(yt, &psi_b, q, mt, SKIP_CUBE_THR)?,
+            Some(ctx) => ctx.compress(eng, yt, &psi_b, q, mt, num_chs, SKIP_CUBE_THR, stop)?,
+            None => compress_context_free(yt, &psi_b, q, mt, num_chs, SKIP_CUBE_THR)?,
         };
         // `compress_ar_scale_tile`: independent regions keep their whole tile, dependent ones
         // drop the half-overlap on every side facing another region.
@@ -1604,12 +1625,15 @@ fn assign<T: Copy + Default>(
 
 /// `_compress_ar_scale`'s branch for a component without a context model (chroma): the mean is
 /// `psi` up-shuffled, and the cube flags come from the whole reconstruction
-/// (`skip_mode.gen_skip_cubeflag`) rather than stage by stage.
+/// (`skip_mode.gen_skip_cubeflag`) rather than stage by stage. `num_chs` channels are coded;
+/// the reference reconstructs the rest from `psi` alone (`y_rec_resi[:, num_chs:] = 0`), so
+/// the tail channels' cube-flag error is their full residual `|y - psi|`, not the quantiser's.
 fn compress_context_free<Q: mcm::Quantiser>(
     y: &Tensor<f32>,
     psi: &BTensor,
     q: &Q,
     mask: &Tensor<bool>,
+    num_chs: usize,
     cube_thr: f32,
 ) -> Result<mcm::Compressed> {
     let (c, h, w) = (y.c, y.h, y.w);
@@ -1621,10 +1645,16 @@ fn compress_context_free<Q: mcm::Quantiser>(
     let (cube_h, cube_w) = (hh.div_ceil(mcm::CUBE_SIZE), hw.div_ceil(mcm::CUBE_SIZE));
     let mut cube_flag = alloc::vec![true; 4 * cube_h * cube_w];
     for ch in 0..c {
+        let coded = ch < num_chs;
         for i in 0..h * w {
             let d = y.plane(ch)[i] - mean.plane(ch)[i];
-            let (_, dq) = q.quantise(ch, i, d, mask.plane(ch)[i]);
-            if (dq - d).abs() > cube_thr {
+            let e = if coded {
+                let (_, dq) = q.quantise(ch, i, d, mask.plane(ch)[i]);
+                (dq - d).abs()
+            } else {
+                d.abs()
+            };
+            if e > cube_thr {
                 let (yy, xx) = (i / w, i % w);
                 let phase = (yy % 2) * 2 + xx % 2;
                 cube_flag[(phase * cube_h + yy / 2 / mcm::CUBE_SIZE) * cube_w
@@ -1632,9 +1662,10 @@ fn compress_context_free<Q: mcm::Quantiser>(
             }
         }
     }
-    // Pass 2: with the cubes that must not be skipped.
+    // Pass 2: with the cubes that must not be skipped. Uncoded channels stay zero
+    // (`resi_q_full[:, num_chs:] = 0` / `resi_dq_full[:, num_chs:] = 0`).
     let mask2 = skip_mask_or_cubes(mask, &cube_flag, cube_h, cube_w);
-    for ch in 0..c {
+    for ch in 0..num_chs.min(c) {
         for i in 0..h * w {
             let d = y.plane(ch)[i] - mean.plane(ch)[i];
             let (sym, dq) = q.quantise(ch, i, d, mask2.plane(ch)[i]);
@@ -1743,7 +1774,7 @@ fn picture_header(
         // `tile_manager_synthesis` is set up from the coded luma size for both components.
         components: [0, 1].map(|ccs| ComponentHeader {
             num_threads_r: params.num_threads_r,
-            num_chs: LATENT_CHANNELS[ccs] as u16,
+            num_chs: params.num_chs[ccs].min(LATENT_CHANNELS[ccs] as u16),
             cube_flags: None,
             rvs_enabled: false,
             grfs_channel_flags: None,

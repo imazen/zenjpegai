@@ -9,6 +9,20 @@
 ### Added
 
 #### Encoder
+- Encoder: `num_chs` below the model's channel count (`E10`) — `EncodeParams::num_chs` /
+  CLI `--num-chs y,uv` port the reference's
+  `-model.CCS_SGMM.tools_common.model_{y,uv}.common_modules.num_chs`: the picture header
+  signals the clamped count per component, the residual substream codes only the first
+  `num_chs` latent channels and the tail keeps a zero quantised residual, with the
+  reference's cube-flag semantics on uncoded channels (inert on the context-module luma,
+  the full `|y - psi|` error on the context-free chroma) and `grfs_channel_flag`
+  truncated to the coded count. Five new reference vectors (`make_reference_streams.sh
+  numchs`): four streams byte-identical to the reference encoder's (the tiled 2096x1400
+  one moves 1 symbol by 1, same length), all decode through our decoder and the
+  reference decoder. The rate matcher's `find_UV_beta_with_hyperopt` UV search is not
+  ported — it is unreachable in the pinned reference commit (`hyperopt` is commented
+  out of `requirements.txt` and absent from the environment; `MSSSIM` is never imported
+  in `bitrate_matcher.py`), documented under "Reference dead code" in `PORTING.md`.
 - Encoder: the `tools_on` preset (`E5`) — `EncodeParams::tools_on` / CLI `--tools-on`
   enable the whole `cfg/tools_on.json` tool set at once (RVS, GRFS, LSBS, EFE linear,
   eICCI, EFE non-linear, LEF); the individual flags `--efe-linear`, `--efe-nonlinear`

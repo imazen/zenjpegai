@@ -112,7 +112,9 @@ impl Likelihood {
     }
 
     /// `ECLibLH.total_bits` of one component: the factorized estimate of `z_hat` plus the
-    /// Gaussian estimate of the (already masked) `residual_q`, over the coded `num_chs`.
+    /// Gaussian estimate of the (already masked) `residual_q`. `num_chs` truncates the
+    /// residual only — `z` is coded over all channels whatever the residual's channel count
+    /// (`_ac_encode_z` never slices `z_hat`).
     pub(crate) fn bits(
         &self,
         z_hat: &Tensor<i8>,
@@ -121,7 +123,7 @@ impl Likelihood {
         num_chs: usize,
     ) -> f64 {
         let mut bits = 0.0;
-        for ch in 0..z_hat.c.min(num_chs) {
+        for ch in 0..z_hat.c {
             let lut = &self.z_nbits[ch];
             for &z in z_hat.plane(ch) {
                 let sym = (z as i32 + Z_OFFSET).clamp(0, MAX_Z as i32 - 1) as usize;
