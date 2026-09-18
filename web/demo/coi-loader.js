@@ -18,7 +18,13 @@ export async function ensureCrossOriginIsolated() {
   if (!('serviceWorker' in navigator)) return false;
   try {
     await navigator.serviceWorker.register('sw-coi.js');
-    await navigator.serviceWorker.ready;
+    // `serviceWorker.ready` only resolves once a worker activates — a stalled or blocked
+    // install would otherwise hang this (top-level-awaited) call and freeze the page.
+    const active = await Promise.race([
+      navigator.serviceWorker.ready.then(() => true),
+      new Promise((r) => setTimeout(() => r(false), 1500)),
+    ]);
+    if (!active) return false;
     if (navigator.serviceWorker.controller) {
       sessionStorage.removeItem(RELOAD_GUARD);
       // Controlled but still not isolated (e.g. embedded without permission): give up quietly.
