@@ -61,8 +61,8 @@ jobs:
         working-directory: web
         run: npm ci
 
-      - name: build wasm packages (simd + threads)
-        run: web/scripts/build-wasm.sh simd threads
+      - name: build wasm packages (simd, threads, webgpu, webgpu-threads)
+        run: web/scripts/build-wasm.sh simd threads webgpu webgpu-threads
 
       - name: "fetch demo-assets-v1 (private repo: this workflow's own token can read its own releases)"
         env:
