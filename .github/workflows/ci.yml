@@ -50,11 +50,11 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
 
-      - name: Clippy (default + cli features)
-        run: cargo clippy --all-targets --features cli -- -D warnings
+      - name: Clippy (default + cli + zencodec features)
+        run: cargo clippy --all-targets --features cli,zencodec -- -D warnings
 
-      - name: Test (default + cli features)
-        run: cargo test --lib --tests --features cli
+      - name: Test (default + cli + zencodec features)
+        run: cargo test --lib --tests --features cli,zencodec
 
   # 32-bit x86 via QEMU (cross-rs/cross): required primary target for pointer-width and
   # bounds-check correctness, per repo policy.
@@ -69,11 +69,11 @@ jobs:
         with:
           key: cross-i686
 
-      - name: Clippy (i686, default + cli features)
-        run: cross clippy --target i686-unknown-linux-gnu --all-targets --features cli -- -D warnings
+      - name: Clippy (i686, default + cli + zencodec features)
+        run: cross clippy --target i686-unknown-linux-gnu --all-targets --features cli,zencodec -- -D warnings
 
-      - name: Test (i686, default + cli features)
-        run: cross test --target i686-unknown-linux-gnu --lib --tests --features cli
+      - name: Test (i686, default + cli + zencodec features)
+        run: cross test --target i686-unknown-linux-gnu --lib --tests --features cli,zencodec
 
   # no_std + alloc: default-features-off must build and lint clean, natively and on
   # wasm32-unknown-unknown (the polyfill's non-nightly baseline target).
