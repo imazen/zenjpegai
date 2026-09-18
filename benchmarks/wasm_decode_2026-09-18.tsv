@@ -207,7 +207,6 @@ chromium	153.0.8010.12	linux	line-plot	0.25	0	1000	1000	32827	threads	Wasm128	1.
 chromium	153.0.8010.12	linux	line-plot	0.75	1	1000	1000	97944	threads	Wasm128	1.36	0.04	175.90	177.30
 chromium	153.0.8010.12	linux	clipart	0.25	2	816	1225	28034	threads	Wasm128	1.60	0.04	192.37	194.02
 chromium	153.0.8010.12	linux	clipart	0.75	3	816	1225	83202	threads	Wasm128	1.50	49.02	185.52	236.05
-
 chromium	153.0.8010.12	linux	car	0.25	1	1155	866	33016	threads	Wasm128	2.46	69.63	304.34	376.43
 chromium	153.0.8010.12	linux	car	0.75	2	1155	866	98890	threads	Wasm128	11.50	58.31	199.95	269.77
 chromium	153.0.8010.12	linux	mountain	0.25	1	1155	866	32887	threads	Wasm128	11.75	0.10	176.74	188.59
@@ -576,7 +575,6 @@ chromium	153.0.8010.12	linux	line-plot	0.25	0	1000	1000	32827	threads	Wasm128	9.
 chromium	153.0.8010.12	linux	line-plot	0.75	1	1000	1000	97944	threads	Wasm128	1.37	0.05	96.52	97.95
 chromium	153.0.8010.12	linux	clipart	0.25	2	816	1225	28034	threads	Wasm128	1.35	0.03	91.98	93.36
 chromium	153.0.8010.12	linux	clipart	0.75	3	816	1225	83202	threads	Wasm128	1.52	48.99	106.65	157.15
-\\\\\\\        to: lzmrntkm e2a2ecd1 "benchmarks: browser WebGPU on RTX 2080 + native re-sweep after the upload fix" (rebased revision)
 chromium	153.0.8010.12	linux	car	0.25	1	1155	866	33016	threads	Wasm128	5.99	116.09	485.87	607.95
 chromium	153.0.8010.12	linux	car	0.75	2	1155	866	98890	threads	Wasm128	4.56	171.27	388.69	564.52
 chromium	153.0.8010.12	linux	mountain	0.25	1	1155	866	32887	threads	Wasm128	5.58	0.26	371.65	377.49
