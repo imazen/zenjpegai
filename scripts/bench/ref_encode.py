@@ -15,14 +15,9 @@ rate-matched encode, like `zenjpegai encode --bpp`. Prints one line:
 import contextlib
 import io
 import os
-import re
 import sys
-import time
 
-t0 = time.time()
-import torch  # noqa: E402
-
-sys.path.insert(0, ".")
+import ref_common
 from src.reco.coders.encoder import RecoEncoder, def_base_parser, process_encoder  # noqa: E402
 import src.reco.coders.encoder as enc_mod  # noqa: E402
 
@@ -34,9 +29,7 @@ def arg(name, default=None):
 def main():
     src, out = sys.argv[1], sys.argv[2]
     threads = int(arg("--threads", "1"))
-    if threads != 1:
-        real = torch.set_num_threads
-        torch.set_num_threads = lambda _n: real(threads)
+    ref_common.threads(threads)
     model, beta = arg("--model", "1"), arg("--beta-disp", "0")
     profile = arg("--profile", "base")
     tools = arg("--tools", "off")
@@ -55,12 +48,8 @@ def main():
     log = io.StringIO()
     with contextlib.redirect_stdout(log):
         process_encoder(coder, None, True, None, True, True)
-    m = re.findall(r"TOTAL: (\d+):(\d+):([\d.]+)", log.getvalue())
-    total = float("nan")
-    if m:
-        h, mi, s = m[-1]
-        total = int(h) * 3600 + int(mi) * 60 + float(s)
-    print(f"ref_total_s={total:.4f} wall_s={time.time() - t0:.3f} threads={threads} "
+    total = ref_common.total_s(log.getvalue())
+    print(f"ref_total_s={total:.4f} wall_s={ref_common.wall_s():.3f} threads={threads} "
           f"bytes={os.path.getsize(out)}")
 
 

@@ -10,13 +10,10 @@ The eICCI networks are loaded before the decode starts, so its time is inference
 """
 import contextlib
 import io
-import re
 import sys
 import time
 
-import torch
-
-sys.path.insert(0, ".")
+import ref_common
 from src.reco.coders.decoder import RecoDecoder, def_base_parser, process_decoder  # noqa: E402
 from src.codec.coders import def_decoder_parser_decorator  # noqa: E402
 from src.codec.coding_tools.filters.LEF.LEFfilter import LEF  # noqa: E402
@@ -40,9 +37,7 @@ def timed(cls, tag):
 def main():
     bits, out = sys.argv[1], sys.argv[2]
     threads = int(sys.argv[sys.argv.index("--threads") + 1]) if "--threads" in sys.argv else 1
-    if threads != 1:
-        real = torch.set_num_threads
-        torch.set_num_threads = lambda _n: real(threads)
+    ref_common.threads(threads)
     timed(EfficientICCIFilter, "eicci")
     timed(LEF, "lef")
     base = def_base_parser()
@@ -50,8 +45,7 @@ def main():
     log = io.StringIO()
     with contextlib.redirect_stdout(log):
         process_decoder(coder, [bits, out, "-target_device", "cpu"])
-    h, mi, s = re.findall(r"TOTAL: (\d+):(\d+):([\d.]+)", log.getvalue())[-1]
-    total = int(h) * 3600 + int(mi) * 60 + float(s)
+    total = ref_common.total_s(log.getvalue())
     print(f"eicci_s={spent['eicci']:.4f} lef_s={spent['lef']:.4f} ref_total_s={total:.4f} threads={threads}")
 
 

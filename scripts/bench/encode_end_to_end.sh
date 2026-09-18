@@ -25,7 +25,7 @@ img30_bop_bpp050_on:00030_TE_560x888_8bit_sRGB.png:bpp050:base:on \
 img01_bop_m1_b0_on:00001_TE_2096x1400_8bit_sRGB.png:m1b0:base:on \
 img01_bop_bpp050_on:00001_TE_2096x1400_8bit_sRGB.png:bpp050:base:on"}
 
-echo "# commit $(git -C "$HERE" rev-parse --short HEAD 2>/dev/null) host-cpu $(lscpu | sed -n 's/^Model name: *//p') threads $NPROC date $(date -u +%FT%TZ)"
+echo "# commit $(git -C "$HERE" rev-parse --short HEAD 2>/dev/null || (cd "$HERE" && jj log -r @- --no-graph -T 'commit_id.short()' 2>/dev/null)) host-cpu $(lscpu | sed -n 's/^Model name: *//p') threads $NPROC date $(date -u +%FT%TZ)"
 echo "# ref = stock reference encoder, bitrate matcher off, its own TOTAL (excludes model load); wall = whole process"
 echo "# zen = zenjpegai encode, steady state (models loaded) = runs 1..; first = run 0 incl. model load"
 printf 'case\tencoder\tthreads\trun\tencode_ms\tprocess_wall_ms\tbytes\n'
