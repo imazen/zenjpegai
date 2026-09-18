@@ -302,9 +302,10 @@ it needs SharedArrayBuffer). `pkg-simd` and `pkg-threads` are unchanged.
   copy now go out in **one** queue submit per decode, with the staging-buffer and
   timestamp-query maps issued together (one device-drain round-trip instead of two). The ~27 ms
   residual readback is the device drain itself (~20 ms device time) plus one IPC round-trip.
-  CPU comparisons from the same runs: `threads` ~95-104 ms, `simd` ~644-648 ms — the GPU path
-  beats both on this hardware class, so `auto` takes it (isolated → `pkg-webgpu-threads`,
-  non-isolated → `pkg-webgpu`, which at ~180 ms warm still beats `simd` ~4x). The GPU win is
+  CPU comparisons from the same runs (`benchmarks/wasm_decode_2026-09-18_gpu.tsv`, medians over
+  the ~1 MP demo corpus): `threads` ~98-104 ms, `simd` ~705-718 ms — the GPU path beats both on
+  this hardware class, so `auto` takes it (isolated → `pkg-webgpu-threads`, non-isolated →
+  `pkg-webgpu`, which at ~193 ms warm still beats `simd` ~3.7x). The GPU win is
   measured only on the ~0.5-1 MP demo corpus; no smaller-size crossover was measured. Cold
   cost: +~90 KB brotli over `pkg-threads`, and the first decode pays pipeline compilation +
   weight upload (~90-140 ms extra) — with even a handful of images on the page the GPU still
@@ -355,19 +356,16 @@ it needs SharedArrayBuffer). `pkg-simd` and `pkg-threads` are unchanged.
 
 ## Next steps, in order
 
-1. Enable GitHub Pages (human decision — see "Not done" table) and watch `.github/workflows/pages.yml`
-   run for real; the workflow itself has never executed (this session only ran the equivalent
-   steps locally).
-2. ~~Re-run §7's benchmark on a hardware adapter + fix the `create_buffer_init` trap~~ — done
+1. ~~Re-run §7's benchmark on a hardware adapter + fix the `create_buffer_init` trap~~ — done
    2026-09-18 (§7): RTX 2080 through Dawn/Vulkan, all decodes on the GPU path, trap removed at
    the root. ~~`auto` on the CPU engine~~ — flipped 2026-09-18 (b3gpu): `pkg-webgpu-threads` +
    single-submit/batched-map changes brought warm ~1 MP decode from ~179 ms to ~55 ms, ~1.7x
    faster than `threads`, so `auto` takes a hardware adapter when one exists. Open leftover:
    Dawn's SwiftShader device loss at model-2 load.
-3. Speed: the `Wasm128` micro-kernel is still slower than native AVX-512 on one thread (measured
+2. Speed: the `Wasm128` micro-kernel is still slower than native AVX-512 on one thread (measured
    2026-09-17: 0.35s vs 0.093s). Untried: relaxed-simd is ruled out by the numeric policy, a wider
    register block for 1x1 convolutions and a `node --cpu-prof` profile are not.
-4. A stream with non-sRGB CICP in the reference-vector set, to build and test the P3 hook above
+3. A stream with non-sRGB CICP in the reference-vector set, to build and test the P3 hook above
    against real data instead of leaving it as a documented no-op.
 
 ## Demo asset hygiene
