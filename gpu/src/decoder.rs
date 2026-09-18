@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex};
 
 use zenjpegai::container::Codestream;
 use zenjpegai::decoder::output;
-use zenjpegai::decoder::reconstruct::{Planes, post_process_latent, reconstruct_latent};
-use zenjpegai::decoder::{Headers, decode_entropy_stage, read_headers};
+use zenjpegai::decoder::reconstruct::{Planes, post_process_latent, reconstruct_latent_with};
+use zenjpegai::decoder::{Headers, decode_entropy_stage_progressive, read_headers};
 use zenjpegai::filters::{self, FilterContext};
 use zenjpegai::header::{ColourTransform, OperatingPoint, PictureHeader};
 use zenjpegai::mans::AnsTables;
@@ -207,6 +207,7 @@ pub struct GpuDecoder {
     engine: Engine,
     tables: AnsTables,
     operating_point: Option<OperatingPoint>,
+    max_channels: [Option<u16>; 2],
     cache: Mutex<HashMap<(usize, OperatingPoint), Arc<ModelSet>>>,
     workspace: Mutex<Option<Workspace>>,
     icci_nets: zenjpegai::model::icci::NetCache,
@@ -229,6 +230,7 @@ impl GpuDecoder {
             engine,
             tables: AnsTables::new(),
             operating_point: None,
+            max_channels: [None, None],
             cache: Mutex::new(HashMap::new()),
             workspace: Mutex::new(None),
             icci_nets: Default::default(),
@@ -238,6 +240,14 @@ impl GpuDecoder {
     /// Decode with this synthesis transform instead of the stream's first listed one.
     pub fn operating_point(mut self, op: Option<OperatingPoint>) -> Self {
         self.operating_point = op;
+        self
+    }
+
+    /// Progressive decode: read only the first `luma` / `chroma` latent channels (the
+    /// reference's `num_decode_chs`), like `zenjpegai::Decoder::max_channels`. `None` decodes
+    /// all of them.
+    pub fn max_channels(mut self, luma: Option<u16>, chroma: Option<u16>) -> Self {
+        self.max_channels = [luma, chroma];
         self
     }
 
@@ -291,13 +301,27 @@ impl GpuDecoder {
     /// submission ([`GpuOut::Planes`]); callers wanting the RGBA texture should use
     /// [`decode_to_gpu_with`](Self::decode_to_gpu_with) instead.
     pub fn decode_to_gpu(&self, stream: &[u8]) -> Result<GpuDecoded> {
-        self.decode_to_gpu_with(stream, GpuOut::Planes)
+        self.decode_to_gpu_stop(stream, GpuOut::Planes, &enough::Unstoppable)
     }
 
     /// [`decode_to_gpu`](Self::decode_to_gpu) with a choice of what the single submission also
     /// produces ([`GpuOut`]). Presentable pictures decoded with `Rgba`/`RgbaReadback` need no
     /// later submit for `to_rgba_texture`/`read_rgba`.
     pub fn decode_to_gpu_with(&self, stream: &[u8], out: GpuOut) -> Result<GpuDecoded> {
+        self.decode_to_gpu_stop(stream, out, &enough::Unstoppable)
+    }
+
+    /// [`decode_to_gpu_with`](Self::decode_to_gpu_with) with cooperative cancellation: the
+    /// `stop` token the CPU decoder uses, checked in the entropy and latent stages (they accept
+    /// it directly) and before the synthesis submission — the GPU cannot be recalled once
+    /// queued. A stop request surfaces as `GpuError::Codec(Error::Cancelled)`.
+    pub fn decode_to_gpu_stop(
+        &self,
+        stream: &[u8],
+        out: GpuOut,
+        stop: &dyn enough::Stop,
+    ) -> Result<GpuDecoded> {
+        stop.check().map_err(zenjpegai::Error::from)?;
         let t = now();
         let cs = Codestream::parse(stream)?;
         let headers = read_headers(&cs)?;
@@ -323,15 +347,23 @@ impl GpuDecoder {
         let set = self.model_set(hdr.model_id as usize, op, &mut phases)?;
         let eng = &self.engine;
         let t = now();
-        let [ent_y, ent_uv] =
-            decode_entropy_stage(&self.tables, &cs, hdr, [&set.common[0], &set.common[1]])?;
+        let [ent_y, ent_uv] = decode_entropy_stage_progressive(
+            &self.tables,
+            &cs,
+            hdr,
+            [&set.common[0], &set.common[1]],
+            self.max_channels,
+            stop,
+        )?;
         phases.entropy_host_ns = since(t);
         let t = now();
-        let mut ly = reconstruct_latent(eng, hdr, 0, &set.common[0], &ent_y)?;
+        let mut ly = reconstruct_latent_with(eng, hdr, 0, &set.common[0], &ent_y, stop)?;
         post_process_latent(hdr, &headers.tools, 0, &ent_y, &mut ly)?;
-        let mut luv = reconstruct_latent(eng, hdr, 1, &set.common[1], &ent_uv)?;
+        let mut luv = reconstruct_latent_with(eng, hdr, 1, &set.common[1], &ent_uv, stop)?;
         post_process_latent(hdr, &headers.tools, 1, &ent_uv, &mut luv)?;
         phases.latent_host_ns = since(t);
+        // The last point a stop can still keep work off the GPU.
+        stop.check().map_err(zenjpegai::Error::from)?;
 
         // Decide the tail before borrowing the workspace: for presentable pictures the RGBA
         // conversion (and its staged readback for `RgbaReadback`) rides along in the decode's
@@ -389,9 +421,21 @@ impl GpuDecoder {
     /// the CPU decoder does them (RGB, or YUV planes for streams coded that way; 8 or 10 bit).
     /// Also returns the synthesised planes before the post-filters (for parity measurements) and
     /// the timing with `gpu_ns` filled in.
-    pub async fn finish(&self, mut decoded: GpuDecoded) -> Result<(Picture, Planes, Timing)> {
+    pub async fn finish(&self, decoded: GpuDecoded) -> Result<(Picture, Planes, Timing)> {
+        self.finish_stop(decoded, &enough::Unstoppable).await
+    }
+
+    /// [`finish`](Self::finish) with cooperative cancellation: `stop` gates the readback wait
+    /// and reaches the post-filter networks (they check it per tile / layer).
+    pub async fn finish_stop(
+        &self,
+        mut decoded: GpuDecoded,
+        stop: &dyn enough::Stop,
+    ) -> Result<(Picture, Planes, Timing)> {
+        stop.check().map_err(zenjpegai::Error::from)?;
         let hdr = &decoded.headers.picture;
         let rec = decoded.picture.read_planes().await?;
+        stop.check().map_err(zenjpegai::Error::from)?;
         let synthesized = to_planes(hdr, &rec)?;
         drop(rec);
         let planes = if decoded.headers.tools.any_post_filter() {
@@ -403,7 +447,7 @@ impl GpuDecoder {
                 models: &*self.models,
                 op: decoded.op,
                 icci_nets: &self.icci_nets,
-                stop: &enough::Unstoppable,
+                stop,
             };
             filters::apply(&fctx, synthesized.clone())?
         } else {
@@ -421,7 +465,18 @@ impl GpuDecoder {
     /// the `f32` planes' bytes) instead of the planes. When the decode had to fall back to
     /// `Planes` (post-filters, chroma resampling, custom transform) this runs the CPU path.
     /// Does not return the pre-filter planes — use [`finish`](Self::finish) for those.
-    pub async fn finish_picture(&self, mut decoded: GpuDecoded) -> Result<(Picture, Timing)> {
+    pub async fn finish_picture(&self, decoded: GpuDecoded) -> Result<(Picture, Timing)> {
+        self.finish_picture_stop(decoded, &enough::Unstoppable)
+            .await
+    }
+
+    /// [`finish_picture`](Self::finish_picture) with cooperative cancellation.
+    pub async fn finish_picture_stop(
+        &self,
+        mut decoded: GpuDecoded,
+        stop: &dyn enough::Stop,
+    ) -> Result<(Picture, Timing)> {
+        stop.check().map_err(zenjpegai::Error::from)?;
         if decoded.picture.staged_output().is_some() {
             let (spec, data) = decoded.picture.read_output().await?;
             let picture = match spec.mode {
@@ -447,7 +502,7 @@ impl GpuDecoder {
             };
             return Ok((picture, decoded.picture.timing));
         }
-        let (picture, _, timing) = self.finish(decoded).await?;
+        let (picture, _, timing) = self.finish_stop(decoded, stop).await?;
         Ok((picture, timing))
     }
 
@@ -455,8 +510,29 @@ impl GpuDecoder {
     /// Converts to the output format on the GPU where it can ([`GpuOut::Quantized`]) and reads
     /// back the packed samples; other streams read the `f32` planes and finish on the CPU.
     pub async fn decode_picture_async(&self, stream: &[u8]) -> Result<Picture> {
-        let decoded = self.decode_to_gpu_with(stream, GpuOut::Quantized)?;
-        Ok(self.finish_picture(decoded).await?.0)
+        self.decode_picture_stop(stream, &enough::Unstoppable).await
+    }
+
+    /// [`decode_picture_async`](Self::decode_picture_async) with cooperative cancellation: the
+    /// `stop` token the CPU decoder takes, checked between the CPU stages, before the synthesis
+    /// submit and before the readback.
+    pub async fn decode_picture_stop(
+        &self,
+        stream: &[u8],
+        stop: &dyn enough::Stop,
+    ) -> Result<Picture> {
+        let decoded = self.decode_to_gpu_stop(stream, GpuOut::Quantized, stop)?;
+        Ok(self.finish_picture_stop(decoded, stop).await?.0)
+    }
+
+    /// Codestream to interleaved RGB with cooperative cancellation.
+    pub async fn decode_stop(&self, stream: &[u8], stop: &dyn enough::Stop) -> Result<RgbImage> {
+        match self.decode_picture_stop(stream, stop).await? {
+            Picture::Rgb(image) => Ok(image),
+            Picture::Yuv(_) => Err(GpuError::Unsupported(
+                "the stream decodes to YUV planes: use decode_picture_stop",
+            )),
+        }
     }
 
     /// Codestream to interleaved RGB.
@@ -473,5 +549,11 @@ impl GpuDecoder {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn decode(&self, stream: &[u8]) -> Result<RgbImage> {
         pollster::block_on(self.decode_async(stream))
+    }
+
+    /// Blocking [`decode_stop`](Self::decode_stop).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn decode_with(&self, stream: &[u8], stop: &dyn enough::Stop) -> Result<RgbImage> {
+        pollster::block_on(self.decode_stop(stream, stop))
     }
 }

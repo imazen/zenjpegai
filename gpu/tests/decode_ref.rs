@@ -17,7 +17,7 @@ use zenjpegai::decoder::{decode_entropy_stage, read_headers};
 use zenjpegai::mans::AnsTables;
 use zenjpegai::model::ModelDir;
 use zenjpegai::nn::fast::Engine;
-use zenjpegai_gpu::GpuDecoder;
+use zenjpegai_gpu::{GpuDecoder, GpuError};
 
 /// Synthesised planes of this crate's CPU engine.
 fn cpu_planes(stream: &[u8]) -> Planes {
@@ -320,5 +320,98 @@ fn gpu_quantized_yuv() {
                 ours.len()
             );
         }
+    }
+}
+
+/// Cancellation: the `enough` token the CPU decoder takes, checked between the CPU stages,
+/// before the synthesis submit and around the readback. Trips at several points must all
+/// surface `Error::Cancelled`, and the decoder stays usable and deterministic afterwards.
+#[test]
+fn stop_cancels_gpu_decode() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Trips once it has been asked `after` times.
+    struct StopAfter {
+        after: usize,
+        checks: AtomicUsize,
+    }
+    impl enough::Stop for StopAfter {
+        fn check(&self) -> Result<(), enough::StopReason> {
+            if self.checks.fetch_add(1, Ordering::Relaxed) >= self.after {
+                Err(enough::StopReason::Cancelled)
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    let stream = std::fs::read(vector_dir("img01_base_off_bpp050").join("stream.bits")).unwrap();
+    let dec = GpuDecoder::new(context_arc(), Box::new(ModelDir::new(models_dir())));
+    let count = StopAfter {
+        after: usize::MAX,
+        checks: AtomicUsize::new(0),
+    };
+    let full = dec.decode_with(&stream, &count).unwrap();
+    let total = count.checks.load(Ordering::Relaxed);
+    assert!(total >= 10, "only {total} stop checks in a GPU decode");
+    for after in [0, 1, total / 2, total - 1] {
+        let stop = StopAfter {
+            after,
+            checks: AtomicUsize::new(0),
+        };
+        let err = dec.decode_with(&stream, &stop).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                GpuError::Codec(zenjpegai::Error::Cancelled(enough::StopReason::Cancelled))
+            ),
+            "after {after}: {err:?}"
+        );
+        assert_eq!(stop.checks.load(Ordering::Relaxed), after + 1);
+    }
+    assert_eq!(
+        dec.decode(&stream).unwrap(),
+        full,
+        "decode after a cancellation differs"
+    );
+}
+
+/// Progressive decode (`max_channels`, the reference's `num_decode_chs`) on the GPU path: only
+/// a prefix of the latent channels is read. The oracle is the reference decoder's dump run
+/// with the same limits (`<vector>/progressive_y*_uv*/`), quantised like `write_png`.
+#[test]
+fn gpu_progressive_decode_matches_reference() {
+    let dir = vector_dir("img30_base_off_bpp050");
+    let stream = std::fs::read(dir.join("stream.bits")).unwrap();
+    for (luma, chroma) in [(64u16, 32u16), (1, 1), (37, 0)] {
+        let sub = dir.join(format!("progressive_y{luma}_uv{chroma}"));
+        let dump = load_dump_f32(&sub, &["out.a", "out.b", "out.c"]);
+        let dec = GpuDecoder::new(context_arc(), Box::new(ModelDir::new(models_dir())))
+            .max_channels(Some(luma), Some(chroma));
+        let img = dec.decode(&stream).unwrap();
+        let theirs: Vec<Vec<u16>> = ["out.a", "out.b", "out.c"]
+            .iter()
+            .map(|k| quantize_plane(&dump[*k], 8))
+            .collect();
+        let theirs: Vec<u16> = theirs[0]
+            .iter()
+            .zip(&theirs[1])
+            .zip(&theirs[2])
+            .flat_map(|((&r, &g), &b)| [r, g, b])
+            .collect();
+        assert_eq!(img.data.len(), theirs.len());
+        let differing = img.data.iter().zip(&theirs).filter(|(a, b)| a != b).count();
+        let worst = img
+            .data
+            .iter()
+            .zip(&theirs)
+            .map(|(a, b)| (*a as i32 - *b as i32).abs())
+            .max()
+            .unwrap();
+        println!(
+            "progressive y{luma} uv{chroma}: {differing} of {} samples differ, worst by {worst}",
+            theirs.len()
+        );
+        assert!(worst <= 1 && differing * 5000 < theirs.len());
     }
 }
