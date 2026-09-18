@@ -223,16 +223,26 @@ impl<'a> Graph<'a> {
                 "conv: fused operand has a different shape from the output".into(),
             ));
         }
+        // Measured on an RTX 2080: a 16 x 16 workgroup beats 8 x 8 on the layers with many
+        // input blocks (HOP's 1 x 1 convolutions 147.5 -> 117.3 ms, its 3 x 3 family -13%) and
+        // loses on the layers with few (SOP 560x888 goes 3.7 -> 5.1 ms if applied to all of
+        // them), so it is chosen per layer.
+        let wg = if l.icg4 >= 16 && ow >= 128 && oh >= 128 {
+            2 * WG
+        } else {
+            WG
+        };
         let v = ConvVariant {
             kh: l.k.0 as u32,
             kw: l.k.1 as u32,
             stride: l.stride as u32,
             ob: l.ob as u32,
+            wg,
             act,
             pre_relu6,
             res: res.map(|(op, _)| op),
         };
-        let (gx, gy) = grid2(ow, oh);
+        let (gx, gy) = ((ow as u32).div_ceil(wg), (oh as u32).div_ceil(wg));
         let mut binds = vec![
             Bind::Tensor(x.id),
             Bind::Tensor(y.id),

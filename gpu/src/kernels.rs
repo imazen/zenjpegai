@@ -64,6 +64,10 @@ pub struct ConvVariant {
     pub stride: u32,
     /// Output blocks (of 4 channels) per invocation: 1, 2 or 4.
     pub ob: u32,
+    /// Workgroup edge. A wider workgroup shares each broadcast weight block between more
+    /// invocations, which pays off exactly when the weights are the bulk of the traffic (many
+    /// input blocks) and costs edge lanes when they are not; [`crate::plan`] picks it per layer.
+    pub wg: u32,
     pub act: Act,
     /// Apply ReLU6 to every input sample as it is loaded (the ResAU gate's first step).
     pub pre_relu6: bool,
@@ -74,8 +78,8 @@ pub struct ConvVariant {
 impl ConvVariant {
     pub fn key(&self) -> String {
         format!(
-            "conv_k{}x{}_s{}_ob{}_{:?}_{}_{:?}",
-            self.kh, self.kw, self.stride, self.ob, self.act, self.pre_relu6, self.res
+            "conv_k{}x{}_s{}_ob{}_wg{}_{:?}_{}_{:?}",
+            self.kh, self.kw, self.stride, self.ob, self.wg, self.act, self.pre_relu6, self.res
         )
     }
 }
@@ -141,7 +145,7 @@ pub fn conv(v: &ConvVariant) -> String {
     format!(
         "{params}{CONV_BINDINGS}{res_binding}
 const KH: u32 = {kh}u; const KW: u32 = {kw}u; const STRIDE: u32 = {stride}u; const OB: u32 = {ob}u;
-@compute @workgroup_size({WG}, {WG}, 1)
+@compute @workgroup_size({wg}, {wg}, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{
   if (gid.x >= p.out_w || gid.y >= p.out_h) {{ return; }}
   let og = gid.z;
@@ -171,6 +175,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{
         kw = v.kw,
         stride = v.stride,
         ob = v.ob,
+        wg = v.wg,
         decl = acc_decl(v.ob, "oc4"),
         step = acc_step(v.ob),
         store = acc_store(v.ob, v.act, v.res),
