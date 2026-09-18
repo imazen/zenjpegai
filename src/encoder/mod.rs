@@ -48,6 +48,7 @@ use crate::model::mcm::{self, upshuffle_psi};
 use crate::model::{self, CommonModel, ModelDir, ModelSource};
 use crate::nn::fast::{BTensor, Engine};
 use crate::tensor::Tensor;
+use crate::tools::qualmap::QualityMap;
 use crate::tools::regions::{Area, Plane, region_grid};
 use crate::tools::skip::skip_mask;
 
@@ -256,6 +257,21 @@ impl Encoder {
         self.encode_with(rgb, params, &enough::Unstoppable)
     }
 
+    /// [`Encoder::encode`] with a quality map: one `qp` in `-8..=8` per *latent* position
+    /// (`ceil(height / 16) x ceil(width / 16)`), shared by both components. A positive `qp`
+    /// spends more bits there. [`crate::tools::qualmap::QualityMap::from_roi_mask`] builds one
+    /// from a region-of-interest mask the way the reference's `qp_map_type = 3` does.
+    pub fn encode_with_quality_map(
+        &self,
+        rgb: &RgbImage,
+        params: EncodeParams,
+        quality_map: &QualityMap,
+    ) -> core::result::Result<Vec<u8>, At<Error>> {
+        self.encode_inner(rgb, params, Some(quality_map), &enough::Unstoppable)
+            .map(|(stream, _)| stream)
+            .map_err(|e| at!(e))
+    }
+
     /// [`Encoder::encode`] with cooperative cancellation. `stop` is checked between network
     /// layers and stages, never per sample.
     pub fn encode_with(
@@ -264,7 +280,7 @@ impl Encoder {
         params: EncodeParams,
         stop: &dyn enough::Stop,
     ) -> core::result::Result<Vec<u8>, At<Error>> {
-        self.encode_inner(rgb, params, stop)
+        self.encode_inner(rgb, params, None, stop)
             .map(|(stream, _)| stream)
             .map_err(|e| at!(e))
     }
@@ -276,21 +292,35 @@ impl Encoder {
         rgb: &RgbImage,
         params: EncodeParams,
     ) -> core::result::Result<(Vec<u8>, [ComponentTrace; 2]), At<Error>> {
+        self.encode_traced_with(rgb, params, None)
+    }
+
+    /// [`Encoder::encode_traced`] with a quality map.
+    pub fn encode_traced_with(
+        &self,
+        rgb: &RgbImage,
+        params: EncodeParams,
+        quality_map: Option<&QualityMap>,
+    ) -> core::result::Result<(Vec<u8>, [ComponentTrace; 2]), At<Error>> {
         let (stream, components) = self
-            .encode_inner(rgb, params, &enough::Unstoppable)
+            .encode_inner(rgb, params, quality_map, &enough::Unstoppable)
             .map_err(|e| at!(e))?;
-        Self::trace(stream, components).map_err(|e| at!(e))
+        Self::trace(stream, components, quality_map).map_err(|e| at!(e))
     }
 
     fn trace(
         stream: Vec<u8>,
         components: Vec<Component>,
+        quality_map: Option<&QualityMap>,
     ) -> Result<(Vec<u8>, [ComponentTrace; 2])> {
         let traces = components
             .into_iter()
             .map(|c| {
-                let residual =
-                    crate::decoder::entropy::dequantize_residual(&c.scales, None, &c.residual_q)?;
+                let residual = crate::decoder::entropy::dequantize_residual(
+                    &c.scales,
+                    quality_map,
+                    &c.residual_q,
+                )?;
                 Ok(ComponentTrace {
                     z_hat: c.z_hat,
                     skip_scale_log: c.scales.skip_scale_log,
@@ -318,6 +348,7 @@ impl Encoder {
     /// encoder does for a picture small enough to be one analysis tile; for a tiled picture each
     /// tile's `z` comes from that tile's own (un-merged) latent, so the merged `y` alone cannot
     /// reproduce it and the caller must hand them over.
+    #[allow(clippy::too_many_arguments)]
     pub fn encode_latents(
         &self,
         latents: [&Tensor<f32>; 2],
@@ -325,6 +356,7 @@ impl Encoder {
         width: usize,
         height: usize,
         params: EncodeParams,
+        quality_map: Option<&QualityMap>,
     ) -> core::result::Result<(Vec<u8>, [ComponentTrace; 2]), At<Error>> {
         let (stream, components) = self
             .encode_from_latents(
@@ -333,16 +365,18 @@ impl Encoder {
                 width,
                 height,
                 params,
+                quality_map,
                 &enough::Unstoppable,
             )
             .map_err(|e| at!(e))?;
-        Self::trace(stream, components).map_err(|e| at!(e))
+        Self::trace(stream, components, quality_map).map_err(|e| at!(e))
     }
 
     fn encode_inner(
         &self,
         rgb: &RgbImage,
         params: EncodeParams,
+        quality_map: Option<&QualityMap>,
         stop: &dyn enough::Stop,
     ) -> Result<(Vec<u8>, Vec<Component>)> {
         stop.check()?;
@@ -368,6 +402,7 @@ impl Encoder {
             rgb.width,
             rgb.height,
             params,
+            quality_map,
             stop,
         )
     }
@@ -455,6 +490,7 @@ impl Encoder {
                 rgb.width,
                 rgb.height,
                 params,
+                None,
                 stop,
             )?;
             Ok(stream)
@@ -632,6 +668,7 @@ impl Encoder {
         Ok(params.model_id as usize)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn encode_from_latents(
         &self,
         latents: [&Tensor<f32>; 2],
@@ -639,6 +676,7 @@ impl Encoder {
         w: usize,
         h: usize,
         params: EncodeParams,
+        quality_map: Option<&QualityMap>,
         stop: &dyn enough::Stop,
     ) -> Result<(Vec<u8>, Vec<Component>)> {
         let set = self.model_set(self.check_params(w, h, params)?, params.op)?;
@@ -677,6 +715,18 @@ impl Encoder {
         // 3. A provisional header: everything the scale derivation reads is known now; the
         //    cube flags are filled in once the residual has been quantised.
         let mut hdr = picture_header(w as u32, h as u32, params.model_id, beta, params);
+        if let Some(m) = quality_map {
+            let (lh, lw) = hdr.latent_size(0);
+            if (m.qp.h, m.qp.w) != (lh as usize, lw as usize) {
+                return Err(Error::InvalidArgument(
+                    "quality map: one qp per luma latent position expected",
+                ));
+            }
+            hdr.quality_map = Some(crate::header::QualityMapHeader {
+                num_threads: params.num_threads_z,
+                entropy_index: m.entropy_index(),
+            });
+        }
         hdr.check_conformance()?;
 
         let mut components = Vec::with_capacity(2);
@@ -696,7 +746,7 @@ impl Encoder {
                 ccs,
                 model,
                 z_hat,
-                None,
+                quality_map,
                 params.rvs,
                 GrfsFlags::Derive(params.grfs),
             )?;
@@ -704,7 +754,10 @@ impl Encoder {
 
             // 5. psi, then the residual quantisation with its cube-flag decision, region by
             //    region (`compress`'s two `iter_colocated_grids` loops).
-            let q = EncoderQuantiser { scales: &scales };
+            let q = EncoderQuantiser {
+                scales: &scales,
+                quality_map,
+            };
             let out = compress_regions(
                 eng, &hdr, ccs, model, z_hat, latent, &mask, &q, lh, lw, stop,
             )?;
@@ -783,6 +836,9 @@ impl Encoder {
             }
         }
         out.substream(Marker::Soz, &soz)?;
+        if let (Some(m), Some(qh)) = (quality_map, &hdr.quality_map) {
+            out.substream(Marker::Soq, &m.encode(&self.tables, qh)?)?;
+        }
         Ok((out.finish(), components))
     }
 
@@ -1027,6 +1083,7 @@ fn region_area_grid(h: usize, w: usize, num_ver: usize, num_hor: usize) -> Vec<A
 /// `quant_dequant` with the tools the encoder supports: the gain unit and RVS / GRFS.
 struct EncoderQuantiser<'a> {
     scales: &'a ComponentScales,
+    quality_map: Option<&'a QualityMap>,
 }
 
 impl mcm::Quantiser for EncoderQuantiser<'_> {
@@ -1034,14 +1091,16 @@ impl mcm::Quantiser for EncoderQuantiser<'_> {
     fn quantise(&self, ch: usize, index: usize, x: f32, coded: bool) -> (i16, f32) {
         let q = if coded {
             self.scales
-                .quantize(None, ch, index, x)
-                .unwrap_or(0.0)
+                .quantize(self.quality_map, ch, index, x)
                 .clamp(-32768.0, 32767.0)
                 .round_ties_even()
         } else {
             0.0
         };
-        (q as i16, self.scales.dequantize(None, ch, index, q))
+        (
+            q as i16,
+            self.scales.dequantize(self.quality_map, ch, index, q),
+        )
     }
 }
 

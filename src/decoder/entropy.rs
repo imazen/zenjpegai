@@ -78,24 +78,16 @@ impl ComponentScales {
     }
 
     /// `quantizer.quantize_resi`: the tools in forward order (gain unit, quality map, RVS).
-    ///
-    /// The quality map is not ported on the encoder side; it returns `None`.
     #[inline]
-    pub fn quantize(
-        &self,
-        quality_map: Option<&QualityMap>,
-        ch: usize,
-        i: usize,
-        x: f32,
-    ) -> Option<f32> {
-        if quality_map.is_some() {
-            return None;
+    pub fn quantize(&self, quality_map: Option<&QualityMap>, ch: usize, i: usize, x: f32) -> f32 {
+        let mut v = x * self.gain.scaler[ch];
+        if let Some(m) = quality_map {
+            v = m.quantize(i, v);
         }
-        let v = x * self.gain.scaler[ch];
-        Some(match &self.rvs {
+        match &self.rvs {
             Some(r) => r.quantize(ch, self.likely.plane(ch)[i], v),
             None => v,
-        })
+        }
     }
 }
 

@@ -259,6 +259,16 @@ if [ "$SET" = encoder ] || [ "$SET" = all ]; then
   enc_fixed enc_img30_bop_m1_b0_lsbs $IMG30 1 0 cfg/tools_off.json cfg/tools/LSBS.json cfg/profiles/base.json
   enc_fixed enc_img01_bop_m1_b0_depregions $IMG01 1 0 cfg/tools_off.json cfg/tools/DependentRegions.json cfg/profiles/base.json
   enc_fixed enc_img01_bop_m1_b0_indregions $IMG01 1 0 cfg/tools_off.json cfg/tools/IndependentRegions.json cfg/profiles/base.json
+  # Quality map: the same ROI mask the `qmap` set uses (drawn here so the sets are independent).
+  MASKS=$OUT/../masks; mkdir -p "$MASKS"
+  [ -f "$MASKS/img30_roi.png" ] || (cd "$HERE/../.." && nice -n 19 cargo run -q --release --features cli --example make_roi_mask -- \
+      560 888 "$MASKS/img30_roi.png" 96,160,208,304 352,560,128,160)
+  cat > "$MASKS/qmap_img30.json" <<JSON
+{ "model": { "tool": "CCS_SGMM", "CCS_SGMM": { "tools_common": { "qual_map": {
+  "enabled": 1, "qp_map_type": 3, "adjust_qp": 1, "ROI_map_in_file": "$MASKS/img30_roi.png" } } } } }
+JSON
+  enc_fixed enc_img30_bop_m1_b0_qmap $IMG30 1 0 cfg/tools_off.json "$MASKS/qmap_img30.json" cfg/profiles/base.json
+  enc_fixed enc_img30_bop_m1_b0_qmap_rvs $IMG30 1 0 cfg/tools_off.json cfg/tools/ResVarScale.json "$MASKS/qmap_img30.json" cfg/profiles/base.json
   # Not generated yet (see PORTING.md "Work queue"): odd picture sizes.
 fi
 echo "== done ($(date -u +%H:%M:%S))"

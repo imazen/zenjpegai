@@ -45,6 +45,8 @@ OPTIONS:
     --ans-threads <n>  encode: ANS threads per substream (1, 2, 4, 8 or 16)
     --regions <mode>   encode: region partitioning, `dependent` or `independent` (large
                        pictures only; the grid follows the picture size)
+    --quality-map <p>  encode: RGB mask PNG; white areas are coded at a higher quality
+                       (the reference's qp_map_type 3)
     --max-channels <y,uv>  progressive decode: read only the first latent channels
     --single-thread    do not use the thread pool
     --scalar           no SIMD (for debugging; every tier produces identical pixels)
@@ -77,6 +79,7 @@ struct Args {
     lsbs: bool,
     ans_threads: u8,
     regions: Option<zenjpegai::encoder::RegionMode>,
+    quality_map: Option<PathBuf>,
     single_thread: bool,
     scalar: bool,
     repeat: usize,
@@ -102,6 +105,7 @@ fn parse_args() -> Result<Args, String> {
         lsbs: false,
         ans_threads: 1,
         regions: None,
+        quality_map: None,
         single_thread: false,
         scalar: false,
         repeat: 1,
@@ -148,6 +152,7 @@ fn parse_args() -> Result<Args, String> {
                     other => return Err(format!("--regions: unknown mode `{other}`")),
                 });
             }
+            "--quality-map" => a.quality_map = Some(PathBuf::from(value("--quality-map")?)),
             "--rvs" => a.rvs = true,
             "--grfs" => a.grfs = true,
             "--lsbs" => a.lsbs = true,
@@ -307,14 +312,44 @@ fn run() -> Result<(), String> {
                 num_threads_r: args.ans_threads,
                 regions: args.regions,
             };
+            // `--quality-map`: an RGB mask at picture resolution, white = region of interest.
+            let quality_map = match &args.quality_map {
+                None => None,
+                Some(path) => {
+                    let bytes = std::fs::read(path).map_err(|e| format!("{path:?}: {e}"))?;
+                    let mask =
+                        zenjpegai::encoder::read_png_rgb8(&bytes).map_err(|e| format!("{e:?}"))?;
+                    let mut planes =
+                        zenjpegai::tensor::Tensor::<u8>::zeros(3, mask.height, mask.width)
+                            .map_err(|e| format!("{e:?}"))?;
+                    for (i, p) in mask.data.as_chunks::<3>().0.iter().enumerate() {
+                        for (c, &v) in p.iter().enumerate() {
+                            planes.plane_mut(c)[i] = v as u8;
+                        }
+                    }
+                    Some(
+                        zenjpegai::tools::qualmap::QualityMap::from_roi_mask(
+                            &planes,
+                            image.height.div_ceil(16),
+                            image.width.div_ceil(16),
+                        )
+                        .map_err(|e| format!("{e:?}"))?,
+                    )
+                }
+            };
             let encoder = Encoder::with_engine(models, engine);
             let mut stream = Vec::new();
             for run in 0..args.repeat.max(1) {
                 let t = Instant::now();
                 stream = match args.bpp {
-                    None => encoder
-                        .encode(&image, params)
-                        .map_err(|e| format!("{e:?}"))?,
+                    None => match &quality_map {
+                        None => encoder
+                            .encode(&image, params)
+                            .map_err(|e| format!("{e:?}"))?,
+                        Some(m) => encoder
+                            .encode_with_quality_map(&image, params, m)
+                            .map_err(|e| format!("{e:?}"))?,
+                    },
                     Some(bpp) => {
                         let (s, m) = encoder
                             .encode_to_bpp(&image, bpp, params)

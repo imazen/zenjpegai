@@ -14,6 +14,7 @@ use zenjpegai::model::{
 };
 use zenjpegai::nn::fast::{BTensor, Engine, Tier};
 use zenjpegai::tensor::Tensor;
+use zenjpegai::tools::qualmap::QualityMap;
 
 fn max_abs_diff(want: &[f32], got: &[f32]) -> f32 {
     assert_eq!(want.len(), got.len());
@@ -281,6 +282,26 @@ const VECTORS_TOOLS: &[ToolVector] = &[
         |p| EncodeParams { lsbs: true, ..p },
     ),
     (
+        "enc_img30_bop_m1_b0_qmap",
+        IMG30,
+        1,
+        OperatingPoint::Bop,
+        0,
+        plain,
+    ),
+    (
+        "enc_img30_bop_m1_b0_qmap_rvs",
+        IMG30,
+        1,
+        OperatingPoint::Bop,
+        0,
+        |p| EncodeParams {
+            rvs: true,
+            grfs: true,
+            ..p
+        },
+    ),
+    (
         "enc_img01_bop_m1_b0_depregions",
         IMG01,
         1,
@@ -332,6 +353,41 @@ fn vectors() -> Vec<Vector> {
 }
 
 impl Vector {
+    /// The ROI mask the `qmap` vectors were encoded with, as a quality map at latent resolution.
+    fn quality_map(&self) -> Option<QualityMap> {
+        if !self.name.contains("qmap") {
+            return None;
+        }
+        let path = vector_dir(self.name)
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("masks/img30_roi.png");
+        let mask = read_png_rgb8(&std::fs::read(&path).unwrap_or_else(|e| {
+            panic!(
+                "{}: {e} (run make_reference_streams.sh encoder)",
+                path.display()
+            )
+        }))
+        .unwrap();
+        let mut planes = Tensor::<u8>::zeros(3, mask.height, mask.width).unwrap();
+        for (i, p) in mask.data.as_chunks::<3>().0.iter().enumerate() {
+            for (c, &v) in p.iter().enumerate() {
+                planes.plane_mut(c)[i] = v as u8;
+            }
+        }
+        let picture = source(self.image);
+        Some(
+            QualityMap::from_roi_mask(
+                &planes,
+                picture.height.div_ceil(16),
+                picture.width.div_ceil(16),
+            )
+            .unwrap(),
+        )
+    }
+
     fn params(&self) -> EncodeParams {
         (self.tools)(EncodeParams {
             model_id: self.model_id,
@@ -475,6 +531,7 @@ fn decisions_match_reference_given_its_latents() {
         let params = v.params();
         let zy = z_tensor(&dump["y.z_hat"]);
         let zc = z_tensor(&dump["uv.z_hat"]);
+        let qmap = v.quality_map();
         let (stream, traces) = enc
             .encode_latents(
                 [&yl, &yc],
@@ -482,6 +539,7 @@ fn decisions_match_reference_given_its_latents() {
                 picture.width,
                 picture.height,
                 params,
+                qmap.as_ref(),
             )
             .unwrap();
         let moved = compare_decisions(vector, &traces);
@@ -517,7 +575,9 @@ fn encoder_end_to_end_matches_reference() {
     for v in vectors() {
         let (vector, params) = (v.name, v.params());
         let enc = Encoder::new(ref_root().join("models"));
-        let (stream, traces) = enc.encode_traced(&source(v.image), params).unwrap();
+        let (stream, traces) = enc
+            .encode_traced_with(&source(v.image), params, v.quality_map().as_ref())
+            .unwrap();
         let moved = compare_decisions(vector, &traces);
         let reference = std::fs::read(vector_dir(vector).join("stream.bits")).unwrap();
         let ratio = stream.len() as f64 / reference.len() as f64;
@@ -578,17 +638,25 @@ fn reference_decoder_accepts_our_streams() {
     for v in vectors() {
         let (vector, params) = (v.name, v.params());
         let enc = Encoder::new(ref_root().join("models"));
-        let stream = enc.encode(&source(v.image), params).unwrap();
+        let stream = match v.quality_map() {
+            None => enc.encode(&source(v.image), params).unwrap(),
+            Some(m) => enc
+                .encode_with_quality_map(&source(v.image), params, &m)
+                .unwrap(),
+        };
         let scratch = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/refdec");
         std::fs::create_dir_all(&scratch).unwrap();
         let bits = scratch.join(format!("{vector}.bits"));
         let png = scratch.join(format!("{vector}.png"));
         std::fs::write(&bits, &stream).unwrap();
-        let regions = params.regions.is_some();
-        let cmd = if regions {
+        // The stock reference decoder cannot read a region stream (any of them, its own
+        // included) or a quality map; `dump_decode.py` patches both defects at runtime.
+        let patched = params.regions.is_some() || vector.contains("qmap");
+        let cmd = if patched {
             let out = scratch.join(vector);
             format!(
-                "python {}/scripts/ref_vectors/dump_decode.py {} {} --contiguous-masks && cp {}/decoded.png {}",
+                "python {}/scripts/ref_vectors/dump_decode.py {} {} --contiguous-masks \
+                 --fix-qmap-header && cp {}/decoded.png {}",
                 env!("CARGO_MANIFEST_DIR"),
                 bits.display(),
                 out.display(),
