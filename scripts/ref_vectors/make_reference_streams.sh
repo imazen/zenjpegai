@@ -312,6 +312,7 @@ if [ "$SET" = cubeflags ] || [ "$SET" = all ]; then
   # streams themselves come from `make_reference_streams.sh encoder`). Non-region, so the
   # stock reference decoder is a correct oracle for them.
   for d in enc_img30_bop_m0_bm1069 enc_img30_hop_m3_bm1069; do
+    [ -f "$OUT/$d/stream.bits" ] || { echo "== $d: missing stream, run the encoder set first" >&2; exit 1; }
     [ -f "$OUT/$d/manifest.txt" ] || nice -n 19 python "$HERE/dump_decode.py" "$OUT/$d/stream.bits" "$OUT/$d" > "$OUT/$d/dump.log" 2>&1
   done
 fi

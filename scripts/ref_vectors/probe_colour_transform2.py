@@ -8,14 +8,13 @@ bitstream. This script patches only that call signature (a tuple is what every o
 passes), encodes with the transform forced on, decodes, and reports what comes out.
 
     cd ~/work/zen/jpeg-ai-reference-software && . .venv/bin/activate
-    PYTHONPATH=. python probe_colour_transform2.py IN.png OUT.bits OUT.png \
-        [matrix(9 ints 0-255)] [offset(3 ints)]
+    python ~/work/zen/zenjpegai/scripts/ref_vectors/probe_colour_transform2.py \
+        IN.png OUT.bits OUT.png [matrix(9 ints 0-255)] [offset(3 ints)]
 """
 import sys
 
 sys.path.insert(0, ".")
 import numpy as np  # noqa: E402
-import torch  # noqa: E402
 
 # convert_range_((0, 1)) vs convert_range_(0, 1): accept both, semantics unchanged.
 from src.codec.common.image import Image  # noqa: E402
@@ -79,7 +78,11 @@ def main():
         def_base_parser,
         process_encoder,
     )
-    from src.reco.coders.decoder import RecoDecoder, process_decoder
+    from src.reco.coders.decoder import (
+        RecoDecoder,
+        def_base_parser as dec_base_parser,
+        process_decoder,
+    )
     from src.codec.coders import (
         def_encoder_parser_decorator,
         def_decoder_parser_decorator,
@@ -93,8 +96,6 @@ def main():
          "cfg/profiles/base.json", "-target_device", "cpu"] + extra,
         True, None, True,
     )
-
-    from src.reco.coders.decoder import def_base_parser as dec_base_parser
 
     dbase = dec_base_parser()
     dec = RecoDecoder(dbase, def_decoder_parser_decorator(dbase))
