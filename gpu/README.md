@@ -85,12 +85,16 @@ rounds absorb most of that but not all, and the `.meta` files name the rows that
   the proprietary driver, and 28.8 ms against 3.7 ms at 560 x 888. Conclusions about this code
   cannot be drawn from an NVK run.
 - **Crossover against the crate's own CPU engine** (8 rayon threads on a 9950X3D, so a
-  conservative CPU): SOP from about 384 x 384, BOP from about 256 x 256, HOP from about
-  128 x 128 — the heavier the transform, the smaller the picture at which the GPU wins. Below
-  that the GPU's fixed cost (a whole-picture synthesis is 25 to 160 dispatches however small the
-  picture) dominates: SOP 64 x 64 is 1.4 ms on the GPU against 0.5 ms on the CPU.
-- **The win is modest, not a rout**: at 1024 x 1024 the GPU is 2.2x the 8-thread CPU for SOP,
-  1.4x for BOP, 1.1x for HOP. Against a single CPU thread it is 7x / 5.7x / 4x.
+  conservative CPU): SOP at about 384 x 384 (3.08 ms against 3.17), BOP at about 256 x 256
+  (3.29 against 4.25), HOP between 128 x 128 (10.40 against 9.92, CPU) and 256 x 256 (18.90
+  against 35.19, GPU) — the heavier the transform, the smaller the picture at which the GPU
+  wins. Below that the GPU's fixed cost (a whole-picture synthesis is 25 to 160 dispatches
+  however small the picture) dominates: SOP 64 x 64 is 1.5 ms on the GPU against 0.4 ms on the
+  CPU.
+- **The win is modest, not a rout**: at 1024 x 1024 the GPU is 2.1x the 8-thread CPU for SOP,
+  1.5x for BOP, 1.3x for HOP. Against a single CPU thread it is 6.0x / 6.0x / 4.3x. Whole
+  reference streams at 560 x 888, codestream to 8-bit RGB (the `decode` rows, where the CPU-only
+  entropy stage is included): 16.8 vs 17.9 ms (SOP), 22.7 vs 24.6 (BOP), 273.8 vs 387.2 (HOP).
 - **Cold start is Vulkan, not shader compilation.** Creating the instance, adapter and device
   costs 180-210 ms once per process (884 ms on the very first process after a driver load);
   compiling all the pipelines of an operating point and building its plans costs 2.8 ms (BOP,
@@ -99,24 +103,33 @@ rounds absorb most of that but not all, and the `.meta` files name the rows that
 
 ### Tuning done, with numbers
 
-Three changes, chosen from the per-dispatch profile (`gpu_bench --profile`, committed as
-`benchmarks/gpu_profile_2026-09-17_rtx2080.{tsv,meta}` for both sides). All numbers below are
-device time from the two profile runs, taken back to back on an otherwise idle card:
+Four changes, chosen from the per-dispatch profile (`gpu_bench --profile`, committed as
+`benchmarks/gpu_profile_2026-09-17_rtx2080.{tsv,meta}` for both sides). The numbers are device
+time from a before / after profile pair run back to back on an idle card, each the second run of
+its binary (the first run after a build measures low clocks and is not comparable).
 
 | change | what it does | HOP 1024 x 1024 |
 | --- | --- | --- |
 | `Graph::conv_res` | computes the ResAU gate and the residual add in the convolution's store instead of a pointwise dispatch over the whole map | dispatches per picture SOP 36 -> 30, BOP 33 -> 27, HOP 172 -> 158 |
-| transposed convolution | visits only the taps whose divisibility test used to pass: 4 of 16 at k=4 stride 2, at most 4 of 9 at k=3 | `convt_k3_s2` 36.5 -> 28.1 ms |
-| depthwise 3x3 | stages its `(WG+2)^2` halo in workgroup memory, 1600 bytes, one channel block per workgroup: 9 reads per output pixel become 1.56 | `depthwise3x3` 134.3 -> 64.8 ms |
+| transposed convolution | visits only the taps whose divisibility test used to pass: 4 of 16 at k=4 stride 2, at most 4 of 9 at k=3 | `convt_k3_s2` 36.7 -> 28.1 ms |
+| depthwise 3x3 | stages its `(WG+2)^2` halo in workgroup memory, 1600 bytes, one channel block per workgroup: 9 reads per output pixel become 1.56 | `depthwise3x3` 134.4 -> 64.8 ms |
+| workgroup edge per layer | 16 x 16 instead of 8 x 8 where the layer has at least 16 input blocks and both output dimensions are at least 128, so each broadcast weight block is shared by four times as many invocations | 1x1 convolutions 162.4 -> 117.3 ms, the 3x3 family 231.6 -> 204.0 ms |
 
-Whole-picture device time, same two runs:
+Whole-picture device time, same pair:
 
 | | SOP 560x888 | SOP 1024² | BOP 560x888 | BOP 1024² | HOP 560x888 | HOP 1024² |
 | --- | --- | --- | --- | --- | --- | --- |
-| before | 4.54 ms | 8.47 ms | 10.72 ms | 23.80 ms | 259.1 ms | 635.0 ms |
-| after | 3.73 ms | 7.36 ms | 9.91 ms | 22.36 ms | 237.0 ms | 552.2 ms |
+| before | 3.76 ms | 7.35 ms | 10.80 ms | 23.91 ms | 259.4 ms | 635.3 ms |
+| after | 3.76 ms | 7.41 ms | 9.67 ms | 21.31 ms | 223.5 ms | 498.0 ms |
+| | 0% | 0% | **-10%** | **-11%** | **-14%** | **-22%** |
 
-Every one of the three keeps each output's summation order, so `just gpu-test` reports exactly
+**SOP does not move**, and saying so is the point of measuring: its network has no depthwise
+layer, its upsampling is a 2x2 convolution plus a pixel shuffle rather than a transposed
+convolution, and its convolutions run on maps too small for the wider workgroup, so the only
+change that reaches it is the gate / residual fusion — six dispatches out of thirty-six, none of
+them the expensive ones.
+
+Every one of the four keeps each output's summation order, so `just gpu-test` reports exactly
 the same parity numbers before and after — that is the check that they are speed-ups and not
 approximations.
 
@@ -134,9 +147,11 @@ try is a *smaller* `ob` together with a pixel tile, not a bigger tile.
 
 **Open, in order:**
 
-1. **The convolutions run at 4-7% of the card's f32 peak** (e.g. the 3x3 stride-2 of HOP's CAB:
-   9.7 G multiply-adds in 48.9 ms = 0.39 TFLOP/s against ~10 TFLOP/s). The profile says HOP is
-   27% 1x1 convolution, 12% depthwise, 41% the 3x3 family. Neither weight bandwidth nor
+1. **The convolutions run at a few per cent of the card's f32 peak, and the tuning did not
+   change that** — HOP's biggest single dispatch, the 3x3 stride-2 of the CAB, is 9.66 G
+   multiply-adds in 49.1 ms before and 44.6 ms after, i.e. 0.39 then 0.43 TFLOP/s against about
+   10. After the tuning the profile says HOP 1024x1024 is 24% 1x1 convolution, 13% depthwise,
+   34% the rest of the 3x3 family. Neither weight bandwidth nor
    arithmetic explains the gap, so the next step is to find what does (occupancy and stall
    reasons per kernel; `nsys`/`ncu` are usable now that the proprietary driver is installed,
    which they were not on NVK) before writing another kernel. Candidates named but not measured:
@@ -152,7 +167,14 @@ try is a *smaller* `ob` together with a pixel tile, not a bigger tile.
 4. Latent upload converts planar to HWC4 on the CPU per picture (0.4 ms for 560 x 888).
 5. No cancellation (`enough::Stop`) on the GPU path; `GpuDecoder` has no `max_channels`
    (progressive decode) option.
-6. The integrated Radeon (RADV) loses the device during a BOP size sweep; see
+6. **A workspace that has synthesised a very large picture stays slow for small ones.** In the
+   size sweep the 560 x 888 BOP row, which runs last, measures 32.3 ms of device time against
+   9.7 ms for the same picture in a fresh context, reproducibly across runs; capping the sweep
+   at 2048 instead of 4096 makes it 9.4 ms. The pooled activation buffers only ever grow
+   (`plan.rs::Pool`), so after a 4096 x 4096 BOP picture every later plan binds slots sized for
+   that one. Shrinking or bucketing the pool would fix it; nothing else in the file is affected
+   (SOP and HOP show the same row unchanged).
+7. The integrated Radeon (RADV) loses the device during a BOP size sweep; see
    `benchmarks/gpu_decode_2026-09-17_radv_igpu.meta`. It is 8x slower than the crate's own CPU
    engine anyway, so the useful fix is probably to decline integrated adapters by default rather
    than to chase the hang.

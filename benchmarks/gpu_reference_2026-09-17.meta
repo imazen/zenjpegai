@@ -36,14 +36,20 @@ Medians of the three runs, seconds, against gpu_decode_2026-09-17_rtx2080.tsv's 
 (whole codestream to 8-bit output, same streams, same box):
 
   stream                  size       ref CPU 1T  ref GPU  ours CPU 1T  ours CPU 8T  ours GPU
-  img30_simple (SOP)      560x888         0.133    0.087        0.056        0.016     0.016
-  img30_base   (BOP)      560x888         0.221    0.093        0.092        0.024     0.022
-  img30_high   (HOP)      560x888         2.358    0.160        1.382        0.401     0.257
-  img01_base   (BOP)     2096x1400        1.224    0.288        0.536        0.168     0.148
+  img30_simple (SOP)      560x888         0.133    0.087        0.056        0.018     0.017
+  img30_base   (BOP)      560x888         0.221    0.093        0.091        0.025     0.023
+  img30_high   (HOP)      560x888         2.358    0.160        1.327        0.387     0.274
+  img01_base   (BOP)     2096x1400        1.224    0.288        0.531        0.155     0.150
 
 The reference's GPU path has a floor of about 85 ms per picture (SOP, where there is almost no
 work to do) that is Python and torch per-call overhead, not arithmetic; that is most of why the
 two light operating points look so different. HOP is where the comparison is about kernels, and
-there the reference's cuDNN path is 1.6x faster than this crate's WGSL kernels (0.160 s against
-0.257 s) on the same card, while this crate's CPU engine is 5.9x faster than the reference's CPU
-engine (0.401 s against 2.358 s, and 1.7x at equal thread count).
+there the reference's cuDNN path is 1.7x faster than this crate's WGSL kernels (0.160 s against
+0.274 s) on the same card, while this crate's CPU engine is 6.1x faster than the reference's CPU
+engine (0.387 s against 2.358 s, and 1.8x at equal thread count).
+
+Our columns are the `decode` rows of gpu_decode_2026-09-17_rtx2080.tsv, i.e. the same four
+streams decoded end to end. They include the same stages the reference's TOTAL does. The GPU
+column there runs the CPU entropy stage and the GPU synthesis in one thread of control with no
+overlap, so on SOP and BOP, where synthesis is 4 to 11 ms of a 17 to 23 ms decode, the entropy
+stage is what the total is made of and the two columns are nearly equal.
