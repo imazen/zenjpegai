@@ -5,6 +5,14 @@ default: check
 check:
     cargo fmt --check
     cargo clippy --all-targets --all-features -- -D warnings
+    cargo check --no-default-features
+    cargo check --no-default-features --target wasm32-unknown-unknown
+
+# no_std + alloc only (no std, no parallel, no avx512): must build clean, no warnings.
+no-std:
+    cargo check --no-default-features
+    cargo clippy --no-default-features -- -D warnings
+    cargo check --no-default-features --target wasm32-unknown-unknown
 
 # Upstream reference checkout (models/ + the Python oracle). Override with ZENJPEGAI_REF=...
 ref := env_var_or_default("ZENJPEGAI_REF", env_var("HOME") / "work/zen/jpeg-ai-reference-software")

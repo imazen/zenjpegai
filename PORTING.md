@@ -423,10 +423,13 @@ minimized mem use, and fast build times." Seven deliverables were scoped; two la
   `nn::fast::{Engine, Tier, set_pool_limit}`, `model::*`, `weights::packed::*`, so either `cli` implies the feature
   or those get re-exported at the root; then `#![warn(missing_docs)]`. `Decoder`, `Limits`, `MemoryEstimate`,
   `Error` already return `whereat::At<Error>` / are documented.
-- **no_std + alloc**: `cargo check --no-default-features` was not run by this agent. Known std-only float calls to
-  route through `libm`: `round_ties_even` and `clamp`/`floor`/`sqrt`/`mul_add` on f32/f64 in `decoder/output.rs`,
-  `nn/*`, `model/*`, `filters/*`; `decoder/limits.rs` and the `*_with` stop plumbing are core-only already
-  (`enough` is a no_std dependency). Add the check (and `--target wasm32-unknown-unknown`) to the justfile and CI.
+- **no_std + alloc**: DONE 2026-09-17. `cargo check --no-default-features` (native and
+  `--target wasm32-unknown-unknown`) and `cargo clippy --no-default-features -- -D warnings` all
+  pass clean today — the float call sites already route through `libm` (nothing left to convert);
+  the only defect was one `unused_variables` warning in `nn/fast/tensor.rs::BTensor::scratch`
+  (the overflow-checked size was computed but only consumed by the `std`-gated pool path), fixed
+  with a `cfg_attr` on the binding. Wired into `justfile` (`just no-std`, and `just check`) and
+  `.github/workflows/ci.yml` (`no-std` job).
 - **Build times**: only one data point exists: clean `cargo build --release --features cli -j 8 --timings` of
   663b86d took 7.6 s wall on the 9950X3D (incremental release profile). `cargo llvm-lines` (installed) was not run;
   the `nn/fast/conv.rs` tier x block x stride instantiation audit is open. Nothing was recorded under

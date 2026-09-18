@@ -168,6 +168,7 @@ impl BTensor {
     /// Like [`Self::zeros`] but with arbitrary contents: for outputs a kernel overwrites
     /// completely.
     pub fn scratch(c: usize, h: usize, w: usize, v: usize) -> Result<Self> {
+        #[cfg_attr(not(feature = "std"), allow(unused_variables))]
         let n = c
             .div_ceil(v)
             .checked_mul(h)
