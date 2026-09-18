@@ -1998,10 +1998,17 @@ fn moved_residual_symbols(
         .unwrap();
     let eg = decode_entropy_stage(&tables, got, hdr_got, [&g0, &g1]).unwrap();
     let ew = decode_entropy_stage(&tables, want, hdr_want, [&w0, &w1]).unwrap();
+    assert_eq!(eg.len(), ew.len(), "entropy-stage component count");
     let mut z_moved = 0usize;
     let mut moved = 0usize;
     let mut worst = 0i32;
     for (g, w) in eg.iter().zip(&ew) {
+        assert_eq!(g.z_hat.data.len(), w.z_hat.data.len(), "z_hat length");
+        assert_eq!(
+            g.residual_q.data.len(),
+            w.residual_q.data.len(),
+            "residual length"
+        );
         for (a, b) in g.z_hat.data.iter().zip(&w.z_hat.data) {
             if a != b {
                 z_moved += 1;
@@ -2068,6 +2075,51 @@ fn tools_on_encode(
         )
         .unwrap();
     (stream, m)
+}
+
+/// The measured deviation signature of each `tools_on` vector (2026-09-18; the table in
+/// `PORTING.md` → "Encoder parity → `tools_on`"): `(z_hat symbols moved, residual symbols
+/// moved, worst |residual move|, stream-size excess not carried by the TON payload)`. The
+/// encode is deterministic — every SIMD tier and thread count produces the identical
+/// stream — so each entry is pinned exactly: a changed value is a behaviour change, never
+/// something to absorb; update the table and `PORTING.md` together.
+const TOOLS_ON_SIGNATURE: &[(&str, usize, usize, i32, i64)] = &[
+    ("img30_base_on_bpp012", 0, 0, 0, 0),
+    ("img30_base_on_bpp025", 0, 0, 0, 0),
+    ("img30_base_on_bpp050", 0, 0, 0, 0),
+    ("img30_base_on_bpp075", 0, 1, 1, 1),
+    ("img30_base_on_bpp100", 0, 1, 1, 0),
+    ("img01_base_on_bpp012", 0, 1, 1, 1),
+    ("img01_base_on_bpp025", 0, 0, 0, 0),
+    ("img01_base_on_bpp050", 0, 12, 1, -1),
+    ("img01_base_on_bpp075", 0, 4, 1, 0),
+    ("img01_base_on_bpp100", 1, 37, 1, -2),
+];
+
+/// Assert `name`'s symbol moves and size accounting against [`TOOLS_ON_SIGNATURE`]. `sig`
+/// is `(z_hat moves, residual moves, worst |residual move|)` from
+/// [`moved_residual_symbols`]; `sizes` is `(our stream, reference stream, our TON payload,
+/// reference TON payload)` lengths in bytes.
+fn check_tools_on_signature(
+    name: &str,
+    sig: (usize, usize, i32),
+    sizes: (usize, usize, usize, usize),
+) {
+    let Some(&(_, wz, wm, wworst, wunexplained)) = TOOLS_ON_SIGNATURE.iter().find(|e| e.0 == name)
+    else {
+        panic!("{name}: no pinned deviation signature");
+    };
+    let (got_len, want_len, ton_got, ton_want) = sizes;
+    // Bytes of the size excess outside the TON: the ue-coded substream size prefixes and
+    // the ANS-payload drift of moved symbols (a moved symbol rewrites the rest of its
+    // substream's bytes, but the payload length drifts only a byte or two).
+    let unexplained = got_len as i64 - want_len as i64 - (ton_got as i64 - ton_want as i64);
+    assert_eq!(
+        (sig.0, sig.1, sig.2, unexplained),
+        (wz, wm, wworst, wunexplained),
+        "{name}: deviation signature drifted (z_hat moves, residual moves, worst move, \
+         unexplained size) — update TOOLS_ON_SIGNATURE and PORTING.md deliberately"
+    );
 }
 
 /// E5 gate: at every CTC rate on both pictures, a `tools_on` encode must land on the
@@ -2228,25 +2280,21 @@ fn tools_on_ctc_matches_reference() {
         // a residual symbol on a quantization boundary can move by 1 and take a few ANS
         // bytes with it, at equal length) and the different filter decision is *better*
         // (dPSNR > 0), never worse. Anything else fails loudly.
+        //
+        // The signature itself is pinned per vector: the recorded symbol moves and the
+        // exact size accounting of [`TOOLS_ON_SIGNATURE`] hold on every vector, breaching
+        // or not.
+        check_tools_on_signature(
+            name,
+            (z_moved, moved, move_worst),
+            (stream.len(), reference.len(), ton_got, ton_want),
+        );
         let size_ok = rel.abs() < 0.005;
         let psnr_ok = dp.abs() <= 0.02;
         if !size_ok || !psnr_ok {
             println!(
                 "{name}: strict gate breach — size {size_ok} PSNR {psnr_ok}; \
-                 checking the documented deviation signature"
-            );
-            let unexplained = stream.len() as isize
-                - reference.len() as isize
-                - (ton_got as isize - ton_want as isize);
-            assert!(
-                unexplained.abs() <= 8,
-                "{name}: {unexplained} bytes of the size excess are outside the TON, \
-                 its size prefix and the moved symbols' ANS drift"
-            );
-            assert!(
-                z_moved <= 8 && moved <= 64,
-                "{name}: {z_moved} z_hat + {moved} residual symbols moved — beyond the \
-                 documented rounding-boundary mechanism"
+                 the pinned deviation signature applies"
             );
             assert!(
                 dp > 0.0,
@@ -2307,19 +2355,28 @@ fn reference_decoder_tools_on_psnr() {
              differ (worst {worst})",
             ref_ours.data.len()
         );
+        // The same pinned signature as the Rust-decoder leg: the PSNR gap must come from
+        // the TON's filter decisions alone, never from a drifting payload.
+        let reference = std::fs::read(dir.join("stream.bits")).unwrap();
+        let cs_got = Codestream::parse(&stream).unwrap();
+        let cs_want = Codestream::parse(&reference).unwrap();
+        let got_hdr = dec.read_headers(&stream).unwrap();
+        let want_hdr = dec.read_headers(&reference).unwrap();
+        let sig = moved_residual_symbols(&cs_got, &got_hdr.picture, &cs_want, &want_hdr.picture);
+        let ton_got = cs_got
+            .find(zenjpegai::container::Marker::Ton)
+            .map(|p| p.len())
+            .unwrap_or(0);
+        let ton_want = cs_want
+            .find(zenjpegai::container::Marker::Ton)
+            .map(|p| p.len())
+            .unwrap_or(0);
+        check_tools_on_signature(
+            name,
+            sig,
+            (stream.len(), reference.len(), ton_got, ton_want),
+        );
         if dp.abs() > 0.02 {
-            let cs_got = Codestream::parse(&stream).unwrap();
-            let reference = std::fs::read(dir.join("stream.bits")).unwrap();
-            let cs_want = Codestream::parse(&reference).unwrap();
-            let got_hdr = dec.read_headers(&stream).unwrap();
-            let want_hdr = dec.read_headers(&reference).unwrap();
-            let (z_moved, moved, _) =
-                moved_residual_symbols(&cs_got, &got_hdr.picture, &cs_want, &want_hdr.picture);
-            assert!(
-                z_moved <= 8 && moved <= 64,
-                "{name}: {z_moved} z_hat + {moved} residual symbols moved — the PSNR gap \
-                 is not explained by the filter decisions alone"
-            );
             assert!(
                 dp > 0.0,
                 "{name}: reference-decoder PSNR delta {dp:+.4} dB in the wrong direction"
