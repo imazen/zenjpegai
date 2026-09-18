@@ -156,7 +156,7 @@ the card's ~10 TFLOP/s f32 / ~448 GB/s. What it said, and what was done about it
 
 | change | mechanism | effect (HOP 560x888) |
 | --- | --- | --- |
-| `conv_tiled`: workgroup-staged input halo + weight chunk | the 3x3/stride-2 convolutions re-read each input texel 9 times through global memory; staging the `(WG+KH-1)^2` input tile and the `(ICH,OCB)` weight chunk in workgroup memory makes each lane's tap reads cheap. Selected per layer only when the tile fits 16 KiB of workgroup storage (`plan.rs::conv_full`), input-channel blocking `ICH` keeps the accumulation order identical so parity counts do not move | k3x3 s1 ic32 kernels 19.4 -> 8.5 ms, s2 ic32 21.8 -> 6.9 ms, k1x1 ic32 36.3 -> 19.1 ms; ~8% -> 25-37% of f32 peak |
+| `conv_tiled`: workgroup-staged input halo + weight chunk | the 3x3/stride-2 convolutions re-read each input texel 9 times through global memory; staging the `(WG+KH-1)^2` input tile and the `(ICH,OCB)` weight chunk in workgroup memory makes each lane's tap reads cheap. Selected per layer only when the tile fits 16 KiB of workgroup storage (`plan.rs::conv_full`). The `ic0`-chunk-outer loop reorders the accumulation for `KH > 1` (chunked over input channels rather than tap-major), so the moved parity counts below are expected and re-measured, not a regression | k3x3 s1 ic32 kernels 19.4 -> 8.5 ms, s2 ic32 21.8 -> 6.9 ms, k1x1 ic32 36.3 -> 19.1 ms; ~8% -> 25-37% of f32 peak |
 | `depthwise3x3_z{2,4}` | channel block is now the fastest lane dimension: a warp loads/stores contiguous `vec4` runs instead of striding `c4*16B` per pixel | 27.0 -> 7.8 ms, 135 GB/s (30% of peak) |
 | `elu_gate` flattened over `(pixel, channel-block)` | same strided-access fix | 11.4 -> 1.4 ms, ~395 GB/s (88% of peak) |
 | channel-group dims baked into the conv key (`icg4`, `ocg4`; `ic4` for `convt`) | lets the compiler fully unroll the inner channel loops; required adding `ocg4` to the pipeline key — two layers that shared a key but differed in `ocg4` produced wrong chroma (caught by `decode_ref`, regression test in `tests/kernels.rs`) | flat on its own; enables the staging above |
@@ -180,9 +180,15 @@ profile totals are the trustworthy comparison.
 Whole-stream decode (codestream to 8-bit, CPU entropy stage included): BOP 560x888 22.8 -> 17.4 ms
 wall, HOP 560x888 326 -> 109 ms, img01 2096x1400 164 -> 93 ms.
 
-Parity is unchanged: every optimisation above keeps each output's summation order (the staged
-tiles only reorder *which lane* computes a tap, never the multiply-add sequence per output), and
-`just gpu-test` reports the same counts `PORTING.md` records.
+Parity: re-measured on the RTX 2080 after this pass (`just gpu-test`). `conv_tiled` is the one
+optimisation that does *not* keep each output's summation order — its input-channel chunks run
+all taps per `ICH` block rather than all channels per tap — so the 8-bit counts moved within
+their bounds: 47 / 59 / 33 of 1,491,840 samples (SOP / BOP / HOP, was 53 / 54 / 33) and 345 /
+368 of 8,803,200 (2096x1400, 6 tiles / 12 tiles in 2 independent regions, was 348 / 365), all
+by one step; the `rgba8unorm` presentation texture now differs from the CPU output stage in 27
+of 1,491,840 samples (was 28). The GPU-quantised readback (`emit_output`) differs from the CPU
+output stage run on the same GPU planes by at most 177 of 8,803,200 samples, all one step.
+`PORTING.md` records the current numbers.
 
 Also fixed in this pass:
 
