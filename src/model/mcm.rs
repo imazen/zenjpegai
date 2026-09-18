@@ -197,17 +197,32 @@ impl ContextModel {
 /// Skip mode's spatial cube edge, in down-shuffled (half resolution) latent samples.
 pub const CUBE_SIZE: usize = 8;
 
-/// `quant_dequant` for the gain unit alone: `round_ties_even(clamp(x * scaler))`, then
-/// `q / (scaler + 1e-9)`. `coded == false` forces the symbol to zero (skip mode).
-#[inline]
-pub fn quantise(x: f32, scaler: f32, coded: bool) -> (i16, f32) {
-    // quantize_resi, then mask2, then the int16 clamp, then round half to even.
-    let q = if coded {
-        (x * scaler).clamp(-32768.0, 32767.0).round_ties_even()
-    } else {
-        0.0
-    };
-    (q as i16, q / (scaler + 1e-9f32))
+/// `quant_dequant` for one latent sample: `quantize_resi`, the skip mask, the int16 clamp, round
+/// half to even, then `dequantize_resi`.
+///
+/// `index` is the sample's offset inside its channel plane *at latent resolution*, because the
+/// per-position tools (RVS / GRFS, the quality map) index their tables there.
+pub trait Quantiser {
+    fn quantise(&self, ch: usize, index: usize, x: f32, coded: bool) -> (i16, f32);
+}
+
+/// The gain unit alone: `round_ties_even(clamp(x * scaler))`, then `q / (scaler + 1e-9)`.
+#[derive(Clone, Copy, Debug)]
+pub struct GainQuantiser<'a> {
+    pub scaler: &'a [f32],
+}
+
+impl Quantiser for GainQuantiser<'_> {
+    #[inline]
+    fn quantise(&self, ch: usize, _index: usize, x: f32, coded: bool) -> (i16, f32) {
+        let s = self.scaler[ch];
+        let q = if coded {
+            (x * s).clamp(-32768.0, 32767.0).round_ties_even()
+        } else {
+            0.0
+        };
+        (q as i16, q / (s + 1e-9f32))
+    }
 }
 
 /// Encoder-side output of one component's residual quantisation.
@@ -257,16 +272,13 @@ impl ContextModel {
     /// deriving each stage's skip-mode cube flags from its own reconstruction error and
     /// re-quantising with the cubes it must not skip.
     ///
-    /// `scaler` is the gain unit's per-channel linear scaler; RVS and the quality map are not
-    /// ported on this side yet (they multiply per position, see
-    /// [`crate::decoder::entropy::ComponentScales::quantize`]).
     #[allow(clippy::too_many_arguments)]
-    pub fn compress(
+    pub fn compress<Q: Quantiser>(
         &self,
         eng: &Engine,
         y: &Tensor<f32>,
         psi: &BTensor,
-        scaler: &[f32],
+        q: &Q,
         mask: &Tensor<bool>,
         cube_thr: f32,
         stop: &dyn enough::Stop,
@@ -280,7 +292,6 @@ impl ContextModel {
             || psi.c != 4 * c
             || psi.h != hh
             || psi.w != hw
-            || scaler.len() < c
         {
             return Err(Error::InvalidArgument(
                 "context model: y / psi / mask shape mismatch",
@@ -329,7 +340,8 @@ impl ContextModel {
                         let i = (ch * hh + yy) * hw + xx;
                         diff.data[i] = d;
                         coded.data[i] = m;
-                        let (_, dq) = quantise(d, scaler[ch], m);
+                        let li = if inside { sy * w + sx } else { 0 };
+                        let (_, dq) = q.quantise(ch, li, d, m);
                         err.data[i] = if is_padding(s, h, w, hh, hw, yy, xx) {
                             0.0
                         } else {
@@ -353,12 +365,14 @@ impl ContextModel {
                         let sx = 2 * xx + px;
                         let i = (ch * hh + yy) * hw + xx;
                         let cube = flags[(yy / CUBE_SIZE) * cube_w + xx / CUBE_SIZE];
+                        let inside = sy < h && sx < w;
                         let code = (coded.data[i] || !cube) && !is_padding(s, h, w, hh, hw, yy, xx);
-                        let (q, dq) = quantise(diff.data[i], scaler[ch], code);
+                        let li = if inside { sy * w + sx } else { 0 };
+                        let (sym, dq) = q.quantise(ch, li, diff.data[i], code);
                         let val = &mut row[xx * v + lane];
                         *val += dq;
-                        if sy < h && sx < w {
-                            residual_q.data[(ch * h + sy) * w + sx] = q;
+                        if inside {
+                            residual_q.data[(ch * h + sy) * w + sx] = sym;
                             residual.data[(ch * h + sy) * w + sx] = dq;
                         }
                     }

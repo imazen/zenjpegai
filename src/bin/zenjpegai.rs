@@ -40,6 +40,9 @@ OPTIONS:
     --beta-disp <n>    encode: quantiser displacement, -1069..702 (default 0; lower = lower rate)
     --bpp <r>          encode: target bits per pixel; searches the model and the displacement
                        (rate matching) instead of taking --model / --beta-disp
+    --rvs --grfs       encode: residual variance scaling / channel gain flags
+    --lsbs             encode: latent scaling before synthesis (a decoder-side tool)
+    --ans-threads <n>  encode: ANS threads per substream (1, 2, 4, 8 or 16)
     --max-channels <y,uv>  progressive decode: read only the first latent channels
     --single-thread    do not use the thread pool
     --scalar           no SIMD (for debugging; every tier produces identical pixels)
@@ -67,6 +70,10 @@ struct Args {
     only: Option<String>,
     beta_disp: i32,
     bpp: Option<f64>,
+    rvs: bool,
+    grfs: bool,
+    lsbs: bool,
+    ans_threads: u8,
     single_thread: bool,
     scalar: bool,
     repeat: usize,
@@ -87,6 +94,10 @@ fn parse_args() -> Result<Args, String> {
         only: None,
         beta_disp: 0,
         bpp: None,
+        rvs: false,
+        grfs: false,
+        lsbs: false,
+        ans_threads: 1,
         single_thread: false,
         scalar: false,
         repeat: 1,
@@ -126,6 +137,14 @@ fn parse_args() -> Result<Args, String> {
                 a.only = Some(v);
             }
             "--out" => a.out = Some(PathBuf::from(value("--out")?)),
+            "--rvs" => a.rvs = true,
+            "--grfs" => a.grfs = true,
+            "--lsbs" => a.lsbs = true,
+            "--ans-threads" => {
+                a.ans_threads = value("--ans-threads")?
+                    .parse()
+                    .map_err(|e| format!("--ans-threads: {e}"))?;
+            }
             "--bpp" => {
                 a.bpp = Some(value("--bpp")?.parse().map_err(|e| format!("--bpp: {e}"))?);
             }
@@ -270,6 +289,11 @@ fn run() -> Result<(), String> {
                 model_id: args.model_ids.first().copied().unwrap_or(1) as u8,
                 beta_displacement_log: [args.beta_disp; 2],
                 op: args.op.unwrap_or(OperatingPoint::Bop),
+                rvs: args.rvs,
+                grfs: args.grfs,
+                lsbs: args.lsbs,
+                num_threads_z: args.ans_threads,
+                num_threads_r: args.ans_threads,
             };
             let encoder = Encoder::with_engine(models, engine);
             let mut stream = Vec::new();
@@ -281,7 +305,7 @@ fn run() -> Result<(), String> {
                         .map_err(|e| format!("{e:?}"))?,
                     Some(bpp) => {
                         let (s, m) = encoder
-                            .encode_to_bpp(&image, bpp, params.op)
+                            .encode_to_bpp(&image, bpp, params)
                             .map_err(|e| format!("{e:?}"))?;
                         if run == 0 {
                             eprintln!(

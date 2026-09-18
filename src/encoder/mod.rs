@@ -31,7 +31,7 @@ use whereat::{At, at};
 
 use crate::container::{CodestreamWriter, Marker, join_threads};
 use crate::decoder::entropy::{
-    ComponentScales, channel_step, component_scales, distribution_index,
+    ComponentScales, GrfsFlags, channel_step, component_scales_with, distribution_index,
 };
 use crate::decoder::output::RgbImage;
 use crate::error::{Error, Result};
@@ -72,6 +72,17 @@ pub struct EncodeParams {
     /// Operating point to code for: it selects the analysis transform (BOP for simple and base,
     /// HOP for high), the decoder profile, and the synthesis transforms the stream lists.
     pub op: OperatingPoint,
+    /// Residual variance scaling (`cfg/tools/ResVarScale.json`'s `rvs_enabled`): the quantiser
+    /// step follows the block-wise sigma map.
+    pub rvs: bool,
+    /// Channel gain flags (`cwg_enabled`); the encoder picks the channels (`analyzeCWG`).
+    pub grfs: bool,
+    /// Latent scaling before synthesis (`cfg/tools/LSBS.json`). A decoder-side tool: it is
+    /// signalled in the tool header and changes no coded symbol.
+    pub lsbs: bool,
+    /// ANS threads of the `z` substream and of each residual substream (1, 2, 4, 8 or 16).
+    pub num_threads_z: u8,
+    pub num_threads_r: u8,
 }
 
 impl Default for EncodeParams {
@@ -80,6 +91,11 @@ impl Default for EncodeParams {
             model_id: 1,
             beta_displacement_log: [0, 0],
             op: OperatingPoint::Bop,
+            rvs: false,
+            grfs: false,
+            lsbs: false,
+            num_threads_z: 1,
+            num_threads_r: 1,
         }
     }
 }
@@ -318,13 +334,15 @@ impl Encoder {
     /// The analysis transform and the hyper-encoder do not depend on the displacement, so each
     /// model's latents are computed once and every trial re-codes from them; the reference
     /// re-runs the whole analysis per trial.
+    /// `params.model_id` and `params.beta_displacement_log` are ignored (that is what the search
+    /// decides); every other field applies.
     pub fn encode_to_bpp(
         &self,
         rgb: &RgbImage,
         target_bpp: f64,
-        op: OperatingPoint,
+        params: EncodeParams,
     ) -> core::result::Result<(Vec<u8>, RateMatch), At<Error>> {
-        self.encode_to_bpp_with(rgb, target_bpp, op, &enough::Unstoppable)
+        self.encode_to_bpp_with(rgb, target_bpp, params, &enough::Unstoppable)
     }
 
     /// [`Encoder::encode_to_bpp`] with cooperative cancellation.
@@ -332,10 +350,10 @@ impl Encoder {
         &self,
         rgb: &RgbImage,
         target_bpp: f64,
-        op: OperatingPoint,
+        params: EncodeParams,
         stop: &dyn enough::Stop,
     ) -> core::result::Result<(Vec<u8>, RateMatch), At<Error>> {
-        self.rate_match(rgb, target_bpp, op, stop)
+        self.rate_match(rgb, target_bpp, params, stop)
             .map_err(|e| at!(e))
     }
 
@@ -343,14 +361,16 @@ impl Encoder {
         &self,
         rgb: &RgbImage,
         target_bpp: f64,
-        op: OperatingPoint,
+        params: EncodeParams,
         stop: &dyn enough::Stop,
     ) -> Result<(Vec<u8>, RateMatch)> {
+        let op = params.op;
         if !(target_bpp.is_finite() && target_bpp > 0.0) {
             return Err(Error::InvalidArgument("target bpp must be positive"));
         }
         let pixels = (rgb.width * rgb.height) as f64;
         let input = preprocess_rgb(rgb)?;
+        let base_params = EncodeParams { op, ..params };
         let mut trials = 0usize;
         // One analysis per model; every displacement re-codes from its latents.
         let mut latents: Vec<Option<ModelLatents>> =
@@ -379,7 +399,7 @@ impl Encoder {
             let params = EncodeParams {
                 model_id: ccs_model as u8,
                 beta_displacement_log: [beta; 2],
-                op,
+                ..base_params
             };
             let (stream, _) = self.encode_from_latents(
                 [&y[0], &y[1]],
@@ -555,7 +575,7 @@ impl Encoder {
 
         // 3. A provisional header: everything the scale derivation reads is known now; the
         //    cube flags are filled in once the residual has been quantised.
-        let mut hdr = picture_header(w as u32, h as u32, params.model_id, beta, params.op);
+        let mut hdr = picture_header(w as u32, h as u32, params.model_id, beta, params);
         hdr.check_conformance()?;
 
         let mut components = Vec::with_capacity(2);
@@ -570,7 +590,15 @@ impl Encoder {
             }
 
             // 4. Scales, exactly as the decoder derives them, and the threshold skip mask.
-            let scales = component_scales(&hdr, ccs, model, z_hat, None)?;
+            let scales = component_scales_with(
+                &hdr,
+                ccs,
+                model,
+                z_hat,
+                None,
+                params.rvs,
+                GrfsFlags::Derive(params.grfs),
+            )?;
             let mask = skip_mask(&scales.skip_scale_log, None)?;
 
             // 5. psi, then the residual quantisation with its cube-flag decision.
@@ -581,10 +609,10 @@ impl Encoder {
                 lw.div_ceil(2),
                 stop,
             )?;
-            let scaler = &scales.gain.scaler;
+            let q = EncoderQuantiser { scales: &scales };
             let out = match &model.context {
-                Some(ctx) => ctx.compress(eng, latent, &psi, scaler, &mask, SKIP_CUBE_THR, stop)?,
-                None => compress_context_free(latent, &psi, scaler, &mask, SKIP_CUBE_THR)?,
+                Some(ctx) => ctx.compress(eng, latent, &psi, &q, &mask, SKIP_CUBE_THR, stop)?,
+                None => compress_context_free(latent, &psi, &q, &mask, SKIP_CUBE_THR)?,
             };
 
             // 6. `encoder_skip_and_cubeflag_for_tiles`: the final mask is the threshold mask
@@ -599,6 +627,8 @@ impl Encoder {
                     *q = 0;
                 }
             }
+            hdr.components[ccs].rvs_enabled = params.rvs;
+            hdr.components[ccs].grfs_channel_flags = scales.grfs_flags.clone();
             components.push(Component {
                 z_hat: z_hats[ccs].clone(),
                 scales,
@@ -637,7 +667,11 @@ impl Encoder {
         // 8. Container. The reference writes the residual substreams before SOZ.
         let mut out = CodestreamWriter::new();
         out.substream(Marker::Pih, &hdr.write()?)?;
-        out.substream(Marker::Ton, &ToolHeader::default().write(&hdr)?)?;
+        let tools = ToolHeader {
+            lsbs_enabled: [params.lsbs; 2],
+            ..ToolHeader::default()
+        };
+        out.substream(Marker::Ton, &tools.write(&hdr)?)?;
         out.substream(Marker::Rdi, &RenderingInfo::default().write()?)?;
         out.substream(Marker::Sorp, &residual_payloads[0])?;
         out.substream(Marker::Sors, &residual_payloads[1])?;
@@ -716,6 +750,27 @@ fn png_err<E>(_e: E) -> &'static str {
     "the input is not a readable PNG"
 }
 
+/// `quant_dequant` with the tools the encoder supports: the gain unit and RVS / GRFS.
+struct EncoderQuantiser<'a> {
+    scales: &'a ComponentScales,
+}
+
+impl mcm::Quantiser for EncoderQuantiser<'_> {
+    #[inline]
+    fn quantise(&self, ch: usize, index: usize, x: f32, coded: bool) -> (i16, f32) {
+        let q = if coded {
+            self.scales
+                .quantize(None, ch, index, x)
+                .unwrap_or(0.0)
+                .clamp(-32768.0, 32767.0)
+                .round_ties_even()
+        } else {
+            0.0
+        };
+        (q as i16, self.scales.dequantize(None, ch, index, q))
+    }
+}
+
 /// `tiling.get_data` + `tiling.assign_data`: copy `src[:, oy.., ox..]` into `dst` at `core`,
 /// clamped the way tensor slicing clamps (the same helper `decoder::reconstruct` uses for
 /// regions, over any element type).
@@ -746,10 +801,10 @@ fn assign<T: Copy + Default>(
 /// `_compress_ar_scale`'s branch for a component without a context model (chroma): the mean is
 /// `psi` up-shuffled, and the cube flags come from the whole reconstruction
 /// (`skip_mode.gen_skip_cubeflag`) rather than stage by stage.
-fn compress_context_free(
+fn compress_context_free<Q: mcm::Quantiser>(
     y: &Tensor<f32>,
     psi: &BTensor,
-    scaler: &[f32],
+    q: &Q,
     mask: &Tensor<bool>,
     cube_thr: f32,
 ) -> Result<mcm::Compressed> {
@@ -764,7 +819,7 @@ fn compress_context_free(
     for ch in 0..c {
         for i in 0..h * w {
             let d = y.plane(ch)[i] - mean.plane(ch)[i];
-            let (_, dq) = mcm::quantise(d, scaler[ch], mask.plane(ch)[i]);
+            let (_, dq) = q.quantise(ch, i, d, mask.plane(ch)[i]);
             if (dq - d).abs() > cube_thr {
                 let (yy, xx) = (i / w, i % w);
                 let phase = (yy % 2) * 2 + xx % 2;
@@ -778,8 +833,8 @@ fn compress_context_free(
     for ch in 0..c {
         for i in 0..h * w {
             let d = y.plane(ch)[i] - mean.plane(ch)[i];
-            let (q, dq) = mcm::quantise(d, scaler[ch], mask2.plane(ch)[i]);
-            residual_q.plane_mut(ch)[i] = q;
+            let (sym, dq) = q.quantise(ch, i, d, mask2.plane(ch)[i]);
+            residual_q.plane_mut(ch)[i] = sym;
             residual.plane_mut(ch)[i] = dq;
         }
     }
@@ -820,9 +875,10 @@ fn picture_header(
     height: u32,
     model_id: u8,
     beta_displacement_log: [i32; 2],
-    op: OperatingPoint,
+    params: EncodeParams,
 ) -> PictureHeader {
     use OperatingPoint::{Bop, Hop, Sop};
+    let op = params.op;
     // `cfg/profiles/{simple,base,high}.json`.
     let (decoder_profile_id, synthesis_transforms) = match op {
         Sop => (0, alloc::vec![Sop]),
@@ -845,12 +901,12 @@ fn picture_header(
         c_hor: 1,
         colour_transform: ColourTransform::Bt709,
         model_id,
-        num_threads_z: 1,
+        num_threads_z: params.num_threads_z,
         beta_displacement_log,
         regions: None,
         // `tile_manager_synthesis` is set up from the coded luma size for both components.
         components: [0, 1].map(|ccs| ComponentHeader {
-            num_threads_r: 1,
+            num_threads_r: params.num_threads_r,
             num_chs: LATENT_CHANNELS[ccs] as u16,
             cube_flags: None,
             rvs_enabled: false,

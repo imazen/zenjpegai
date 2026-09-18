@@ -148,9 +148,25 @@ fn analysis_tiers_agree_bit_for_bit() {
 use std::path::Path;
 use zenjpegai::encoder::{EncodeParams, Encoder, preprocess_rgb, read_png_rgb8};
 
-/// (`vector`, source image, `model_id`, operating point, `beta_displacement_log`) of every
-/// fixed-model encode `make_reference_streams.sh encoder` produces.
-const VECTORS: &[(&str, &str, u8, OperatingPoint, i32)] = &[
+/// (`vector`, source image, `model_id`, operating point, `beta_displacement_log`, tools) of
+/// every fixed-model encode `make_reference_streams.sh encoder` produces.
+type Tools = fn(EncodeParams) -> EncodeParams;
+type ToolVector = (&'static str, &'static str, u8, OperatingPoint, i32, Tools);
+
+struct Vector {
+    name: &'static str,
+    image: &'static str,
+    model_id: u8,
+    op: OperatingPoint,
+    beta: i32,
+    tools: Tools,
+}
+
+const fn plain(p: EncodeParams) -> EncodeParams {
+    p
+}
+
+const VECTORS_BASE: &[(&str, &str, u8, OperatingPoint, i32)] = &[
     (
         "enc_img30_bop_m1_b0",
         "00030_TE_560x888_8bit_sRGB.png",
@@ -211,6 +227,98 @@ const VECTORS: &[(&str, &str, u8, OperatingPoint, i32)] = &[
     ),
 ];
 
+const IMG30: &str = "00030_TE_560x888_8bit_sRGB.png";
+
+/// The coding tools the encoder can switch on, each against its own reference encode.
+const VECTORS_TOOLS: &[ToolVector] = &[
+    (
+        "enc_img30_bop_m1_b0_threads8",
+        IMG30,
+        1,
+        OperatingPoint::Bop,
+        0,
+        |p| EncodeParams {
+            num_threads_z: 8,
+            num_threads_r: 8,
+            ..p
+        },
+    ),
+    (
+        "enc_img30_bop_m1_b0_rvs",
+        IMG30,
+        1,
+        OperatingPoint::Bop,
+        0,
+        |p| EncodeParams {
+            rvs: true,
+            grfs: true,
+            ..p
+        },
+    ),
+    (
+        "enc_img30_bop_m1_b0_rvsonly",
+        IMG30,
+        1,
+        OperatingPoint::Bop,
+        0,
+        |p| EncodeParams { rvs: true, ..p },
+    ),
+    (
+        "enc_img30_bop_m1_b0_grfsonly",
+        IMG30,
+        1,
+        OperatingPoint::Bop,
+        0,
+        |p| EncodeParams { grfs: true, ..p },
+    ),
+    (
+        "enc_img30_bop_m1_b0_lsbs",
+        IMG30,
+        1,
+        OperatingPoint::Bop,
+        0,
+        |p| EncodeParams { lsbs: true, ..p },
+    ),
+];
+
+fn vectors() -> Vec<Vector> {
+    VECTORS_BASE
+        .iter()
+        .map(|&(name, image, model_id, op, beta)| Vector {
+            name,
+            image,
+            model_id,
+            op,
+            beta,
+            tools: plain,
+        })
+        .chain(
+            VECTORS_TOOLS
+                .iter()
+                .map(|&(name, image, model_id, op, beta, tools)| Vector {
+                    name,
+                    image,
+                    model_id,
+                    op,
+                    beta,
+                    tools,
+                }),
+        )
+        .filter(|v| present(v.name))
+        .collect()
+}
+
+impl Vector {
+    fn params(&self) -> EncodeParams {
+        (self.tools)(EncodeParams {
+            model_id: self.model_id,
+            beta_displacement_log: [self.beta, self.beta],
+            op: self.op,
+            ..Default::default()
+        })
+    }
+}
+
 fn source(image: &str) -> zenjpegai::RgbImage {
     let path = ref_root().join("data/test").join(image);
     let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
@@ -229,10 +337,8 @@ fn present(vector: &str) -> bool {
 fn colour_preprocessing_matches_reference() {
     use zenjpegai::encoder::analysis_tiles;
     let mut ran = 0;
-    for &(vector, image, ..) in VECTORS {
-        if !present(vector) {
-            continue;
-        }
+    for v in vectors() {
+        let (vector, image) = (v.name, v.image);
         let dump = load_encoder_dump(&vector_dir(vector).join("enc2"));
         let input = preprocess_rgb(&source(image)).unwrap();
         for (ccs, (net, plane)) in [("analysis_y", &input.luma), ("analysis_uv", &input.chroma)]
@@ -347,19 +453,13 @@ fn compare_decisions(vector: &str, traces: &[zenjpegai::encoder::ComponentTrace;
 #[test]
 fn decisions_match_reference_given_its_latents() {
     let mut ran = 0;
-    for &(vector, image, model_id, op, beta) in VECTORS {
-        if !present(vector) {
-            continue;
-        }
+    for v in vectors() {
+        let vector = v.name;
         let dump = load_encoder_dump(&vector_dir(vector).join("enc2"));
         let (yl, yc) = (tensor(&dump["y.y"]), tensor(&dump["uv.y"]));
-        let picture = source(image);
+        let picture = source(v.image);
         let enc = Encoder::new(ref_root().join("models"));
-        let params = EncodeParams {
-            model_id,
-            beta_displacement_log: [beta, beta],
-            op,
-        };
+        let params = v.params();
         let zy = z_tensor(&dump["y.z_hat"]);
         let zc = z_tensor(&dump["uv.z_hat"]);
         let (stream, traces) = enc
@@ -401,17 +501,10 @@ fn decisions_match_reference_given_its_latents() {
 #[test]
 fn encoder_end_to_end_matches_reference() {
     let mut ran = 0;
-    for &(vector, image, model_id, op, beta) in VECTORS {
-        if !present(vector) {
-            continue;
-        }
-        let params = EncodeParams {
-            model_id,
-            beta_displacement_log: [beta, beta],
-            op,
-        };
+    for v in vectors() {
+        let (vector, params) = (v.name, v.params());
         let enc = Encoder::new(ref_root().join("models"));
-        let (stream, traces) = enc.encode_traced(&source(image), params).unwrap();
+        let (stream, traces) = enc.encode_traced(&source(v.image), params).unwrap();
         let moved = compare_decisions(vector, &traces);
         let reference = std::fs::read(vector_dir(vector).join("stream.bits")).unwrap();
         let ratio = stream.len() as f64 / reference.len() as f64;
@@ -464,17 +557,10 @@ fn encoder_end_to_end_matches_reference() {
 #[test]
 #[ignore = "runs the reference decoder (Python); enable with --ignored"]
 fn reference_decoder_accepts_our_streams() {
-    for &(vector, image, model_id, op, beta) in VECTORS {
-        if !present(vector) {
-            continue;
-        }
-        let params = EncodeParams {
-            model_id,
-            beta_displacement_log: [beta, beta],
-            op,
-        };
+    for v in vectors() {
+        let (vector, params) = (v.name, v.params());
         let enc = Encoder::new(ref_root().join("models"));
-        let stream = enc.encode(&source(image), params).unwrap();
+        let stream = enc.encode(&source(v.image), params).unwrap();
         let dir = std::env::temp_dir();
         let _ = dir;
         let scratch = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/refdec");
@@ -541,7 +627,14 @@ fn rate_matching_hits_the_target() {
             continue;
         }
         let (stream, m) = enc
-            .encode_to_bpp(&picture, target, OperatingPoint::Bop)
+            .encode_to_bpp(
+                &picture,
+                target,
+                EncodeParams {
+                    op: OperatingPoint::Bop,
+                    ..Default::default()
+                },
+            )
             .unwrap();
         let theirs = std::fs::read(&path).unwrap();
         let their_bpp = theirs.len() as f64 * 8.0 / pixels;

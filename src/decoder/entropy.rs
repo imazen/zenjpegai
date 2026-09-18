@@ -58,6 +58,9 @@ pub struct ComponentScales {
     pub likely: Tensor<u16>,
     pub gain: GainUnit,
     pub rvs: Option<Rvs>,
+    /// The gain flags in force (`analyzeCWG` derived them when the encoder asked for GRFS);
+    /// `None` when GRFS is off.
+    pub grfs_flags: Option<Vec<bool>>,
 }
 
 impl ComponentScales {
@@ -76,14 +79,33 @@ impl ComponentScales {
 
     /// `quantizer.quantize_resi`: the tools in forward order (gain unit, quality map, RVS).
     ///
-    /// Only the gain unit is ported on the encoder side so far; the others return `None`.
+    /// The quality map is not ported on the encoder side; it returns `None`.
     #[inline]
-    pub fn quantize(&self, quality_map: Option<&QualityMap>, ch: usize, x: f32) -> Option<f32> {
-        if self.rvs.is_some() || quality_map.is_some() {
+    pub fn quantize(
+        &self,
+        quality_map: Option<&QualityMap>,
+        ch: usize,
+        i: usize,
+        x: f32,
+    ) -> Option<f32> {
+        if quality_map.is_some() {
             return None;
         }
-        Some(x * self.gain.scaler[ch])
+        let v = x * self.gain.scaler[ch];
+        Some(match &self.rvs {
+            Some(r) => r.quantize(ch, self.likely.plane(ch)[i], v),
+            None => v,
+        })
     }
+}
+
+/// Where the GRFS gain flags come from.
+#[derive(Clone, Copy, Debug)]
+pub enum GrfsFlags<'a> {
+    /// Decoding: the flags the picture header carries.
+    Signalled(Option<&'a [bool]>),
+    /// Encoding: `analyzeCWG` derives them from the scale map when GRFS is enabled.
+    Derive(bool),
 }
 
 /// `_decode_scale` + `encoder_get_scales`: hyper-scale decoder, gain unit, quality map, the
@@ -95,7 +117,30 @@ pub fn component_scales(
     z_hat: &Tensor<i8>,
     quality_map: Option<&QualityMap>,
 ) -> Result<ComponentScales> {
-    let comp = &hdr.components[ccs];
+    let flags = hdr.components[ccs].grfs_channel_flags.clone();
+    component_scales_with(
+        hdr,
+        ccs,
+        model,
+        z_hat,
+        quality_map,
+        hdr.components[ccs].rvs_enabled,
+        GrfsFlags::Signalled(flags.as_deref()),
+    )
+}
+
+/// [`component_scales`] with the RVS / GRFS signalling given explicitly, so that the encoder can
+/// derive the gain flags from the scale map it is in the middle of computing.
+#[allow(clippy::too_many_arguments)]
+pub fn component_scales_with(
+    hdr: &PictureHeader,
+    ccs: usize,
+    model: &CommonModel,
+    z_hat: &Tensor<i8>,
+    quality_map: Option<&QualityMap>,
+    rvs_enabled: bool,
+    grfs: GrfsFlags<'_>,
+) -> Result<ComponentScales> {
     let (lh, lw) = hdr.latent_size(ccs);
     let gain = GainUnit::new(&model.gain_vector_log, hdr.beta_displacement_log[ccs]);
     let mut skip_scale_log = model
@@ -113,11 +158,21 @@ pub fn component_scales(
         q.adjust_scale(&mut skip_scale_log)?;
     }
     let likely = rvs::likely(&skip_scale_log)?;
+    // `analyzeCWG` runs on the scale map as it stands before RVS adds anything.
+    let grfs_flags = match grfs {
+        GrfsFlags::Signalled(f) => f.map(<[bool]>::to_vec),
+        GrfsFlags::Derive(false) => None,
+        GrfsFlags::Derive(true) => Some(rvs::grfs_flags(
+            hdr.model_id as usize,
+            ccs,
+            &skip_scale_log,
+        )?),
+    };
     let rvs = Rvs::new(
         hdr.model_id as usize,
         model.chs,
-        comp.rvs_enabled,
-        comp.grfs_channel_flags.as_deref(),
+        rvs_enabled,
+        grfs_flags.as_deref(),
     )?;
     let mut scale_log = skip_scale_log.clone();
     if let Some(r) = &rvs {
@@ -129,6 +184,7 @@ pub fn component_scales(
         likely,
         gain,
         rvs,
+        grfs_flags,
     })
 }
 

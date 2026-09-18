@@ -26,6 +26,12 @@ const SCALES: [[u32; 4]; 4] = [
     [115, 130, 156, 175],
     [115, 130, 156, 160],
 ];
+/// `cnum_list` per component, indexed by model id (`cfg/tools/ResVarScale.json`): how many
+/// channels `analyzeCWG` raises the gain flag on. The fifth entry is for a model this port does
+/// not have.
+const CNUM: [[usize; 4]; 2] = [[5, 24, 35, 64], [10, 10, 10, 10]];
+/// `quantize_resi`'s shift: the scale table is relative to 128 (`sigma_precision = 7`).
+const SCALE_PRECISION: f32 = 128.0;
 
 /// Value `F.pad` fills the partial 8x8 blocks with.
 const PAD_VALUE: i64 = 1411;
@@ -103,6 +109,8 @@ pub(crate) fn threshold_bounds(table: &[u32], thresholds: &[u32]) -> Vec<usize> 
 pub struct Rvs {
     /// Log-domain addition to the scale map, for channels with the gain flag clear / set.
     log: [Segments<i32>; 2],
+    /// Residual quantisation factor (relative to 128), same order.
+    fwd: [Segments<f32>; 2],
     /// Residual dequantisation factor (16 fractional bits), same order.
     inv: [Segments<f32>; 2],
     /// Per channel: gain flag (all clear when GRFS is off).
@@ -150,6 +158,10 @@ impl Rvs {
                 },
                 Segments {
                     bounds: bounds.clone(),
+                    values: scaled.iter().map(|&s| s as f32).collect(),
+                },
+                Segments {
+                    bounds: bounds.clone(),
                     values: scaled
                         .iter()
                         .map(|&s| libm::rint(8_388_608.0 / s) as f32)
@@ -170,7 +182,8 @@ impl Rvs {
         };
         Ok(Some(Self {
             log: [clear.0, set.0],
-            inv: [clear.1, set.1],
+            fwd: [clear.1, set.1],
+            inv: [clear.2, set.2],
             flags,
         }))
     }
@@ -190,6 +203,36 @@ impl Rvs {
         let seg = &self.inv[self.flags.get(ch).copied().unwrap_or(false) as usize];
         x * seg.get(likely) / 65536.0
     }
+
+    /// `quantize_resi`: `x * scale / 2^7` in single precision (encoder side).
+    pub fn quantize(&self, ch: usize, likely: u16, x: f32) -> f32 {
+        let seg = &self.fwd[self.flags.get(ch).copied().unwrap_or(false) as usize];
+        x * seg.get(likely) / SCALE_PRECISION
+    }
+}
+
+/// `analyzeCWG` (encoder side): the `cnum_list[model_id]` channels with the highest mean scale
+/// index carry the gain flag. `scale_log` is the map before RVS adds anything
+/// (`encoder_get_scales` hands `analyze` the `skip_scale_log` it just computed).
+pub fn grfs_flags(model_id: usize, ccs: usize, scale_log: &Tensor<i32>) -> Result<Vec<bool>> {
+    let cnum = *CNUM
+        .get(ccs)
+        .and_then(|c| c.get(model_id))
+        .ok_or(Error::InvalidData("model_id out of range"))?;
+    let n = (scale_log.h * scale_log.w) as f32;
+    // `torch.mean` over a float32 plane, then `torch.sort(descending=True)`.
+    let mut order: Vec<(usize, f32)> = (0..scale_log.c)
+        .map(|ch| {
+            let mean = scale_log.plane(ch).iter().map(|&v| v as f32).sum::<f32>() / n;
+            (ch, mean)
+        })
+        .collect();
+    order.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+    let mut flags = alloc::vec![false; scale_log.c];
+    for &(ch, _) in order.iter().take(cnum.min(scale_log.c)) {
+        flags[ch] = true;
+    }
+    Ok(flags)
 }
 
 #[cfg(test)]

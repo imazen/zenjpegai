@@ -50,6 +50,7 @@ fn main() {
                 model_id,
                 beta_displacement_log: [beta, beta],
                 op,
+                ..Default::default()
             },
         )
         .unwrap();

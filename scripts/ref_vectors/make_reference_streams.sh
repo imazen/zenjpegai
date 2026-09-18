@@ -251,6 +251,14 @@ if [ "$SET" = encoder ] || [ "$SET" = all ]; then
   # 2096x1400: above the encoder's 1 MP threshold, so the analysis transform and the
   # hyper-encoder run per tile (1024 luma / 512 chroma, overlap 64 / 32).
   enc_fixed enc_img01_bop_m1_b0 $IMG01 1 0 cfg/tools_off.json cfg/profiles/base.json
+  # Encode-side coding tools, one at a time on top of tools_off, at a fixed model.
+  enc_fixed enc_img30_bop_m1_b0_threads8 $IMG30 1 0 cfg/tools_off.json cfg/tools/ECThread8.json cfg/profiles/base.json
+  enc_fixed enc_img30_bop_m1_b0_rvs $IMG30 1 0 cfg/tools_off.json cfg/tools/ResVarScale.json cfg/profiles/base.json
+  enc_fixed enc_img30_bop_m1_b0_rvsonly $IMG30 1 0 cfg/tools_off.json "$HERE/cfg/rvs_only.json" cfg/profiles/base.json
+  enc_fixed enc_img30_bop_m1_b0_grfsonly $IMG30 1 0 cfg/tools_off.json "$HERE/cfg/grfs_only.json" cfg/profiles/base.json
+  enc_fixed enc_img30_bop_m1_b0_lsbs $IMG30 1 0 cfg/tools_off.json cfg/tools/LSBS.json cfg/profiles/base.json
+  enc_fixed enc_img01_bop_m1_b0_depregions $IMG01 1 0 cfg/tools_off.json cfg/tools/DependentRegions.json cfg/profiles/base.json
+  enc_fixed enc_img01_bop_m1_b0_indregions $IMG01 1 0 cfg/tools_off.json cfg/tools/IndependentRegions.json cfg/profiles/base.json
   # Not generated yet (see PORTING.md "Work queue"): odd picture sizes.
 fi
 echo "== done ($(date -u +%H:%M:%S))"
