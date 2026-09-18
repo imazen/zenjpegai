@@ -14,13 +14,19 @@ RUSTFLAGS="-Ctarget-feature=+simd128" nice -n 19 cargo build -j 8 --release --ta
 nice -n 19 cargo build -j 8 --release --features cli --bin zenjpegai >&2
 WASM=target/wasm32-wasip1/release/zenjpegai.wasm
 NATIVE=target/release/zenjpegai
-echo "# commit $(git rev-parse --short HEAD 2>/dev/null || jj log -r @- --no-graph -T 'commit_id.short()') host $(hostname) node $(node --version)"
+echo "# commit $(git rev-parse --short HEAD 2>/dev/null || jj log -r @- --no-graph -T 'commit_id.short()') host ${HOST_LABEL:-$(hostname)} node $(node --version)"
 echo "# columns: differing samples / total / max abs diff; wasm = Wasm128 tier, unfused multiply-add"
 printf 'stream\ttotal_samples\twasm_vs_ref\twasm_vs_ref_max\tnative_vs_ref\tnative_vs_ref_max\twasm_vs_native\twasm_vs_native_max\twasm_scalar_identical\n'
 for dir in "$VEC"/*/; do
   name=$(basename "$dir")
+  [ -f "$dir/stream.bits" ] || continue
   ref="$dir/decoded.png"
   [ -f "$dir/fixed_decoder/decoded.png" ] && ref="$dir/fixed_decoder/decoded.png"
+  if [ ! -f "$ref" ]; then
+    # Encoder-side vector (enc_*): a stream but no reference decoder output to diff.
+    printf '%s\tno reference decode (encoder vector)\n' "$name"
+    continue
+  fi
   if ! node --no-warnings scripts/wasm/run_wasi.mjs $WASM decode "$dir/stream.bits" "$OUT/$name.wasm.png" --models "$REF/models" 2>"$OUT/$name.wasm.err"; then
     printf '%s\tunsupported: %s\n' "$name" "$(tr '\n' ' ' <"$OUT/$name.wasm.err" | cut -c1-120)"
     continue
