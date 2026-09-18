@@ -11,6 +11,8 @@ extern crate alloc;
 whereat::define_at_crate_info!();
 
 pub mod bitio;
+#[cfg(feature = "zencodec")]
+pub mod codec;
 pub mod container;
 pub mod decoder;
 mod error;

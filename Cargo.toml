@@ -32,6 +32,9 @@ reference-tests = []
 avx512 = ["archmage/avx512", "magetypes/avx512"]
 # The `zenjpegai` command line tool (PNG output through zenpng).
 cli = ["std", "dep:zenpng", "dep:imgref", "dep:rgb"]
+# zencodec trait implementations (DecoderConfig / DecodeJob / Decode) for dispatch through
+# zencodecs and other zencodec-driven pipelines. RGB output only today (see src/codec.rs).
+zencodec = ["std", "dep:zencodec", "dep:zenpixels"]
 
 [dependencies]
 archmage = { version = "0.9.29", features = ["macros"] }
@@ -43,6 +46,8 @@ zenpng = { version = "0.1.4", optional = true }
 imgref = { version = "1.12.3", optional = true }
 rgb = { version = "0.8.53", optional = true }
 enough = { version = "0.4.4", default-features = false }
+zencodec = { version = "0.1.26", optional = true }
+zenpixels = { version = "0.2.16", optional = true }
 
 [[example]]
 name = "make_roi_mask"
