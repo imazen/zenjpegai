@@ -195,7 +195,11 @@ fn parse_args() -> Result<Args, String> {
                     .split_once(',')
                     .ok_or("--diff-display wants <width>,<height>")?;
                 let parse = |s: &str| s.parse::<u8>().map_err(|e| format!("--diff-display: {e}"));
-                a.diff_display = (parse(w)?, parse(h)?);
+                let (w, h) = (parse(w)?, parse(h)?);
+                if w > 63 || h > 63 {
+                    return Err("--diff-display: each component is a 6-bit field, below 64".into());
+                }
+                a.diff_display = (w, h);
             }
             "--beta-disp" => {
                 a.beta_disp = value("--beta-disp")?

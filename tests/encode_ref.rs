@@ -7,7 +7,7 @@
 #![cfg(feature = "reference-tests")]
 
 mod common;
-use common::{load_encoder_dump, ref_root, vector_dir};
+use common::{load_encoder_dump, ref_root, vector_dir, vectors_root};
 use zenjpegai::header::OperatingPoint;
 use zenjpegai::model::{
     ModelDir, load_analysis_primary, load_analysis_secondary, load_hyper_encoder,
@@ -636,6 +636,32 @@ fn encoder_end_to_end_matches_reference() {
     assert!(ran > 0, "no encoder vectors on disk");
 }
 
+/// Run `cmd` inside the upstream checkout's Python venv (PYTHONPATH set). Hard failure on
+/// non-zero exit.
+fn ref_run(cmd: &str, vector: &str) {
+    let status = std::process::Command::new("bash")
+        .arg("-lc")
+        .arg(format!(
+            ". {ref}/.venv/bin/activate && cd {ref} && PYTHONPATH=. {cmd}",
+            ref = ref_root().display()
+        ))
+        .status()
+        .unwrap();
+    assert!(status.success(), "{vector}: the reference decoder failed");
+}
+
+/// `python -m src.reco.coders.decoder bits out -target_device cpu` on the stock decoder.
+fn ref_decode(bits: &Path, out: &Path, vector: &str) {
+    ref_run(
+        &format!(
+            "python -m src.reco.coders.decoder {} {} -target_device cpu",
+            bits.display(),
+            out.display()
+        ),
+        vector,
+    );
+}
+
 /// The reference decoder must accept our streams and produce the same picture.
 ///
 /// Region streams go through `dump_decode.py --contiguous-masks`: the stock reference decoder
@@ -662,33 +688,23 @@ fn reference_decoder_accepts_our_streams() {
         // The stock reference decoder cannot read a region stream (any of them, its own
         // included) or a quality map; `dump_decode.py` patches both defects at runtime.
         let patched = params.regions.is_some() || vector.contains("qmap");
-        let cmd = if patched {
+        if patched {
             let out = scratch.join(vector);
-            format!(
-                "python {}/scripts/ref_vectors/dump_decode.py {} {} --contiguous-masks \
-                 --fix-qmap-header && cp {}/decoded.png {}",
-                env!("CARGO_MANIFEST_DIR"),
-                bits.display(),
-                out.display(),
-                out.display(),
-                png.display()
-            )
+            ref_run(
+                &format!(
+                    "python {}/scripts/ref_vectors/dump_decode.py {} {} --contiguous-masks \
+                     --fix-qmap-header && cp {}/decoded.png {}",
+                    env!("CARGO_MANIFEST_DIR"),
+                    bits.display(),
+                    out.display(),
+                    out.display(),
+                    png.display()
+                ),
+                vector,
+            );
         } else {
-            format!(
-                "python -m src.reco.coders.decoder {} {} -target_device cpu",
-                bits.display(),
-                png.display()
-            )
-        };
-        let status = std::process::Command::new("bash")
-            .arg("-lc")
-            .arg(format!(
-                ". {ref}/.venv/bin/activate && cd {ref} && PYTHONPATH=. {cmd}",
-                ref = ref_root().display()
-            ))
-            .status()
-            .unwrap();
-        assert!(status.success(), "{vector}: the reference decoder failed");
+            ref_decode(&bits, &png, vector);
+        }
         let theirs = read_png_rgb8(&std::fs::read(&png).unwrap()).unwrap();
         let ours = zenjpegai::Decoder::new(ref_root().join("models"))
             .decode(&stream)
@@ -928,12 +944,7 @@ const VECTORS_FORMATS: &[FormatVector] = &[
 /// depth and chroma format in the file name), PNG from `data/test`.
 fn formats_source(file: &str) -> SourceImage {
     if file.ends_with(".yuv") {
-        let dir = vector_dir("img30yuv420_base_off_bpp050")
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("inputs");
+        let dir = vectors_root().parent().unwrap().join("inputs");
         let path = dir.join(file);
         let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
         SourceImage::read_yuv(&path.to_string_lossy(), &bytes).unwrap()
@@ -1085,18 +1096,7 @@ fn reference_decoder_accepts_formats_streams() {
             }
             Picture::Rgb(_) => scratch.join(format!("{vector}.png")),
         };
-        let status = std::process::Command::new("bash")
-            .arg("-lc")
-            .arg(format!(
-                ". {ref}/.venv/bin/activate && cd {ref} && PYTHONPATH=. \
-                 python -m src.reco.coders.decoder {} {} -target_device cpu",
-                bits.display(),
-                out.display(),
-                ref = ref_root().display()
-            ))
-            .status()
-            .unwrap();
-        assert!(status.success(), "{vector}: the reference decoder failed");
+        ref_decode(&bits, &out, vector);
         let reference_out = std::fs::read(&out).unwrap();
         // Samples in bit-depth units: 1 byte at 8 bit, little-endian u16 above.
         let plane_bytes = |p: &[u16], depth: u8| -> Vec<u8> {

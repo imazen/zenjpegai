@@ -30,13 +30,18 @@ pub fn fnv1a64(bytes: impl IntoIterator<Item = u8>) -> u64 {
     h
 }
 
+/// Root of the reference vector tree (`ZENJPEGAI_VECTORS`, or the default location); encoder
+/// inputs live in its sibling `inputs/` directory.
+pub fn vectors_root() -> PathBuf {
+    std::env::var_os("ZENJPEGAI_VECTORS")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/mnt/v/output/zenjpegai/reference/vectors"))
+}
+
 /// Directory holding the reference decoder dumps produced by
 /// `scripts/ref_vectors/make_reference_streams.sh`. Hard failure if a vector is missing.
 pub fn vector_dir(name: &str) -> PathBuf {
-    let root = std::env::var_os("ZENJPEGAI_VECTORS")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/mnt/v/output/zenjpegai/reference/vectors"));
-    let dir = root.join(name);
+    let dir = vectors_root().join(name);
     assert!(
         dir.join("stream.bits").is_file(),
         "{} is missing: run scripts/ref_vectors/make_reference_streams.sh",

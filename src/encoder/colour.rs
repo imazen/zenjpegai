@@ -190,6 +190,7 @@ impl SourceImage {
                 "yuv input: bit depth outside 1..=16",
             ));
         }
+        let bit_depth = bit_depth as u8;
         // `extract_info`'s order: 444, 420, 422, sRGB; `read_file` defaults to 4:2:0.
         let (cw, ch) = if name.contains("444") {
             (w, h)
@@ -293,19 +294,22 @@ fn find_dims(name: &str) -> Option<(usize, usize)> {
     None
 }
 
-/// The first `<digits>bit` of `name` (`extract_info`'s `(?P<b>\d+)bit`).
-fn find_bits(name: &str) -> Option<u8> {
-    let idx = name.find("bit")?;
-    let start = idx
-        - name.as_bytes()[..idx]
-            .iter()
-            .rev()
-            .take_while(|c| c.is_ascii_digit())
-            .count();
-    if start == idx {
-        return None;
+/// The first `<digits>bit` of `name` (`extract_info`'s `(?P<b>\d+)bit` — the regex scans the
+/// whole name and takes the first match, so a "bit" that is not preceded by digits, like the
+/// one in "bitrate", does not end the search).
+fn find_bits(name: &str) -> Option<u32> {
+    for (idx, _) in name.match_indices("bit") {
+        let start = idx
+            - name.as_bytes()[..idx]
+                .iter()
+                .rev()
+                .take_while(|c| c.is_ascii_digit())
+                .count();
+        if start != idx {
+            return name[start..idx].parse().ok();
+        }
     }
-    name[start..idx].parse().ok()
+    None
 }
 
 /// `F.pixel_unshuffle(plane, 2)` into `out`'s channels `base .. base + 4`.

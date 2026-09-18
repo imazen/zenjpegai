@@ -45,9 +45,9 @@ pub mod decoder;
 #[cfg(not(feature = "unstable-internals"))]
 pub(crate) mod decoder;
 // The encoder is unconditionally `pub` (unlike the decoder-side internals above, which are
-// gated behind `unstable-internals`) but still WIP per PORTING.md ("there is no encoder yet");
-// `missing_docs` on the committed public API is not applied to it yet for that reason — revisit
-// once its shape settles.
+// gated behind `unstable-internals`) but its API is still settling — PORTING.md lists what is
+// not ported yet. `missing_docs` on the committed public API is not applied to it for that
+// reason — revisit once its shape settles.
 #[cfg(feature = "std")]
 #[allow(missing_docs)]
 pub mod encoder;

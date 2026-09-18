@@ -6,10 +6,13 @@
 //! encoder_get_scales, _compress_ar_scale, encoder_skip_and_cubeflag_for_tiles, encode,
 //! encode_z, encode_y, _ac_encode_y, _ac_encode_z}`).
 //!
-//! What is ported: a fixed model and operating point, one analysis tile, one region, one ANS
-//! thread per substream, tools off; RGB or planar-YUV sources at 4:4:4 / 4:2:2 / 4:2:0, coded
-//! at any of them, 8- and 10-bit. What is not: the EFE / eICCI post-filters (the LEF is
-//! signalled, `EncodeParams::lef`). See `PORTING.md`.
+//! What is ported: any model and operating point, analysis tiling above ~1 MP, dependent and
+//! independent regions, rate matching (`--bpp`), RVS / GRFS / LSBS / quality maps and 1..16
+//! ANS threads per substream; RGB or planar-YUV sources at 4:4:4 / 4:2:2 / 4:2:0, coded at any
+//! of them, 8- and 10-bit (16-bit sources parse and code `bit_depth_idc` 4 but have no parity
+//! vectors yet). What is not: the EFE / eICCI post-filters on the encode side (the LEF is
+//! signalled, `EncodeParams::lef`), `num_chs` below the model's channel count, and the rate
+//! matcher's likelihood estimator (`ECLibLH` / `hyperopt`). See `PORTING.md`.
 
 // The per-channel loops index several parallel arrays with one counter, like the reference's
 // tensor expressions; an iterator chain over one of them would hide that.
