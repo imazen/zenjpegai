@@ -6,6 +6,15 @@
 <!-- Breaking changes that will ship together in the next major (or minor for 0.x) release. -->
 
 ### Added
+- eICCI on chroma-subsampled pictures (4:2:0 and 4:2:2): the reference decoder's
+  `Image.to_444_` bicubic chroma up-sampling, eICCI at luma size, then `to_format_` bilinear
+  down-sampling back (`filters::icci::resize_bilinear` reproduces PyTorch's channels-last
+  kernel bit for bit — weight products rounded once, then nested FMAs). Oracle vectors are
+  forced encodes (`scripts/ref_vectors/force_icci_encode.py`, `make_reference_streams.sh`
+  set `icci420`): the reference encoder never enables eICCI for subsampled sources. The 4:2:2
+  stream is conformant; the 4:2:0 one deliberately carries `icci_enable_flag` in a position
+  the grammar does not have, so the dump scripts patch the reference decoder at runtime
+  (`--patch-icci420`) and the tests rebuild the header — PORTING.md has the details.
 - Cube-flag decode coverage: the encoder-set streams `enc_img30_bop_m0_bm1069` and
   `enc_img30_hop_m3_bm1069` (beta displacement -1069, `use_cube_flags = 1` with false flags,
   incl. a cleared `cube_group_flag`) now carry reference decoder dumps
