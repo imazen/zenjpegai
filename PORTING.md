@@ -482,8 +482,10 @@ measured numbers in the status table above when you close an item.
   convolution's store, the transposed convolution's dead taps skipped, the depthwise 3x3 tiled
   in workgroup memory, the workgroup edge chosen per layer — device time for one picture BOP
   1024x1024 23.9 -> 21.3 ms, HOP 560x888 259 -> 224 ms, HOP 1024x1024 635 -> 498 ms, SOP
-  unchanged) the convolutions still reach only a few per cent of f32 peak — profile with `ncu`
-  before writing more kernels. Also: the activation pool never shrinks, so a workspace that has
+  unchanged) the convolutions still reach only a few per cent of f32 peak. Profiling them needs
+  Nsight Graphics (GPU Trace): they are Vulkan compute shaders, so `ncu` sees no kernels at all
+  and this box's `nsys` cannot load its Vulkan importer; neither is a substitute for the
+  per-dispatch timestamps in `gpu_bench --profile`. Also: the activation pool never shrinks, so a workspace that has
   synthesised a 4096x4096 picture runs the next 560x888 BOP picture at 32 ms instead of 10;
   8-bit readback (201 MB of f32 planes at 4096x4096 is 88 ms of the 227 ms wall); `f16`;
   cancellation and `max_channels` on the GPU path (details in `gpu/README.md` "Status").

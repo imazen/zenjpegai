@@ -44,5 +44,8 @@ stride-2 of the CAB (256x256 output, 128 channels in and out, 9.66 G multiply-ad
 fp32. Weight traffic does not explain it (the invocations of a workgroup read the same weight
 blocks, i.e. a broadcast) and neither does DRAM bandwidth (about 0.4 bytes per multiply-add
 reaches the card's memory, a quarter of what 450 GB/s would allow). Finding out what does —
-occupancy, warp stall reasons — comes before writing another kernel; `ncu` is usable now that
-the proprietary driver is here.
+occupancy, warp stall reasons — comes before writing another kernel. Note that the CUDA
+profilers cannot do it: these are Vulkan compute shaders, `ncu` reports "No kernels were
+profiled" on this binary and the `nsys` installed here cannot load its Vulkan importer. Nsight
+Graphics (GPU Trace) is the right tool and is not installed on this box; until it is, the
+per-dispatch timestamps in this file and A/B runs of kernel variants are the measurement.

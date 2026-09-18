@@ -150,16 +150,19 @@ try is a *smaller* `ob` together with a pixel tile, not a bigger tile.
 1. **The convolutions run at a few per cent of the card's f32 peak, and the tuning did not
    change that** — HOP's biggest single dispatch, the 3x3 stride-2 of the CAB, is 9.66 G
    multiply-adds in 49.1 ms before and 44.6 ms after, i.e. 0.39 then 0.43 TFLOP/s against about
-   10. After the tuning the profile says HOP 1024x1024 is 24% 1x1 convolution, 13% depthwise,
-   34% the rest of the 3x3 family. Neither weight bandwidth nor
-   arithmetic explains the gap, so the next step is to find what does (occupancy and stall
-   reasons per kernel; `nsys`/`ncu` are usable now that the proprietary driver is installed,
-   which they were not on NVK) before writing another kernel. Candidates named but not measured:
-   workgroup-memory tiling for the 3x3 (needs input-channel chunking, which changes the
-   summation order — the parity gate would have to be re-measured), a GEMM-shaped 1x1 with
-   workgroup-staged weights, `WG` other than 8, `OB` other than `layers.rs::pick_ob`'s at-most-4,
-   `shader-f16` (not implemented; parity would have to be re-measured).
-2. **Readback dominates large pictures**: 4096 x 4096 SOP is 139 ms of device time and 225 ms of
+   10. After the tuning the profile says HOP 1024x1024 is 24% 1x1 convolution, 13% depthwise and
+   34% the rest of the 3x3 family. Neither weight bandwidth nor arithmetic explains the gap, so
+   the next step is to find what does — occupancy, warp stall reasons — before writing another
+   kernel. The CUDA profilers cannot: these are Vulkan compute shaders, `ncu` prints "No kernels
+   were profiled" on this binary and the `nsys` installed here cannot load its Vulkan importer.
+   Nsight Graphics (GPU Trace) is the tool and is not installed on this box; until it is, the
+   measurements available are `gpu_bench --profile` and A/B runs of kernel variants.
+   Candidates named but not measured: workgroup-memory tiling for the 3x3 (it needs
+   input-channel chunking, which changes the summation order — the parity gate would have to be
+   re-measured), a GEMM-shaped 1x1 with workgroup-staged weights, `OB` other than
+   `layers.rs::pick_ob`'s at-most-4, `shader-f16` (not implemented; parity would have to be
+   re-measured).
+2. **Readback dominates large pictures**: 4096 x 4096 SOP is 139 ms of device time and 227 ms of
    wall, the difference being 201 MB of `f32` planes over PCIe. The texture path
    (`decode_to_gpu` + `to_rgba_texture`) avoids it; the plane path could read back 8-bit instead.
 3. **Browser**: never run in a browser (no WebGPU-capable browser on the box). The web build has
