@@ -1,23 +1,36 @@
 // Decode worker: one module Worker owns one wasm module instance.
 //
-// Picks the `threads` package (rayon over Web Workers via `wasm-bindgen-rayon`, needs a
-// SharedArrayBuffer) iff this worker's global scope is cross-origin isolated; otherwise the
-// single-threaded `simd` package, which needs no isolation and runs on any page. Both packages
-// decode to bit-identical pixels (`PORTING.md` "WebAssembly numeric policy") — the switch only
-// changes throughput, never output.
+// Package selection: the `?gpu=` query param on the worker URL (set by `pool.js`) chooses
+//   off             -> `threads` (cross-origin isolated) or `simd`, exactly the historical choice
+//   auto (default)  -> try `pkg-webgpu` + `initGpu(0)` when `navigator.gpu` exists; a non-software
+//                      adapter keeps that package, anything else falls back to the CPU packages
+//   software        -> `pkg-webgpu` + `initGpu(1)`: software adapters accepted (test/debug mode —
+//                      the GPU code path runs even on a GPU-less host, slower than the CPU engine)
+//   force-software  -> `pkg-webgpu` + `initGpu(2)`: additionally passes WebGPU's
+//                      forceFallbackAdapter, so the software adapter is used even next to a GPU
+// A failed `initGpu` discards the webgpu module and loads the CPU package: its decode() falls
+// back to the CPU engine internally anyway, but the threads package's CPU engine is faster.
 //
 // Message protocol (posted from `pool.js`):
 //   {type: 'decode', id, stream: ArrayBuffer, modelsBaseUrl, bundleVersions?}
 //     -> {type: 'result', id, width, height, rgba: ArrayBuffer, timings} (rgba.buffer transferred)
 //     -> {type: 'error', id, message}
+//   {type: 'present', id, stream: ArrayBuffer, canvas: OffscreenCanvas, modelsBaseUrl, verify}
+//     -> {type: 'result', id, width, height, presented: 'gpu'|'2d', png?, timings}
+//     Draws onto the transferred canvas: the webgpu package blits the decoder's RGBA texture
+//     without a CPU readback (`presented: 'gpu'`); anything else decodes and putImageData's on
+//     a 2d context (`presented: '2d'`). `verify` also posts back a PNG of the canvas for tests.
 //   {type: 'releaseBuffers'}   (no reply; see zj.releaseBuffers doc)
-// On startup, before any decode message: {type: 'ready', variant, tier}, or
+// On startup, before any decode message: {type: 'ready', variant, tier, gpu, gpuError}, or
 // {type: 'ready-error', message} if wasm itself failed to load/instantiate (e.g. this browser
-// has no wasm SIMD128 and the build requires it — see web/README.md caniuse note).
+// has no wasm SIMD128 and the build requires it — see web/README.md caniuse note). `gpu` is the
+// initGpu() result ({ok, adapter, backend, software}) or null; `gpuError` says why it is null.
 
 const isolated = typeof crossOriginIsolated !== 'undefined' && crossOriginIsolated === true;
-const variant = isolated ? 'threads' : 'simd';
-const pkgBase = new URL(`../dist/pkg-${variant}/`, import.meta.url);
+const cpuVariant = isolated ? 'threads' : 'simd';
+const gpuMode = new URLSearchParams(self.location.search).get('gpu') || 'auto';
+const gpuSoftwareMode = gpuMode === 'force-software' ? 2 : gpuMode === 'software' ? 1 : 0;
+const cpuPkgBase = new URL(`../dist/pkg-${cpuVariant}/`, import.meta.url);
 
 // Cache namespace for the model bundles. Keys inside it carry the bundle's own `?v=` version
 // token (see fetchBundle), so a bundle whose bytes change under the same file name gets a new
@@ -81,17 +94,71 @@ async function ensureModels(mod, modelsBaseUrl, modelId, op, bundleVersions) {
 // `threads` package deadlocks rayon, its workers left Atomics.wait-ing on state a still-in-flight
 // sibling call owns), so there is no separate `chain` variable — `queue` IS the serialization.
 let mod = null;
+let variant = cpuVariant;
+let gpuInfo = null;
+let gpuError = null;
 const queue = [];
 let draining = false;
+// In-flight call and its trap-detector: a Rust panic in the wasm build is panic=abort, so it
+// does NOT reject `mod.decode()`'s promise — the trap escapes wasm-bindgen's executor as an
+// uncaught RuntimeError and lands on `self.onerror` below while the promise stays pending
+// forever. `trapSignal` is how `drain` unsticks itself; `currentId` is which message died.
+let currentId = null;
+let trapSignal = null;
+// One-line note merged into the NEXT result's timings.gpuError so the retried call reports
+// that the GPU path trapped and CPU ran instead.
+let trapNote = null;
+// OffscreenCanvases transferred here by 'present' messages, keyed by pool-assigned id: a
+// transferred canvas is neutered for the sender, so repeat presents reference it by `canvasId`.
+const canvases = new Map();
+
+self.onerror = (ev) => {
+  const message = String((ev && ev.message) || ev);
+  // GPU state may be corrupt (a RefCell borrow or a half-built plan can outlive the trap):
+  // drop it so the next call takes the CPU engine.
+  try { if (mod && typeof mod.disableGpu === 'function') mod.disableGpu(); } catch { /* already poisoned */ }
+  trapNote = `wasm trap in GPU path: ${message}`;
+  self.postMessage({ type: 'error', id: currentId, message: trapNote, trapped: true });
+  currentId = null;
+  if (trapSignal) trapSignal();
+};
 
 const ready = (async () => {
   try {
-    mod = await import(`${pkgBase}zenjpegai.js`);
-    await mod.default(); // fetches `zenjpegai_bg.wasm` next to zenjpegai.js
-    if (variant === 'threads') {
-      await mod.initThreadPool(Math.max(1, navigator.hardwareConcurrency || 4));
+    if (gpuMode !== 'off') {
+      if (typeof navigator !== 'undefined' && navigator.gpu) {
+        // Ask for the adapter in JS first: it costs one requestAdapter and lets 'auto' skip the
+        // whole pkg-webgpu download when the only adapter is software (a CPU rasteriser is
+        // slower than this decoder's own CPU engine, so that adapter is never worth it).
+        const probe = await navigator.gpu.requestAdapter().catch(() => null);
+        const fallbackOnly = !!(probe && probe.info && probe.info.isFallbackAdapter);
+        if (probe && (gpuSoftwareMode >= 1 || !fallbackOnly)) {
+          try {
+            const m = await import(new URL('../dist/pkg-webgpu/zenjpegai.js', import.meta.url).href);
+            await m.default(); // fetches `zenjpegai_bg.wasm` next to zenjpegai.js
+            gpuInfo = await m.initGpu(gpuSoftwareMode);
+            mod = m;
+            variant = 'webgpu';
+          } catch (err) {
+            gpuError = `no usable GPU context: ${String((err && err.message) || err)}`;
+          }
+        } else {
+          gpuError = probe
+            ? `only a software WebGPU adapter (${probe.info?.description || 'fallback'})`
+            : 'requestAdapter returned null';
+        }
+      } else {
+        gpuError = 'navigator.gpu is absent';
+      }
     }
-    self.postMessage({ type: 'ready', variant, tier: mod.simdTier() });
+    if (!mod) {
+      mod = await import(`${cpuPkgBase}zenjpegai.js`);
+      await mod.default();
+      if (cpuVariant === 'threads') {
+        await mod.initThreadPool(Math.max(1, navigator.hardwareConcurrency || 4));
+      }
+    }
+    self.postMessage({ type: 'ready', variant, tier: mod.simdTier(), gpu: gpuInfo, gpuError });
   } catch (err) {
     mod = null;
     self.postMessage({ type: 'ready-error', variant, message: String((err && err.message) || err) });
@@ -105,11 +172,23 @@ async function drain() {
   while (queue.length) {
     const msg = queue.shift();
     if (!mod) {
-      if (msg.type === 'decode') self.postMessage({ type: 'error', id: msg.id, message: 'wasm module failed to load' });
+      if (msg.type === 'decode' || msg.type === 'present') {
+        self.postMessage({ type: 'error', id: msg.id, message: 'wasm module failed to load' });
+      }
       continue;
     }
     if (msg.type === 'releaseBuffers') mod.releaseBuffers();
-    else if (msg.type === 'decode') await decodeOne(msg);
+    else if (msg.type === 'decode' || msg.type === 'present') {
+      // Race the call against the trap signal: if the wasm traps, `onerror` above fails the
+      // message and `trapSignal` lets this loop continue instead of hanging on a promise that
+      // will never settle.
+      currentId = msg.id;
+      const trapped = new Promise((resolve) => { trapSignal = resolve; });
+      const call = msg.type === 'decode' ? decodeOne(msg) : presentOne(msg);
+      await Promise.race([call, trapped]);
+      trapSignal = null;
+      currentId = null;
+    }
   }
   draining = false;
 }
@@ -119,6 +198,21 @@ self.onmessage = (ev) => {
   drain();
 };
 
+function timings(t0, t1, t2, img) {
+  const gpuError = [(img && img.gpuError) || null, trapNote].filter(Boolean).join('; ') || null;
+  trapNote = null;
+  return {
+    total: t2 - t0,
+    models: t1 - t0,
+    decode: t2 - t1,
+    variant,
+    tier: mod.simdTier(),
+    path: (img && img.path) || 'cpu',
+    gpuError,
+    gpu: (img && img.gpu) || null,
+  };
+}
+
 async function decodeOne(msg) {
   const { id, modelsBaseUrl } = msg;
   try {
@@ -127,7 +221,7 @@ async function decodeOne(msg) {
     const head = mod.info(bytes);
     await ensureModels(mod, modelsBaseUrl, head.modelId, head.operatingPoint, msg.bundleVersions);
     const t1 = performance.now();
-    const img = mod.decode(bytes);
+    const img = await mod.decode(bytes); // a Promise in the webgpu package, sync elsewhere
     const t2 = performance.now();
     self.postMessage(
       {
@@ -136,9 +230,78 @@ async function decodeOne(msg) {
         width: img.width,
         height: img.height,
         rgba: img.rgba.buffer,
-        timings: { total: t2 - t0, models: t1 - t0, decode: t2 - t1, variant, tier: mod.simdTier() },
+        timings: timings(t0, t1, t2, img),
       },
       [img.rgba.buffer],
+    );
+  } catch (err) {
+    self.postMessage({ type: 'error', id, message: String((err && err.message) || err) });
+  }
+}
+
+async function presentOne(msg) {
+  const { id, modelsBaseUrl, canvasId } = msg;
+  if (msg.canvas) canvases.set(canvasId, msg.canvas);
+  const canvas = canvases.get(canvasId);
+  if (!canvas) {
+    self.postMessage({ type: 'error', id, message: `unknown canvasId ${canvasId}` });
+    return;
+  }
+  try {
+    const bytes = new Uint8Array(msg.stream);
+    const t0 = performance.now();
+    const head = mod.info(bytes);
+    await ensureModels(mod, modelsBaseUrl, head.modelId, head.operatingPoint, msg.bundleVersions);
+    const t1 = performance.now();
+    let presented = '2d';
+    let img = null;
+    let width;
+    let height;
+    let presentError = null;
+    if (typeof mod.present === 'function') {
+      try {
+        const r = await mod.present(bytes, canvas);
+        presented = 'gpu';
+        width = r.width;
+        height = r.height;
+        img = r;
+      } catch (err) {
+        // Not GPU-presentable (post-filters, subsampled chroma, 10 bit) or the surface failed:
+        // decode below and draw through the canvas's 2d context instead.
+        presentError = String((err && err.message) || err);
+      }
+    } else {
+      presentError = 'this package has no GPU presentation';
+    }
+    if (presented !== 'gpu') {
+      img = await mod.decode(bytes);
+      width = img.width;
+      height = img.height;
+      if (img.gpuError) {
+        img.gpuError = `${presentError ? `${presentError}; ` : ''}${img.gpuError}`;
+      } else {
+        img.gpuError = presentError;
+      }
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) throw new Error('canvas is already bound to a WebGPU surface');
+      ctx.putImageData(new ImageData(img.rgba, width, height), 0, 0);
+    }
+    const t2 = performance.now();
+    let png = null;
+    if (msg.verify) {
+      try {
+        png = await (await canvas.convertToBlob({ type: 'image/png' })).arrayBuffer();
+      } catch {
+        png = null; // a canvas whose frame already presented may refuse; the test reads `presented`
+      }
+    }
+    const tm = timings(t0, t1, t2, img);
+    if (presented === 'gpu') tm.path = 'gpu';
+    self.postMessage(
+      { type: 'result', id, width, height, presented, png, timings: tm },
+      png ? [png] : [],
     );
   } catch (err) {
     self.postMessage({ type: 'error', id, message: String((err && err.message) || err) });

@@ -469,8 +469,17 @@ measured numbers in the status table above when you close an item.
 
 ### Browser and GPU
 
-- **B1** WebGPU synthesis in the worker/polyfill/demo behind feature detection (in progress on a
-  SWE-2 agent; `gpu/README.md` has the API). **B2 done 2026-09-18** — demo throttling +
+- ~~**B1** WebGPU synthesis in the worker/polyfill/demo behind feature detection~~ **Done
+  2026-09-18** (the `webgpu` agent): `pkg-webgpu` third wasm package (`gpu` cargo feature on
+  `zenjpegai-wasm`: async `decode` with CPU fallback on `GpuError`, `initGpu`/`gpuStatus`/
+  `present`/`disableGpu`), `DecoderPool` `gpu` option (`auto|software|force-software|off`),
+  `decodeToCanvas` no-readback presentation through `Blitter`, worker-level trap recovery for
+  wgpu-30's `createBuffer` unwrap panic (the one API-blocking wart — `gpu/README.md` "Known
+  limitations"), `chromium-webgpu` Playwright project + `benchmark-gpu.spec.ts` ->
+  `benchmarks/wasm_decode_2026-09-18_gpu.{tsv,meta}`, size delta in
+  `benchmarks/wasm_size_2026-09-18.md` §7. Verified in-browser on SwiftShader only — **still
+  never run on a hardware WebGPU adapter**. Full detail: `web/README.md` §7.
+  **B2 done 2026-09-18** — demo throttling +
   viewport-priority queue landed: one shared queue in `web/src/pool.js` (threads build: exactly
   one decode in flight; simd build: at most `min(navigator.hardwareConcurrency - 1, 4)` —
   one hardware thread is left for the page's main thread, because `hwc` busy workers on a
@@ -514,3 +523,30 @@ measured numbers in the status table above when you close an item.
 
 Earlier per-agent appendices (browser 2026-09-17, GPU passes, encoder groundwork) were folded
 into the rows above and the items here; their numbers live in `benchmarks/` and the crate READMEs.
+
+Appended by the WebGPU browser agent (`webgpu` workspace), 2026-09-18:
+
+- Landed: `gpu` cargo feature on `zenjpegai-wasm` (`wasm/src/gpu.rs`: `initGpu`, `gpuStatus`,
+  `present`, `disableGpu`; `decode` becomes async under the feature and falls back to the CPU
+  engine on any `GpuError`), a third `pkg-webgpu` package (`build-wasm.sh webgpu`; `pkg-simd` and
+  `pkg-threads` untouched), worker/pool wiring (`gpu` mode `auto|software|force-software|off`,
+  `decodeToCanvas` with one-time `OffscreenCanvas` transfer and worker-side `Blitter`
+  presentation — no CPU readback when `presented == 'gpu'`), a `chromium-webgpu` Playwright
+  project with per-path reporting, `tests/benchmark-gpu.spec.ts` →
+  `benchmarks/wasm_decode_2026-09-18_gpu.{tsv,meta}`, and `wasm_size_2026-09-18.md` §7
+  (`pkg-webgpu` = 663,094 bytes post-`wasm-opt`, +76% over `pkg-simd`; never downloaded by
+  browsers that only offer a software adapter). Verified in-browser through SwiftShader
+  (`WEBGPU_ADAPTER=swiftshader`): GPU decode + `presented:'gpu'` blit both ran, 201/3,000,000
+  samples differ from the reference PNG, all by 1 (same bound as the CPU tests, reported
+  separately — GPU output is not bit-identical to CPU). All 96 Playwright tests pass across
+  chromium / firefox / webkit / chromium-webgpu (83 run per project set, 13 project-gated
+  skips).
+- Open: **never run on a hardware GPU adapter** — every in-browser GPU number is SwiftShader
+  (~4.5 s/decode vs ~290 ms CPU at 1 MP, so the JS-side probe correctly keeps software-only
+  browsers on the CPU package without even downloading `pkg-webgpu`). Known wgpu-30 web-backend
+  trap: `create_buffer_init` (mappedAtCreation) buffers over Dawn's staging limit panic instead
+  of returning `GpuError`; mitigated by worker-side `self.onerror` → `disableGpu()` → transparent
+  CPU retry (`timings.gpuError` records the trap) — observed live mid-benchmark. The real fix is
+  in `gpu/src/layers.rs` (see `gpu/README.md` "Known limitations"); this session only documented
+  it there per its scope.
+

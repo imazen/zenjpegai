@@ -2,8 +2,10 @@
 # Build the browser wasm packages into web/dist/:
 #   pkg-simd/     single-threaded SIMD128 build: runs anywhere (no SharedArrayBuffer needed)
 #   pkg-threads/  rayon on Web Workers: needs a cross-origin isolated page
-# Both are built with a pinned nightly and -Z build-std (threads need it; simd is faster for it).
-# usage: web/scripts/build-wasm.sh [simd] [threads]      (default: both)
+#   pkg-webgpu/   simd build + WebGPU synthesis (zenjpegai-gpu): async initGpu/decode/present,
+#                 falls back to the CPU engine when the browser offers no non-software adapter
+# All are built with a pinned nightly and -Z build-std (threads need it; simd is faster for it).
+# usage: web/scripts/build-wasm.sh [simd] [threads] [webgpu]      (default: simd threads)
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$PWD
@@ -53,6 +55,14 @@ for v in "${variants[@]}"; do
         --target wasm32-unknown-unknown --profile wasm-release --target-dir target/wasm-threads \
         -Z build-std=panic_abort,std >&2
       in=target/wasm-threads/wasm32-unknown-unknown/wasm-release/zenjpegai_wasm.wasm ;;
+    webgpu)
+      # Same flags as simd: the GPU feature only adds the async exports and the wgpu
+      # synthesis path; the CPU fallback in this package is the single-threaded engine.
+      RUSTFLAGS="-Ctarget-feature=+simd128,+bulk-memory,+nontrapping-fptoint,+sign-ext,+mutable-globals" \
+        nice -n 19 cargo +"$NIGHTLY" build -j "$JOBS" -p zenjpegai-wasm --features gpu \
+        --target wasm32-unknown-unknown --profile wasm-release --target-dir target/wasm-webgpu \
+        -Z build-std=panic_abort,std >&2
+      in=target/wasm-webgpu/wasm32-unknown-unknown/wasm-release/zenjpegai_wasm.wasm ;;
     *) echo "unknown variant $v" >&2; exit 2 ;;
   esac
   out=$DIST/pkg-$v

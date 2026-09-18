@@ -55,7 +55,14 @@ const CARD_HASH = `((slug) => {
   for (let i = 0; i < d.length; i++) { h ^= d[i]; h = Math.imul(h, 0x01000193) >>> 0; }
   return h;
 })`;
-const cardHash = (page, slug: string) => page.evaluate(`(${CARD_HASH})(${JSON.stringify(slug)})`);
+// `data-state=done` is set when the worker's decodeToCanvas resolves, but a transferred
+// OffscreenCanvas only updates the element's displayed bitmap on the next compositor commit —
+// hashing immediately can read the still-blank placeholder (its all-zero FNV-1a is 2645745317).
+// A double rAF waits out one frame before reading.
+const cardHash = (page, slug: string) => page.evaluate(`(async () => {
+  await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+  return (${CARD_HASH})(${JSON.stringify(slug)});
+})()`);
 
 test('stream swapped under the same file name renders new content without clearing storage', async ({ page }) => {
   test.setTimeout(180_000);

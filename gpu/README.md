@@ -165,9 +165,21 @@ try is a *smaller* `ob` together with a pixel tile, not a bigger tile.
 2. **Readback dominates large pictures**: 4096 x 4096 SOP is 139 ms of device time and 227 ms of
    wall, the difference being 201 MB of `f32` planes over PCIe. The texture path
    (`decode_to_gpu` + `to_rgba_texture`) avoids it; the plane path could read back 8-bit instead.
-3. **Browser**: never run in a browser (no WebGPU-capable browser on the box). The web build has
-   to call the API below; nothing in `wasm/` or `web/` references this crate yet.
+3. **Browser**: wired into `wasm/` + `web/` (2026-09-18, `pkg-webgpu`): `initGpu`/`decode`/`present`
+   work end to end under Chromium's WebGPU (verified through Dawn's SwiftShader adapter;
+   no hardware WebGPU run yet). **Blocking API note**: `layers.rs::storage` uses
+   `device.create_buffer_init`, which on the web backend calls `createBuffer` with
+   `mappedAtCreation: true`; wgpu then `unwrap()`s the JS result (wgpu 30.0.1
+   `backend/webgpu.rs:2461`). Dawn rejects `mappedAtCreation` buffers that exceed its staging
+   limit, and on SwiftShader the failure is device-state dependent (a 921600-byte weight buffer
+   failed on the decode following a canvas `present`, while the same call succeeded earlier).
+   With `panic = "abort"` the unwrap trap escapes wasm-bindgen's executor: it cannot become a
+   `GpuError`, so in-worker fallback never runs. `wasm/src/gpu.rs::disableGpu` + a worker
+   `onerror` -> pool retry now recover into the CPU path, but the real fix is here: replace
+   `create_buffer_init` with `create_buffer` + `queue.write_buffer` (as `plan.rs` already does
+   for its own buffers) or return an error from buffer creation instead of letting wgpu unwrap it.
 4. Latent upload converts planar to HWC4 on the CPU per picture (0.4 ms for 560 x 888).
+
 5. No cancellation (`enough::Stop`) on the GPU path; `GpuDecoder` has no `max_channels`
    (progressive decode) option.
 6. **A workspace that has synthesised a very large picture stays slow for small ones.** In the

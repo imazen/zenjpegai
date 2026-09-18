@@ -126,6 +126,15 @@ test.describe('decode scheduling', () => {
     const page = await ctx.newPage();
     await page.route('**/sw-coi.js', (route) => route.abort());
     try {
+      // A service worker registered by an earlier test in this browser process survives into a
+      // fresh context (they share the process's in-memory SW registry) and keeps rewriting this
+      // origin's responses with COOP/COEP — the aborted sw-coi.js fetch only stops the
+      // re-registration, it does not detach the existing worker. Drop any stale registration
+      // first so the navigation below is genuinely uncontrolled.
+      await page.goto(`${BASE_PLAIN}/decode.html`);
+      await page.evaluate(async () => {
+        for (const r of await navigator.serviceWorker.getRegistrations()) await r.unregister();
+      });
       const t0 = Date.now();
       await page.goto(`${BASE_PLAIN}/index.html`);
       await page.waitForFunction(`${DONE_COUNT_SRC} >= 1`, { timeout: 60_000, polling: 100 });

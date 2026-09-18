@@ -1,8 +1,13 @@
 import { DecoderPool } from './src/pool.js';
 
-const pool = new DecoderPool({ modelsBaseUrl: 'models/' });
+// `?gpu=` selects the pool's adapter policy (auto|software|force-software|off); the tests use
+// it to force the software-adapter GPU path on hosts without hardware WebGPU.
+const gpuMode = new URLSearchParams(location.search).get('gpu') || 'auto';
+const pool = new DecoderPool({ modelsBaseUrl: 'models/', gpu: gpuMode });
 window.__pool = pool;
+window.__gpuMode = gpuMode;
 window.__ready = pool.ready();
+window.__hasGpu = typeof navigator !== 'undefined' && 'gpu' in navigator && !!navigator.gpu;
 
 // In-page pixel-parity check against a browser-decodable reference PNG: avoids serialising a
 // multi-megabyte RGBA array back to the Node test process, and needs no custom PNG decoder (the
@@ -13,18 +18,47 @@ window.__decodeAndCompare = async (streamUrl, pngUrl) => {
   const { width, height, rgba, timings } = await pool.decode(bytes);
   const total_ms = performance.now() - t0;
 
-  const bitmap = await createImageBitmap(await fetch(pngUrl).then((r) => r.blob()));
+  const ref = await pngPixels(pngUrl);
+  const { differing, samples, max } = compare(rgba, ref);
+  return { width, height, differing, samples, max, timings, total_ms, refWidth: ref.width, refHeight: ref.height };
+};
+
+// Same parity check through the no-readback presentation path: `decodeToCanvas` draws onto a
+// transferred OffscreenCanvas; `verify` makes the worker post back a PNG of what it drew, which
+// is compared against the reference PNG here. `presented` reports 'gpu' (blit) or '2d'.
+window.__presentAndCompare = async (streamUrl, pngUrl) => {
+  const bytes = await fetch(streamUrl).then((r) => r.arrayBuffer());
+  const t0 = performance.now();
+  const canvas = new OffscreenCanvas(2, 2);
+  const r = await pool.decodeToCanvas(bytes, canvas, { verify: true });
+  const total_ms = performance.now() - t0;
+  if (!r.png) return { presented: r.presented, timings: r.timings, total_ms, png: false };
+  const got = await pngPixels(new Uint8Array(r.png));
+  const ref = await pngPixels(pngUrl);
+  const { differing, samples, max } = compare(got.pixels, ref);
+  return {
+    presented: r.presented, timings: r.timings, total_ms, png: true,
+    width: got.width, height: got.height, differing, samples, max,
+    refWidth: ref.width, refHeight: ref.height,
+  };
+};
+
+async function pngPixels(src) {
+  const blob = src instanceof Uint8Array ? new Blob([src], { type: 'image/png' }) : await fetch(src).then((r) => r.blob());
+  const bitmap = await createImageBitmap(blob);
   const c = new OffscreenCanvas(bitmap.width, bitmap.height);
   const ctx = c.getContext('2d');
   ctx.drawImage(bitmap, 0, 0);
-  const ref = ctx.getImageData(0, 0, bitmap.width, bitmap.height).data;
+  return { pixels: ctx.getImageData(0, 0, bitmap.width, bitmap.height).data, width: bitmap.width, height: bitmap.height };
+}
 
+function compare(a, ref) {
   let differing = 0, samples = 0, max = 0;
-  for (let i = 0; i < rgba.length; i++) {
+  for (let i = 0; i < a.length && i < ref.pixels.length; i++) {
     if (i % 4 === 3) continue; // alpha
     samples++;
-    const d = Math.abs(rgba[i] - ref[i]);
+    const d = Math.abs(a[i] - ref.pixels[i]);
     if (d > 0) { differing++; max = Math.max(max, d); }
   }
-  return { width, height, differing, samples, max, timings, total_ms, refWidth: bitmap.width, refHeight: bitmap.height };
-};
+  return { differing, samples, max };
+}

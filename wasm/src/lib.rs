@@ -17,10 +17,14 @@ use std::sync::{Arc, OnceLock, RwLock};
 
 use wasm_bindgen::prelude::*;
 use zenjpegai::Decoder;
+use zenjpegai::RgbImage;
 use zenjpegai::header::OperatingPoint;
 use zenjpegai::model::{self, ModelSource};
 use zenjpegai::nn::fast::{Engine, Tier};
 use zenjpegai::weights::packed::PackedBundle;
+
+#[cfg(feature = "gpu")]
+mod gpu;
 
 #[cfg(feature = "threads")]
 pub use wasm_bindgen_rayon::init_thread_pool;
@@ -69,10 +73,12 @@ fn op_name(op: OperatingPoint) -> &'static str {
     }
 }
 
-/// `"threads"` or `"simd"`: which build this is.
+/// `"threads"`, `"webgpu"` or `"simd"`: which build this is.
 #[wasm_bindgen(js_name = buildMode)]
 pub fn build_mode() -> String {
-    if cfg!(feature = "threads") {
+    if cfg!(feature = "gpu") {
+        "webgpu".into()
+    } else if cfg!(feature = "threads") {
         "threads".into()
     } else {
         "simd".into()
@@ -153,11 +159,8 @@ pub fn info(stream: &[u8]) -> Result<js_sys::Object, JsError> {
     Ok(out)
 }
 
-/// Decode a codestream: `{ width, height, rgba: Uint8ClampedArray }` (alpha 255), ready for
-/// `new ImageData(rgba, width, height)`.
-#[wasm_bindgen]
-pub fn decode(stream: &[u8]) -> Result<js_sys::Object, JsError> {
-    let img = state().decoder.decode(stream).map_err(js_err)?;
+/// Interleaved `RgbImage` at any bit depth as RGBA bytes for `ImageData` (alpha 255).
+fn rgb_to_rgba(img: &RgbImage) -> Vec<u8> {
     let shift = img.bit_depth.saturating_sub(8) as u32;
     let mut rgba = vec![255u8; img.width * img.height * 4];
     for (dst, src) in rgba
@@ -170,13 +173,42 @@ pub fn decode(stream: &[u8]) -> Result<js_sys::Object, JsError> {
             dst[c] = (src[c] >> shift).min(255) as u8;
         }
     }
+    rgba
+}
+
+fn set_rgba(out: &js_sys::Object, rgba: &[u8]) {
+    let array = js_sys::Uint8ClampedArray::new_with_length(rgba.len() as u32);
+    array.copy_from(rgba);
+    set(out, "rgba", array);
+}
+
+/// The CPU decode behind [`decode`], shared with the GPU path's fallback.
+fn decode_cpu(stream: &[u8]) -> Result<js_sys::Object, JsError> {
+    let img = state().decoder.decode(stream).map_err(js_err)?;
     let out = js_sys::Object::new();
     set(&out, "width", img.width as u32);
     set(&out, "height", img.height as u32);
-    let array = js_sys::Uint8ClampedArray::new_with_length(rgba.len() as u32);
-    array.copy_from(&rgba);
-    set(&out, "rgba", array);
+    set_rgba(&out, &rgb_to_rgba(&img));
     Ok(out)
+}
+
+/// Decode a codestream: `{ width, height, rgba: Uint8ClampedArray, path }` (alpha 255), ready
+/// for `new ImageData(rgba, width, height)`. In the `gpu` build this is async (a Promise) and
+/// `path` is `"gpu"` when synthesis ran on WebGPU or `"cpu"` after a fallback (`gpuError`
+/// carries why); otherwise it is synchronous and `path` is `"cpu"`.
+#[cfg(not(feature = "gpu"))]
+#[wasm_bindgen]
+pub fn decode(stream: &[u8]) -> Result<js_sys::Object, JsError> {
+    let out = decode_cpu(stream)?;
+    set(&out, "path", "cpu");
+    Ok(out)
+}
+
+/// See the non-`gpu` doc above.
+#[cfg(feature = "gpu")]
+#[wasm_bindgen]
+pub async fn decode(stream: Vec<u8>) -> Result<js_sys::Object, JsError> {
+    gpu::decode(&stream).await
 }
 
 /// Drop the feature-map buffers kept between decodes (wasm memory itself never shrinks; this
@@ -184,4 +216,6 @@ pub fn decode(stream: &[u8]) -> Result<js_sys::Object, JsError> {
 #[wasm_bindgen(js_name = releaseBuffers)]
 pub fn release_buffers() {
     state().decoder.release_buffers();
+    #[cfg(feature = "gpu")]
+    gpu::release_buffers();
 }

@@ -12,6 +12,8 @@ Updated 2026-09-18. What follows is exact: missing things first.
 | --- | --- | --- |
 | 6 | GitHub Pages | **enabled** (checked 2026-09-18: `gh api repos/imazen/zenjpegai/pages` returns `build_type: workflow`, site live at `https://imazen.github.io/zenjpegai/`; repo is public). The Pages deploy makes PUBLIC: the 16 demo `.jai` streams, the 8 packed model-bundle halves (`m{0,1,2,3}_{common,bop}.zjb`, BSD-licensed upstream weights — notice text embedded in every bundle and shown on the demo page + `upstream-notices/LICENSE`), the reference-decoder PNGs used as the test oracle, and this wasm build of the AGPL/commercial-licensed crate. Nothing else. |
 | 6 | GPU (`gpu/`) wiring into the web build | **not started, and correctly so per the brief's own fallback clause**: `gpu/README.md` does not exist on `main` (checked 2026-09-18: `find gpu -type f` lists no README), so there is no documented usable async API to wire in yet. `gpu/src/decoder.rs` exists (native wgpu, not built for `wasm32-unknown-unknown` by anything in this session) — the demo (`web/demo/demo.js`) feature-detects `navigator.gpu` and reports whether WebGPU is available in the browser, but always decodes via the CPU/wasm path. Wire a real WebGPU path once `gpu/README.md` lands. |
+| 6 | GPU (`gpu/`) wiring into the web build | **wired, with one real upstream-shaped caveat** (see §7): `pkg-webgpu` exists and the full GPU decode + no-readback present path runs in a browser (verified through SwiftShader — **the browser GPU path has still never run on a hardware WebGPU adapter** (the `gpu/` crate itself has since run on hardware natively — its own README)). Known wgpu-30 web-backend limitation: `GpuDecoder`'s `create_buffer_init` buffers map at creation, Dawn caps those, and wgpu **unwraps the JS error into a wasm trap** instead of a `GpuError` — recovered transparently by worker-side trap handling (`disableGpu` + retry on CPU), documented in `gpu/README.md` "Known limitations". Never observed on a hardware adapter (none available). |
+
 | 1 | Bundle fetched **exactly** once per (model, op) actually needed | Done at the pool/worker level (`ensureModels` in `web/src/worker.js` checks `hasModels` before fetching, and the Cache API means a repeat visit skips the network entirely) but each `simd`-variant Worker in the pool has its OWN wasm memory, so if the pool spawns >1 simd worker (it does, up to `hardwareConcurrency`, capped at 4) and two images on the page need the same model, **that model's bundle is fetched+parsed once per worker that needs it**, not once globally. Acceptable (HTTP/Cache-API means only the first worker pays the network cost; the rest hit cache) but not "exactly once" in the strict sense — documented, not fixed. |
 | — | wasm SIMD128 caniuse | not independently re-checked this session (Firefox 155 / Chrome 153 / Safari 26 — the three actually installed and tested below — all ran the `simd` package correctly, which is itself evidence, but no browsers older than "currently installed by Playwright" were probed). |
 
@@ -85,10 +87,17 @@ via `webServer: [...]` before any test:
   silently blocked. `img-src` deliberately has no `blob:`/`data:`: proves the `canvas` render
   mode needs neither, and that the opt-in `img` mode is BLOCKED under this policy (its own test).
 
-33 tests, chromium + firefox + **webkit** (all three installed and ran clean — no "if it
-installs" fallback needed this run, `npx playwright install chromium firefox webkit` succeeded
-after `sudo npx playwright install-deps` for `libmanette-0.2-0`), **33 passed in ~48s**
-(`npx playwright test`):
+96 tests across 4 projects — chromium, firefox, **webkit**, and `chromium-webgpu` (a second
+Chromium launch with WebGPU flags; see §7). All installed and ran clean — no "if it installs"
+fallback needed this run, `npx playwright install chromium firefox webkit` succeeded after
+`sudo npx playwright install-deps` for `libmanette-0.2-0`. **83 passed, 13 project-gated skips
+in ~2 min** (`npx playwright test`).
+
+Port note: the three servers default to 3031-3033; `JAI_PORT_BASE=<n>` shifts all three.
+On this shared box a sibling workspace's leftover `serve.mjs` on a default port gets adopted
+by `reuseExistingServer` and your tests then run against THEIR `dist/site` — set `JAI_PORT_BASE`
+whenever another workspace is running tests (seen live: a foreign server on 3032 made
+"isolated/strict" tests exercise a build that wasn't this tree's).
 
 - `wasm-decode.spec.ts`: plain->simd, isolated->threads, strict->still decodes; every decode
   pixel-compared (in-browser, via the browser's own PNG decoder — `createImageBitmap` + canvas,
@@ -106,9 +115,15 @@ after `sudo npx playwright install-deps` for `libmanette-0.2-0`), **33 passed in
   and "per-image decode under 8x load stays <= 2x a solo decode". Appends to
   `benchmarks/wasm_demo_scheduling_<date>.tsv`; chromium-only. `JAI_BASE_PLAIN` /
   `JAI_BASE_ISOLATED` env vars point it at another site tree (used for the pre-fix comparison).
+- `webgpu-decode.spec.ts` (added 2026-09-18): `gpu=auto` / `software` / `off` package selection
+  and canvas presentation, GPU-path parity reported separately — details in §7.
+
 - `benchmark.spec.ts`: decodes all 16 demo streams per browser, appends timings to
   `benchmarks/wasm_decode_<date>.tsv` + a `.meta` (commit/host/command). `just web-test` or the
   Pages CI workflow run it; `npm test` in `web/` runs the whole suite.
+- `benchmark-gpu.spec.ts` (added 2026-09-18): same corpus through the `gpu=software` pool on the
+  `chromium-webgpu` project, decode and present timed separately, appends to
+  `benchmarks/wasm_decode_<date>_gpu.tsv` + `.meta` (adapter name and launch flags included).
 
 Measured decode times (isolated server, `threads` package, this session — Ryzen 9 9950X3D,
 shared box, chromium): **160-360 ms** per ~1 MP image including first-time model-bundle fetch;
@@ -156,13 +171,15 @@ regardless, so the non-isolated (`simd`) path always works with or without the s
 
 `addModels(bundle)`, `hasModels(modelId, op)`, `info(stream)`, `decode(stream) -> {width,
 height, rgba}`, `buildMode()`, `simdTier()`, `releaseBuffers()`, `initThreadPool` in the threads
-build. `web/scripts/build-wasm.sh [simd] [threads]` (now genuinely both, see the worker-bug
-section above for what `threads` needed to actually link).
+build. The `gpu` feature adds `initGpu(mode)`, `gpuStatus()`, `present(stream, offscreenCanvas)`,
+`disableGpu()`, and makes `decode` async (see §7). `web/scripts/build-wasm.sh [simd] [threads]
+[webgpu]` (threads genuinely works, see the worker-bug section above).
 
 | package | after wasm-bindgen | after `wasm-opt -O3` | gzip -9 | brotli -q11 |
 | --- | ---: | ---: | ---: | ---: |
 | `pkg-simd` | 434,161 | **362,789** | 150,436 | 124,606 |
 | `pkg-threads` | 715,950 | 482,103 | 181,659 | 146,787 |
+| `pkg-webgpu` (later rebuild, §7) | 910,067 | 651,502 | 265,613 | 213,817 |
 
 (`pkg-simd` was 389,178 bytes post-`wasm-opt` before this session's size audit — see next
 section — a 6.8% cut.)
@@ -219,8 +236,11 @@ Cross-checked against MDN's browser-compat-data (`api/ImageData.json`, `colorSpa
 92+, Safari 15.2+, **Firefox `version_added: false`** — matches the live probe exactly. So: P3
 canvas output is a real option in Chromium- and WebKit-based browsers today, but **Firefox has no
 wide-gamut canvas path at all** (not a version gap — never implemented) and no realistic wasm
-build could paper over that. This is also why the polyfill never uses `OffscreenCanvas` for its
-render path (WebKit's gap above would silently reduce colour fidelity there).
+build could paper over that. Note the polyfill's canvas mode now DOES transfer an
+`OffscreenCanvas` to the worker (`pool.decodeToCanvas`, §7) — safe only because output is
+sRGB-only today; a future P3 path must check `getContext('2d')` colour space support on the
+OffscreenCanvas (WebKit's gap above would silently reduce fidelity there) before handing one a
+`display-p3` context.
 
 **The hook, not yet built**: `Headers::rendering` (`src/header.rs`) already carries the stream's
 CICP (colour primaries / transfer / matrix), so a stream that signals wide-gamut primaries is
@@ -232,13 +252,62 @@ returned that colour space from `getContextAttributes()` (Firefox always needs t
 regardless of what the stream says). Not built this session — no stream in the demo corpus or
 reference-vector set carries non-sRGB CICP to develop and test it against.
 
+### 7. WebGPU synthesis path (`pkg-webgpu`, `gpu` cargo feature) — 2026-09-18
+
+Third wasm package (`web/scripts/build-wasm.sh webgpu`): same SIMD CPU engine as `pkg-simd`
+plus `zenjpegai-gpu` (wgpu 30 web backend) behind the `gpu` cargo feature. `pkg-simd` and
+`pkg-threads` are unchanged.
+
+- **Package selection** (`web/src/worker.js`, driven by `?gpu=` on the worker URL from
+  `DecoderPool`'s `gpu` option): `auto` (default) probes `navigator.gpu.requestAdapter()` in JS
+  first — `pkg-webgpu` is downloaded only when a **non-software** adapter answers (a software
+  rasteriser is slower than this decoder's own CPU engine, so software-only browsers skip the
+  ~214 KB brotli download entirely). `initGpu(mode)` inside wasm then builds a `GpuContext`;
+  any failure discards the package and loads `simd`/`threads` as before. `software` /
+  `force-software` accept software adapters (test/debug; `force-software` also sets WebGPU's
+  `forceFallbackAdapter`). `off` never touches `pkg-webgpu`.
+- **Decode**: `decode()` is async in the webgpu build. It runs `GpuDecoder` (CPU entropy +
+  latent stages, GPU synthesis); any `GpuError` or adapter problem falls back to the CPU engine
+  inside the same call and reports `path: 'cpu'` + `gpuError` in timings. Non-GPU packages keep
+  the synchronous `decode`.
+- **No-readback present**: `pool.decodeToCanvas(stream, canvas)` transfers an
+  `OffscreenCanvas` to the worker once (cached on the element as `__jaiCanvasId`/`__jaiWorker`;
+  repeat calls address it by id — re-transferring a neutered canvas throws). The worker calls
+  `present()`, which hands the canvas to wgpu's `SurfaceTarget::Canvas` and blits the decoder's
+  `rgba8unorm` texture without any CPU readback (`presented: 'gpu'`). Non-presentable pictures
+  or any present failure decode on CPU and `putImageData` on a 2d context (`presented: '2d'`).
+  `verify` asks the worker to also return a PNG of the canvas for tests.
+- **Trap recovery** (needed because of the `create_buffer_init` issue in `gpu/README.md`): a
+  Rust panic in this build is `panic=abort`, which escapes the wasm-bindgen promise as an
+  uncaught `RuntimeError` instead of rejecting it. `self.onerror` catches it, calls
+  `disableGpu()`, fails the in-flight message with `trapped: true`, and `pool.js` retries the
+  call once — the retry runs on the CPU engine and its `timings.gpuError` records the trap.
+  Verified live: `car_bpp25` decode+present on GPU, then `car_bpp75` trapped in
+  `GPUDevice.createBuffer` and retried on CPU with the trap noted in `gpuError`.
+- **Playwright**: `chromium-webgpu` project (`--enable-unsafe-webgpu --enable-features=Vulkan`,
+  `--use-webgpu-adapter=$WEBGPU_ADAPTER` when set). `webgpu-decode.spec.ts` covers `auto`,
+  `software`, `off`, and canvas presentation; test names/log lines print which path ran
+  (`[software/gpu (software adapter)]`, `[present-software/gpu/gpu]`, `[auto/cpu]` …). On this
+  host (no hardware adapter): `WEBGPU_ADAPTER=swiftshader` ran the real GPU path — 201 of
+  3,000,000 samples differ from the reference PNG, all by 1 — and `presented: 'gpu'` confirmed
+  the no-readback blit. The same parity bound as the CPU tests, reported separately because GPU
+  output is not bit-identical to CPU output.
+- **Benchmarks**: `tests/benchmark-gpu.spec.ts` writes `benchmarks/wasm_decode_<date>_gpu.tsv`
+  (+ `.meta` with adapter name / launch flags). SwiftShader numbers: GPU decode ~4.5 s at
+  1 MP vs ~290 ms CPU — a software rasteriser is predictably slower; the run also captured the
+  trap recovery (first stream's decode+present on GPU, subsequent streams on CPU after the
+  `createBuffer` trap). Package sizes appended to `benchmarks/wasm_size_2026-09-18.md` §7:
+  `pkg-webgpu` is 651,502 bytes after `wasm-opt` (+74% over `pkg-simd`), 213,817 brotli.
+
 ## Next steps, in order
 
 1. Enable GitHub Pages (human decision — see "Not done" table) and watch `.github/workflows/pages.yml`
    run for real; the workflow itself has never executed (this session only ran the equivalent
    steps locally).
-2. Once `gpu/README.md` describes a usable async API, wire a WebGPU decode path into
-   `web/demo/demo.js` behind the existing `navigator.gpu` feature detection.
+2. Re-run §7's benchmark on a host with a **hardware** WebGPU adapter (every number above is
+   SwiftShader/llvmpipe — no hardware GPU has ever run this path), and fix the
+   `create_buffer_init` staging-buffer trap in `gpu/src/layers.rs` (plan in `gpu/README.md`
+   "Known limitations") — until then long GPU sessions degrade to CPU mid-run.
 3. Speed: the `Wasm128` micro-kernel is still slower than native AVX-512 on one thread (measured
    2026-09-17: 0.35s vs 0.093s). Untried: relaxed-simd is ruled out by the numeric policy, a wider
    register block for 1x1 convolutions and a `node --cpu-prof` profile are not.

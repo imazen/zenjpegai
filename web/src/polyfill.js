@@ -39,6 +39,9 @@ const SELECTOR = [
  * @property {Document|ShadowRoot} [root] - defaults to `document`.
  * @property {Object<string,string>} [bundleVersions] - passed to `DecoderPool`: model-bundle
  *   file name -> version token, appended to bundle URLs as `?v=` (see pool.js/worker.js).
+ * @property {'auto'|'software'|'force-software'|'off'} [gpu] - passed to `DecoderPool`:
+ *   'auto' (default) presents through WebGPU without a CPU readback where the browser and the
+ *   stream allow it.
  */
 
 // Scheduling (see pool.js's contract): every decode enters the pool's shared queue ordered by
@@ -56,7 +59,7 @@ const FAR_PRIORITY = 1_000_000_000;
 /** @param {PolyfillOptions} options */
 export function installJpegAiPolyfill(options) {
   const opts = { renderMode: 'canvas', root: document, ...options };
-  const pool = new DecoderPool({ modelsBaseUrl: opts.modelsBaseUrl, maxWorkers: opts.maxWorkers, workerUrl: opts.workerUrl, bundleVersions: opts.bundleVersions });
+  const pool = new DecoderPool({ modelsBaseUrl: opts.modelsBaseUrl, maxWorkers: opts.maxWorkers, workerUrl: opts.workerUrl, bundleVersions: opts.bundleVersions, gpu: opts.gpu });
 
   const visRank = new WeakMap();
   let rankSeq = 0;
@@ -187,11 +190,31 @@ async function decodeAndSwap(img, url, pool, opts, decodeOpts = {}) {
   if (!res.ok) throw new Error(`fetch ${url} failed: ${res.status}`);
   const bytes = await res.arrayBuffer();
   const t1 = performance.now();
-  const { width, height, rgba, timings } = await pool.decode(bytes, decodeOpts);
-  img.removeAttribute('data-jai-state');
-  const t2 = performance.now();
   const mode = img.getAttribute('data-jai-render') || opts.renderMode;
   const alt = img.getAttribute('alt') ?? '';
+  // Canvas mode can draw entirely inside the worker (`pool.decodeToCanvas`): the GPU path
+  // blits without a CPU readback and the CPU path still skips the rgba transfer to this thread.
+  // Needs transferControlToOffscreen (Safari >= 16.4); anything older takes the classic path.
+  // Both branches take the same queue options — a worker-drawn canvas still goes through the
+  // pool's priority queue.
+  const probe = document.createElement('canvas');
+  const canWorkerDraw = mode === 'canvas' && typeof probe.transferControlToOffscreen === 'function';
+  let width;
+  let height;
+  let rgba = null;
+  let presented = '2d';
+  let timings;
+  let canvas = null;
+  if (canWorkerDraw) {
+    canvas = probe;
+    const r = await pool.decodeToCanvas(bytes, canvas, decodeOpts);
+    ({ width, height, presented, timings } = r);
+  } else {
+    const r = await pool.decode(bytes, decodeOpts);
+    ({ width, height, rgba, timings } = r);
+  }
+  img.removeAttribute('data-jai-state');
+  const t2 = performance.now();
 
   if (mode === 'img') {
     const canvas = document.createElement('canvas');
@@ -210,9 +233,16 @@ async function decodeAndSwap(img, url, pool, opts, decodeOpts = {}) {
     if (!img.hasAttribute('height')) img.height = height;
     void prevSrc;
   } else {
-    const canvas = document.createElement('canvas');
-    canvas.width = width;
-    canvas.height = height;
+    if (!canvas) canvas = document.createElement('canvas');
+    if (canvas.__jaiCanvasId != null) {
+      // Control is transferred to a worker: the IDL width/height setters throw InvalidStateError
+      // now; the content attributes still set the element's display size.
+      canvas.setAttribute('width', String(width));
+      canvas.setAttribute('height', String(height));
+    } else {
+      canvas.width = width;
+      canvas.height = height;
+    }
     for (const attr of ['id', 'class', 'style', 'title', 'lang']) {
       const v = img.getAttribute(attr);
       if (v != null) canvas.setAttribute(attr, v);
@@ -226,13 +256,13 @@ async function decodeAndSwap(img, url, pool, opts, decodeOpts = {}) {
       if (name.startsWith('data-jai') || ['src', 'srcset', 'data-src', 'data-srcset', 'alt', 'loading'].includes(name)) continue;
       canvas.setAttribute(name, value);
     }
-    canvas.getContext('2d').putImageData(new ImageData(rgba, width, height), 0, 0);
+    if (rgba) canvas.getContext('2d').putImageData(new ImageData(rgba, width, height), 0, 0);
     img.replaceWith(canvas);
   }
   const t3 = performance.now();
   (img.ownerDocument.defaultView || globalThis).dispatchEvent(
     new CustomEvent('jpegaidecoded', {
-      detail: { url, width, height, mode, bytes: bytes.byteLength, timings: { ...timings, fetch: t1 - t0, decodeCall: t2 - t1, render: t3 - t2, total: t3 - t0 } },
+      detail: { url, width, height, mode, presented, bytes: bytes.byteLength, timings: { ...timings, fetch: t1 - t0, decodeCall: t2 - t1, render: t3 - t2, total: t3 - t0 } },
     }),
   );
 }

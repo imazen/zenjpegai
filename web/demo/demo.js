@@ -31,13 +31,13 @@ const variantCell = statusRow('build', '…');
 const tierCell = statusRow('SIMD tier', '…');
 const workersCell = statusRow('workers', '…');
 
-// WebGPU: feature-detected only. `gpu/` (zenjpegai-gpu, wgpu-based synthesis backend) has no
-// README describing a usable async API as of this build and is not wired into the wasm/web
-// target — see PORTING.md "Work queue" item 2. This just reports what the browser offers.
+// WebGPU: `DecoderPool` (default `gpu: 'auto'`) loads the pkg-webgpu build when this browser
+// offers a non-software adapter; the note below is filled in once the pool reports ready —
+// until then it only says what the browser advertises.
 if ('gpu' in navigator) {
   navigator.gpu.requestAdapter().then((adapter) => {
     $gpuNote.textContent = adapter
-      ? `WebGPU is available in this browser (adapter: ${adapter.info?.description || 'unnamed'}), but zenjpegai has no WebGPU decode path yet — decoding above runs on the CPU (wasm) path. See PORTING.md.`
+      ? `WebGPU adapter: ${adapter.info?.description || adapter.info?.device || 'unnamed'} — checking it below…`
       : 'navigator.gpu exists but no adapter was returned; CPU (wasm) decode only.';
   }, () => { $gpuNote.textContent = 'WebGPU requestAdapter failed; CPU (wasm) decode only.'; });
 } else {
@@ -58,7 +58,9 @@ const manifest = await fetch('manifest.json', { cache: 'no-cache' }).then((r) =>
 // under the same file name still gets a fresh cache entry.
 const bundleVersions = {};
 for (const [name, info] of Object.entries(manifest.models || {})) bundleVersions[name] = info.sha256;
-const pool = new DecoderPool({ modelsBaseUrl: 'models/', bundleVersions });
+// `?gpu=off|auto|software|force-software` overrides the pool's adapter policy (default auto).
+const gpuMode = new URLSearchParams(location.search).get('gpu') || 'auto';
+const pool = new DecoderPool({ modelsBaseUrl: 'models/', bundleVersions, gpu: gpuMode });
 // Test/debug hooks: the Playwright scheduling spec reads these.
 window.__pool = pool;
 window.__poolStats = () => pool.stats();
@@ -67,6 +69,13 @@ const ok = ready.filter((r) => r.ok);
 variantCell.textContent = ok[0]?.variant || 'failed';
 tierCell.textContent = ok[0]?.tier || 'n/a';
 workersCell.textContent = `${ok.length}/${ready.length}`;
+const gpuReady = ok.find((r) => r.gpu && r.gpu.ok);
+if (gpuReady) {
+  $gpuNote.textContent = `WebGPU synthesis active (${gpuReady.gpu.adapter}, ${gpuReady.gpu.backend}${gpuReady.gpu.software ? ', software adapter' : ''}); GPU-presentable pictures draw without a CPU readback.`;
+} else if (gpuMode !== 'off') {
+  const why = ok.find((r) => r.gpuError)?.gpuError;
+  if (why) $gpuNote.textContent = `CPU (wasm) decode: ${why}`;
+}
 if (!ok.length) {
   const warn = document.createElement('div');
   warn.style.color = '#c33';
@@ -158,19 +167,25 @@ async function decodeVariant(slug, variant, canvas, timing, buttons, active, pri
   const bytes = await fetch(url).then((r) => r.arrayBuffer());
   const t1 = performance.now();
   try {
-    const { width, height, rgba, timings } = await pool.decode(bytes, {
+    // decodeToCanvas keeps presentation on the worker: 'gpu' means the RGBA texture was
+    // blitted straight onto the canvas surface, '2d' means decoded pixels were putImageData'd.
+    const r = await pool.decodeToCanvas(bytes, canvas, {
       priority,
       onDispatch: () => {
         timing.textContent = 'decoding…';
         if (card) card.dataset.state = 'decoding';
       },
     });
-    canvas.width = width;
-    canvas.height = height;
-    canvas.getContext('2d').putImageData(new ImageData(rgba, width, height), 0, 0);
+    // The canvas's control is transferred offscreen: the IDL width/height setters would throw,
+    // so set the display size through the content attributes.
+    canvas.setAttribute('width', String(r.width));
+    canvas.setAttribute('height', String(r.height));
     if (card) card.dataset.state = 'done';
     const total = performance.now() - t0;
-    timing.textContent = `fetch ${(t1 - t0).toFixed(0)}ms · queued ${timings.queued.toFixed(0)}ms · models ${timings.models.toFixed(0)}ms · decode ${timings.decode.toFixed(0)}ms · total ${total.toFixed(0)}ms · ${timings.variant}/${timings.tier}`;
+    const t = r.timings;
+    const gpuNs = t.gpu && t.gpu.gpuNs != null ? ` · gpu ${(t.gpu.gpuNs / 1e6).toFixed(0)}ms` : '';
+    const fell = t.gpuError ? ` · fallback: ${t.gpuError}` : '';
+    timing.textContent = `fetch ${(t1 - t0).toFixed(0)}ms · queued ${(t.queued || 0).toFixed(0)}ms · models ${t.models.toFixed(0)}ms · decode ${t.decode.toFixed(0)}ms · total ${total.toFixed(0)}ms · ${t.variant}/${t.tier} · ${t.path}+${r.presented}${gpuNs}${fell}`;
   } catch (err) {
     if (card) card.dataset.state = 'error';
     timing.textContent = `error: ${err.message}`;

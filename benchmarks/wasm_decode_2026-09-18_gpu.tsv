@@ -1,0 +1,33 @@
+browser	browser_version	os	slug	bpp	model_id	width	height	stream_bytes	variant	tier	gpu_mode	call	path	presented	adapter	software_adapter	gpu_ns	gpu_error	fetch_ms	models_ms	decode_ms	total_ms
+chromium	153.0.8010.12	linux	car	0.25	1	1155	866	33016	webgpu	Wasm128	software	decode	gpu		BrowserWebGpu	true	2016548271		1.15	52.32	2566.70	2620.17
+chromium	153.0.8010.12	linux	car	0.25	1	1155	866	33016	webgpu	Wasm128	software	present	gpu	gpu	BrowserWebGpu	true	1982059104		1.98	0.04	2145.75	2147.77
+chromium	153.0.8010.12	linux	car	0.75	2	1155	866	98890	webgpu	Wasm128	software	decode	cpu		BrowserWebGpu	true		wasm trap in GPU path: Uncaught RuntimeError: unreachable	1.57	0.04	765.09	766.70
+chromium	153.0.8010.12	linux	car	0.75	2	1155	866	98890	webgpu	Wasm128	software	present	cpu	2d	BrowserWebGpu	true		no GPU context: disabled after a trap in the GPU path	1.29	0.04	721.65	722.99
+chromium	153.0.8010.12	linux	mountain	0.25	1	1155	866	32887	webgpu	Wasm128	software	decode	cpu		BrowserWebGpu	true			1.73	0.07	723.14	724.94
+chromium	153.0.8010.12	linux	mountain	0.25	1	1155	866	32887	webgpu	Wasm128	software	present	cpu	2d	BrowserWebGpu	true		no GPU context: disabled after a trap in the GPU path	1.21	0.06	713.97	715.24
+chromium	153.0.8010.12	linux	mountain	0.75	2	1155	866	90684	webgpu	Wasm128	software	decode	cpu		BrowserWebGpu	true			1.23	0.06	715.62	716.91
+chromium	153.0.8010.12	linux	mountain	0.75	2	1155	866	90684	webgpu	Wasm128	software	present	cpu	2d	BrowserWebGpu	true		no GPU context: disabled after a trap in the GPU path	1.46	0.04	717.21	718.71
+chromium	153.0.8010.12	linux	dumplings	0.25	1	1155	866	32928	webgpu	Wasm128	software	decode	cpu		BrowserWebGpu	true			1.25	0.08	718.58	719.90
+chromium	153.0.8010.12	linux	dumplings	0.25	1	1155	866	32928	webgpu	Wasm128	software	present	cpu	2d	BrowserWebGpu	true		no GPU context: disabled after a trap in the GPU path	1.38	0.05	715.09	716.52
+chromium	153.0.8010.12	linux	dumplings	0.75	2	1155	866	93621	webgpu	Wasm128	software	decode	cpu		BrowserWebGpu	true			8.93	0.06	717.50	726.49
+chromium	153.0.8010.12	linux	dumplings	0.75	2	1155	866	93621	webgpu	Wasm128	software	present	cpu	2d	BrowserWebGpu	true		no GPU context: disabled after a trap in the GPU path	1.66	0.07	716.27	718.00
+chromium	153.0.8010.12	linux	artwork	0.25	1	1178	849	32964	webgpu	Wasm128	software	decode	cpu		BrowserWebGpu	true			1.26	0.05	718.46	719.76
+chromium	153.0.8010.12	linux	artwork	0.25	1	1178	849	32964	webgpu	Wasm128	software	present	cpu	2d	BrowserWebGpu	true		no GPU context: disabled after a trap in the GPU path	0.84	0.05	708.48	709.37
+chromium	153.0.8010.12	linux	artwork	0.75	2	1178	849	99407	webgpu	Wasm128	software	decode	cpu		BrowserWebGpu	true			1.55	0.05	709.22	710.82
+chromium	153.0.8010.12	linux	artwork	0.75	2	1178	849	99407	webgpu	Wasm128	software	present	cpu	2d	BrowserWebGpu	true		no GPU context: disabled after a trap in the GPU path	1.56	0.05	710.52	712.13
+chromium	153.0.8010.12	linux	brochure	0.25	1	841	1189	32824	webgpu	Wasm128	software	decode	cpu		BrowserWebGpu	true			1.57	0.05	729.21	730.83
+chromium	153.0.8010.12	linux	brochure	0.25	1	841	1189	32824	webgpu	Wasm128	software	present	cpu	2d	BrowserWebGpu	true		no GPU context: disabled after a trap in the GPU path	1.48	0.05	722.78	724.31
+chromium	153.0.8010.12	linux	brochure	0.75	1	841	1189	86466	webgpu	Wasm128	software	decode	cpu		BrowserWebGpu	true			1.64	0.07	719.21	720.92
+chromium	153.0.8010.12	linux	brochure	0.75	1	841	1189	86466	webgpu	Wasm128	software	present	cpu	2d	BrowserWebGpu	true		no GPU context: disabled after a trap in the GPU path	1.78	0.04	719.87	721.69
+chromium	153.0.8010.12	linux	patent-scan	0.25	0	825	1212	28041	webgpu	Wasm128	software	decode	cpu		BrowserWebGpu	true			1.38	49.77	714.17	765.33
+chromium	153.0.8010.12	linux	patent-scan	0.25	0	825	1212	28041	webgpu	Wasm128	software	present	cpu	2d	BrowserWebGpu	true		no GPU context: disabled after a trap in the GPU path	1.78	0.03	709.08	710.89
+chromium	153.0.8010.12	linux	patent-scan	0.75	1	825	1212	85887	webgpu	Wasm128	software	decode	cpu		BrowserWebGpu	true			1.50	0.04	712.57	714.10
+chromium	153.0.8010.12	linux	patent-scan	0.75	1	825	1212	85887	webgpu	Wasm128	software	present	cpu	2d	BrowserWebGpu	true		no GPU context: disabled after a trap in the GPU path	1.54	0.03	711.76	713.33
+chromium	153.0.8010.12	linux	line-plot	0.25	0	1000	1000	32827	webgpu	Wasm128	software	decode	cpu		BrowserWebGpu	true			1.66	0.04	711.74	713.44
+chromium	153.0.8010.12	linux	line-plot	0.25	0	1000	1000	32827	webgpu	Wasm128	software	present	cpu	2d	BrowserWebGpu	true		no GPU context: disabled after a trap in the GPU path	1.94	0.03	711.75	713.72
+chromium	153.0.8010.12	linux	line-plot	0.75	1	1000	1000	97944	webgpu	Wasm128	software	decode	cpu		BrowserWebGpu	true			1.69	0.04	706.67	708.41
+chromium	153.0.8010.12	linux	line-plot	0.75	1	1000	1000	97944	webgpu	Wasm128	software	present	cpu	2d	BrowserWebGpu	true		no GPU context: disabled after a trap in the GPU path	1.72	0.04	707.49	709.25
+chromium	153.0.8010.12	linux	clipart	0.25	2	816	1225	28034	webgpu	Wasm128	software	decode	cpu		BrowserWebGpu	true			1.50	0.05	713.08	714.62
+chromium	153.0.8010.12	linux	clipart	0.25	2	816	1225	28034	webgpu	Wasm128	software	present	cpu	2d	BrowserWebGpu	true		no GPU context: disabled after a trap in the GPU path	1.53	0.04	716.36	717.94
+chromium	153.0.8010.12	linux	clipart	0.75	3	816	1225	83202	webgpu	Wasm128	software	decode	cpu		BrowserWebGpu	true			2.24	48.18	719.79	770.21
+chromium	153.0.8010.12	linux	clipart	0.75	3	816	1225	83202	webgpu	Wasm128	software	present	cpu	2d	BrowserWebGpu	true		no GPU context: disabled after a trap in the GPU path	3.83	0.03	713.33	717.19

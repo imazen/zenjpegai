@@ -25,6 +25,8 @@ function need(path, hint) {
 need(join(web, 'dist', 'pkg-simd', 'zenjpegai.js'), 'run: web/scripts/build-wasm.sh simd');
 const haveThreads = existsSync(join(web, 'dist', 'pkg-threads', 'zenjpegai.js'));
 if (!haveThreads) console.warn('pkg-threads not built; site will only offer the simd package (run build-wasm.sh threads to add it)');
+const haveWebgpu = existsSync(join(web, 'dist', 'pkg-webgpu', 'zenjpegai.js'));
+if (!haveWebgpu) console.warn('pkg-webgpu not built; WebGPU synthesis is unavailable (run build-wasm.sh webgpu to add it)');
 const assets = join(web, '.demo-assets');
 need(join(assets, 'manifest.json'), 'run: node web/scripts/fetch-demo-assets.mjs');
 
@@ -35,6 +37,7 @@ cpSync(join(web, 'src'), join(site, 'src'), { recursive: true });
 mkdirSync(join(site, 'dist'), { recursive: true });
 cpSync(join(web, 'dist', 'pkg-simd'), join(site, 'dist', 'pkg-simd'), { recursive: true });
 if (haveThreads) cpSync(join(web, 'dist', 'pkg-threads'), join(site, 'dist', 'pkg-threads'), { recursive: true });
+if (haveWebgpu) cpSync(join(web, 'dist', 'pkg-webgpu'), join(site, 'dist', 'pkg-webgpu'), { recursive: true });
 
 for (const f of ['index.html', 'demo.js', 'demo.css', 'IMAGES.md', 'sw-coi.js', 'coi-loader.js']) {
   cpSync(join(web, 'demo', f), join(site, f));
