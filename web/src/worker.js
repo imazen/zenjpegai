@@ -32,6 +32,19 @@ const gpuMode = new URLSearchParams(self.location.search).get('gpu') || 'auto';
 const gpuSoftwareMode = gpuMode === 'force-software' ? 2 : gpuMode === 'software' ? 1 : 0;
 const cpuPkgBase = new URL(`../dist/pkg-${cpuVariant}/`, import.meta.url);
 
+// `?threads=N` on the worker URL overrides the rayon pool size (thread-scaling benchmarks,
+// tests/threads.spec.ts). The default caps at 16 child workers: the calling thread runs rayon
+// jobs too, so N children mean N+1 busy threads, and on a 32-hwc host (16 physical cores)
+// measured decode saturates at ~16 children and regresses at 31-32
+// (benchmarks/wasm_threads_2026-09-18.tsv: 132 ms mean at 16 vs 162 ms at 32).
+function rayonThreads() {
+  const q = new URL(self.location.href).searchParams.get('threads');
+  const n = q ? Number.parseInt(q, 10) : NaN;
+  return Number.isFinite(n) && n > 0
+    ? Math.min(n, 256)
+    : Math.min(Math.max(1, navigator.hardwareConcurrency || 4), 16);
+}
+
 // Cache namespace for the model bundles. Keys inside it carry the bundle's own `?v=` version
 // token (see fetchBundle), so a bundle whose bytes change under the same file name gets a new
 // key. v1 keys had no version and could pin a stale bundle forever; the bump abandons them and
@@ -153,9 +166,11 @@ const ready = (async () => {
     }
     if (!mod) {
       mod = await import(`${cpuPkgBase}zenjpegai.js`);
-      await mod.default();
+      // Object form: wasm-bindgen's positional `init(module_or_path, memory)` signature is
+      // deprecated and warns. The wasm file defaults to `zenjpegai_bg.wasm` next to the glue.
+      await mod.default({ module_or_path: new URL('zenjpegai_bg.wasm', cpuPkgBase).href });
       if (cpuVariant === 'threads') {
-        await mod.initThreadPool(Math.max(1, navigator.hardwareConcurrency || 4));
+        await mod.initThreadPool(rayonThreads());
       }
     }
     self.postMessage({ type: 'ready', variant, tier: mod.simdTier(), gpu: gpuInfo, gpuError });

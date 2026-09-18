@@ -33,8 +33,13 @@ export class DecoderPool {
    *   back to the CPU packages otherwise; 'software' additionally accepts software adapters
    *   (exercises the GPU code path on a GPU-less host); 'force-software' always takes the
    *   software adapter; 'off' never loads `pkg-webgpu`.
+   * @param {number} [threads] - rayon pool size of each `threads`-variant worker (isolated
+   *   pages only; `worker.js` reads it off `?threads=` on its own URL). Default:
+   *   `min(navigator.hardwareConcurrency, 16)` — measured optimum on a 32-hwc host
+   *   (benchmarks/wasm_threads_2026-09-18.tsv). Benchmarks/tests use it; production callers
+   *   should not.
    */
-  constructor({ modelsBaseUrl, maxWorkers = 4, workerUrl, bundleVersions, gpu = 'auto' } = {}) {
+  constructor({ modelsBaseUrl, maxWorkers = 4, workerUrl, bundleVersions, gpu = 'auto', threads } = {}) {
     if (!modelsBaseUrl) throw new Error('DecoderPool requires modelsBaseUrl');
     // Resolved to an absolute URL against the PAGE's location: workers have their own base URL
     // (the worker script's own location), so a relative modelsBaseUrl passed through as-is would
@@ -53,8 +58,12 @@ export class DecoderPool {
     this._canvasSeq = 0;
     this._maxInflight = 0;
     this._completed = 0;
+    this.threads = threads ?? null;
     const url = new URL(workerUrl || new URL('./worker.js', import.meta.url), typeof location !== 'undefined' ? location.href : undefined);
     url.searchParams.set('gpu', gpu);
+    if (threads) {
+      url.searchParams.set('threads', String(Math.max(1, Math.floor(threads))));
+    }
     for (let i = 0; i < this.size; i++) this._spawn(url);
   }
 
@@ -187,6 +196,7 @@ export class DecoderPool {
   stats() {
     return {
       size: this.size,
+      threads: this.threads,
       isolated: this.isolated,
       inflight: this._pending.size,
       maxInflight: this._maxInflight,

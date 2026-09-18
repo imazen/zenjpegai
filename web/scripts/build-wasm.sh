@@ -68,6 +68,14 @@ for v in "${variants[@]}"; do
   out=$DIST/pkg-$v
   rm -rf "$out"; mkdir -p "$out"
   "$bindgen" --target web --no-typescript --out-dir "$out" --out-name zenjpegai "$in"
+  # wasm-bindgen-rayon's spawned rayon workers init the module with the deprecated positional
+  # signature (`pkg.default(module, memory)` warns once per child worker); rewrite to the
+  # object form in the generated snippet.
+  for helper in "$out"/snippets/wasm-bindgen-rayon-*/src/workerHelpers.no-bundler.js; do
+    [ -f "$helper" ] && sed -i \
+      's/pkg\.default(data\.module, data\.memory)/pkg.default({ module_or_path: data.module, memory: data.memory })/' \
+      "$helper"
+  done
   raw=$(stat -c %s "$out/zenjpegai_bg.wasm")
   "$wasm_opt" -O3 "$out/zenjpegai_bg.wasm" -o "$out/zenjpegai_bg.wasm"
   opt=$(stat -c %s "$out/zenjpegai_bg.wasm")
