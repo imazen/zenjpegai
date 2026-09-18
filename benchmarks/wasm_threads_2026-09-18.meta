@@ -1,0 +1,5 @@
+commit	3054ab5a62a7
+host	dev
+command	npx playwright test tests/threads.spec.ts
+date	2026-09-18
+hardware_concurrency	32
