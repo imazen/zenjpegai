@@ -52,7 +52,7 @@ against reference-produced data passes. "stub" and "partial" mean what they say.
 | `filters::efe_nonlinear` | `filters/EFEnonlinear/EFEnonlinear.py`: `decompress`, `LumaAidedAdaptiveNonlinearFilter_apply`, `apply_OnoffSwitch`, `downsample`, `deinteger` | ported: per-tile two-layer 1x1 network (1 and 4 tiles checked), U-only / V-only / both, on/off masks with values 0, 1, 2 and block sizes 112 / 96, 4:4:4 / 4:2:2 / 4:2:0 sources, odd sizes. Same `Unsupported` formats as EFE linear | `tests/filters_efe_ref.rs`: **bit-identical** to the reference on all 16 streams that enable it (max abs error 0); `tests/decode_ref.rs` as above |
 | `filters::lef` | `filters/LEF/LEFfilter.py` (`decompress`, `adptive_sharpness`), nearest up-sampling as `torch.nn.functional.interpolate` does it (`floor(dst * (in / out))` in f32) | ported: luma only, so every chroma format takes the same path. **Unverified: bit depths other than 8** (the range is taken as `2^bit_depth - 1`; the decoder rejects 10-bit streams before it gets here) | `tests/filters_lef_icci_ref.rs`: fed the reference's own input plane, the output is **bit-identical** to the reference's on 4 streams (`model_id` 1 and 2: two of the four constant rows are exercised), on every tier, threaded or not. `tests/decode_ref.rs::img30_base_lef_bpp050` and `decoder_api_on_filter_streams`: whole decode |
 | `filters::icci` + `model::icci` | `filters/eICCI/{icci_filter.py, icci_models.py, model_idxes.py, params.py}`, `base_layers/conv_layers.py::ResidualBlock_BN_RectKernel`, `tiling.py::_adjust_boundary_tiles`, `image.py::{to_444_, to_format_}`, short lists from `cfg/pipeline.json` | ported for every chroma format the reference implements: 4:4:4, and 4:2:0 / 4:2:2 by up-sampling chroma to 4:4:4 (bicubic, the verified `decoder::output::resize_bicubic`), filtering at luma size, then bilinear down-sampling back (`nn::resize_bilinear` reproduces PyTorch's channels-last kernel bit for bit — weight products rounded once, then nested fused multiply-adds). Per-tile network selection (long and short lists, all three operating points' banks), the filter's own overlapping tiling with the 176-sample boundary adjustment, two-level Haar transform, both trunks on `nn::fast` (batch norm and residual scales folded into the convolutions), networks cached in `Decoder`. **Missing: eICCI tiling combined with a non-displayed border (`Unsupported`, unverified), the HOP network bank (code path shared, no oracle stream selects it), bit depths other than 8** | `tests/filters_lef_icci_ref.rs`: fed the reference's input planes, output within 1.1e-4 (0..255) on 6 streams incl. a 2096x1400 one with six filter tiles and both subsampled forced-encode vectors; bit-identical across tiers. `tests/decode_ref.rs`: `img30_base_eicci_bpp050`, `img30yuv422_base_eicci`, `img01_base_eiccitiles_lef_bpp050`, and `img30yuv420_base_eicci` (non-conformant forced stream, headers rebuilt in the test) |
-| `gpu/` (`zenjpegai-gpu`, separate workspace member; the core crate does not depend on wgpu) | same sources as `model::synthesis` / `model::attention`; runs them as WGSL compute shaders through wgpu 30 | ported: SOP, BOP, HOP synthesis (luma + chroma), synthesis tiling and independent regions, `GpuDecoder` (CPU entropy / latent stage and output stage, GPU synthesis), readback-free `rgba8unorm` presentation; builds for wasm32. **Never run in a browser; no f16**; one tuning pass done (-10% to -22% of device time on BOP and HOP, SOP unchanged), the convolutions still run at a few per cent of the card's f32 peak (`gpu/README.md` "Status") | `gpu/tests/kernels.rs`: every kernel vs `nn::reference` / `nn::fast::math`, max relative error 1.7e-6 (conv, transposed conv), 2.5e-7 (attention), exact copies / shuffles. `gpu/tests/decode_ref.rs`: planes vs reference 3.2e-4 (SOP), 4.3e-4 (BOP), 3.4e-4 (HOP), 6.6e-4 / 5.6e-4 (2096x1400, 6 tiles / 12 tiles in 2 independent regions), bound 3e-3; 8-bit output differs by 1 in 50 / 59 / 35 of 1,491,840 and 348 / 373 of 8,803,200 samples; vs the CPU engine planes differ by at most 9.2e-4. All measured on an **RTX 2080** (NVIDIA 580.178.04, `ZENJPEGAI_GPU_ADAPTER=GeForce just gpu-test`), feature `gpu-tests`; the numbers above are that run and are unchanged by the tuning of 711233ad and 0120c800, which keeps every output's summation order. 8-bit output differs by 1 in 53 / 54 / 33 of 1,491,840 (SOP / BOP / HOP) and 348 / 365 of 8,803,200 (2096x1400, 6 tiles / 12 tiles in 2 independent regions) samples; the `rgba8unorm` presentation texture differs from the CPU output stage in 28 of 1,491,840 samples, all by one step (it was 46,533 until the shader rounded half-to-even itself instead of trusting the driver's float-to-unorm conversion — llvmpipe had agreed, NVIDIA did not). Timings: `benchmarks/gpu_decode_2026-09-17_rtx2080.{tsv,meta}`, `gpu_profile_2026-09-17_rtx2080.{tsv,meta}`, reference software on the same card `gpu_reference_2026-09-17.{tsv,meta}` |
+| `gpu/` (`zenjpegai-gpu`, separate workspace member; the core crate does not depend on wgpu) | same sources as `model::synthesis` / `model::attention`; runs them as WGSL compute shaders through wgpu 30 | ported: SOP, BOP, HOP synthesis (luma + chroma), synthesis tiling and independent regions, `GpuDecoder` (CPU entropy / latent stage and output stage, GPU synthesis), readback-free `rgba8unorm` presentation; builds for wasm32. **Runs in a browser (verified on hardware, 2026-09-18 — row `B1`); no f16**; one tuning pass done (-10% to -22% of device time on BOP and HOP, SOP unchanged), the convolutions still run at a few per cent of the card's f32 peak (`gpu/README.md` "Status") | `gpu/tests/kernels.rs`: every kernel vs `nn::reference` / `nn::fast::math`, max relative error 1.7e-6 (conv, transposed conv), 2.5e-7 (attention), exact copies / shuffles. `gpu/tests/decode_ref.rs`: planes vs reference 3.2e-4 (SOP), 4.3e-4 (BOP), 3.4e-4 (HOP), 6.6e-4 / 5.6e-4 (2096x1400, 6 tiles / 12 tiles in 2 independent regions), bound 3e-3; 8-bit output differs by 1 in 50 / 59 / 35 of 1,491,840 and 348 / 373 of 8,803,200 samples; vs the CPU engine planes differ by at most 9.2e-4. All measured on an **RTX 2080** (NVIDIA 580.178.04, `ZENJPEGAI_GPU_ADAPTER=GeForce just gpu-test`), feature `gpu-tests`; the numbers above are that run and are unchanged by the tuning of 711233ad and 0120c800, which keeps every output's summation order. 8-bit output differs by 1 in 53 / 54 / 33 of 1,491,840 (SOP / BOP / HOP) and 348 / 365 of 8,803,200 (2096x1400, 6 tiles / 12 tiles in 2 independent regions) samples; the `rgba8unorm` presentation texture differs from the CPU output stage in 28 of 1,491,840 samples, all by one step (it was 46,533 until the shader rounded half-to-even itself instead of trusting the driver's float-to-unorm conversion — llvmpipe had agreed, NVIDIA did not). Timings: `benchmarks/gpu_decode_2026-09-17_rtx2080.{tsv,meta}`, `gpu_profile_2026-09-17_rtx2080.{tsv,meta}`, reference software on the same card `gpu_reference_2026-09-17.{tsv,meta}` |
 
 ## Accuracy of the float path (measured, 560x888 test image 00030, upstream b9e573f, torch 1.10.2 CPU)
 
@@ -508,15 +508,20 @@ measured numbers in the status table above when you close an item.
 ### Browser and GPU
 
 - ~~**B1** WebGPU synthesis in the worker/polyfill/demo behind feature detection~~ **Done
-  2026-09-18** (the `webgpu` agent): `pkg-webgpu` third wasm package (`gpu` cargo feature on
-  `zenjpegai-wasm`: async `decode` with CPU fallback on `GpuError`, `initGpu`/`gpuStatus`/
-  `present`/`disableGpu`), `DecoderPool` `gpu` option (`auto|software|force-software|off`),
-  `decodeToCanvas` no-readback presentation through `Blitter`, worker-level trap recovery for
-  wgpu-30's `createBuffer` unwrap panic (the one API-blocking wart — `gpu/README.md` "Known
-  limitations"), `chromium-webgpu` Playwright project + `benchmark-gpu.spec.ts` ->
+  2026-09-18** (the `webgpu` agent, hardened on hardware by `b1bhw`): `pkg-webgpu` third wasm
+  package (`gpu` cargo feature on `zenjpegai-wasm`: async `decode` with CPU fallback on
+  `GpuError`, `initGpu`/`gpuStatus`/`present`/`disableGpu`), `DecoderPool` `gpu` option
+  (`auto|on|software|force-software|off`), `decodeToCanvas` no-readback presentation through
+  `Blitter`, `chromium-webgpu` Playwright project + `benchmark-gpu.spec.ts` ->
   `benchmarks/wasm_decode_2026-09-18_gpu.{tsv,meta}`, size delta in
-  `benchmarks/wasm_size_2026-09-18.md` §7. Verified in-browser on SwiftShader only — **still
-  never run on a hardware WebGPU adapter**. Full detail: `web/README.md` §7.
+  `benchmarks/wasm_size_2026-09-18.md` §7. The `create_buffer_init`/`mappedAtCreation` trap is
+  fixed at the root in `gpu/` (unmapped `create_buffer` + chunked `queue.write_buffer`, native
+  parity re-verified unchanged); **verified on hardware** — RTX 2080 through Dawn/Vulkan in
+  headless Chromium (`WEBGPU_ADAPTER=hardware`, `isFallbackAdapter: false`), all 16 demo
+  streams on `path: 'gpu'`, zero traps. Measured crossover keeps `auto` on the CPU engine at
+  demo sizes (GPU 178-302 ms vs threads 158-287 ms wall at ~1 MP — detail and the `on` opt-in
+  in `web/README.md` §7); Dawn/SwiftShader still loses its device at model-2 load (per-call
+  CPU fallback, no trap).
   **B2 done 2026-09-18** — demo throttling +
   viewport-priority queue landed: one shared queue in `web/src/pool.js` (threads build: exactly
   one decode in flight; simd build: at most `min(navigator.hardwareConcurrency - 1, 4)` —
@@ -579,12 +584,10 @@ Appended by the WebGPU browser agent (`webgpu` workspace), 2026-09-18:
   separately — GPU output is not bit-identical to CPU). All 96 Playwright tests pass across
   chromium / firefox / webkit / chromium-webgpu (83 run per project set, 13 project-gated
   skips).
-- Open: **never run on a hardware GPU adapter** — every in-browser GPU number is SwiftShader
-  (~4.5 s/decode vs ~290 ms CPU at 1 MP, so the JS-side probe correctly keeps software-only
-  browsers on the CPU package without even downloading `pkg-webgpu`). Known wgpu-30 web-backend
-  trap: `create_buffer_init` (mappedAtCreation) buffers over Dawn's staging limit panic instead
-  of returning `GpuError`; mitigated by worker-side `self.onerror` → `disableGpu()` → transparent
-  CPU retry (`timings.gpuError` records the trap) — observed live mid-benchmark. The real fix is
-  in `gpu/src/layers.rs` (see `gpu/README.md` "Known limitations"); this session only documented
-  it there per its scope.
+- ~~Open: never run on a hardware GPU adapter; `create_buffer_init` trap~~ — closed by `b1bhw`
+  2026-09-18: hardware run on the RTX 2080 (adapter `nvidia/turing`, non-fallback) through
+  Dawn/Vulkan; `gpu/` uploads are all unmapped `create_buffer` + chunked `write_buffer` so the
+  staging-limit trap cannot occur (worker `onerror`→`disableGpu`→CPU-retry kept as defence in
+  depth). Remaining: Dawn/SwiftShader loses the device at model-2 load (per-call CPU fallback);
+  `auto` defaults to the CPU engine by measurement (`web/README.md` §7).
 
