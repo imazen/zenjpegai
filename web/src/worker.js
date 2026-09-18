@@ -45,7 +45,28 @@ const isolated = typeof crossOriginIsolated !== 'undefined' && crossOriginIsolat
 const cpuVariant = isolated ? 'threads' : 'simd';
 const gpuMode = new URLSearchParams(self.location.search).get('gpu') || 'auto';
 const gpuSoftwareMode = gpuMode === 'force-software' ? 2 : gpuMode === 'software' ? 1 : 0;
-const cpuPkgBase = new URL(`../dist/pkg-${cpuVariant}/`, import.meta.url);
+
+// The four built packages (`web/dist/pkg-<name>/`). `threads` marks the rayon builds: their
+// CPU entropy/latent stages run on a worker pool (requires cross-origin isolation) and the
+// package exports `initThreadPool`.
+const PACKAGES = {
+  'webgpu-threads': { threads: true },
+  webgpu: { threads: false },
+  threads: { threads: true },
+  simd: { threads: false },
+};
+
+// Instantiate `pkg-<name>` and start its rayon pool if it has one.
+async function loadPackage(name) {
+  const base = new URL(`../dist/pkg-${name}/`, import.meta.url);
+  const m = await import(new URL('zenjpegai.js', base).href);
+  // Object form: wasm-bindgen's positional `init(module_or_path, memory)` signature is
+  // deprecated and warns. The wasm file defaults to `zenjpegai_bg.wasm` next to the glue.
+  await m.default({ module_or_path: new URL('zenjpegai_bg.wasm', base).href });
+  if (PACKAGES[name].threads) await m.initThreadPool(rayonThreads());
+  variant = name;
+  return m;
+}
 
 // `?threads=N` on the worker URL overrides the rayon pool size (thread-scaling benchmarks,
 // tests/threads.spec.ts). The default caps at 16 child workers: the calling thread runs rayon
@@ -177,27 +198,19 @@ const ready = (async () => {
         if (probe && wantGpu && (gpuSoftwareMode >= 1 || !fallbackOnly)) {
           try {
             // Isolated pages get the rayon build (parallel CPU entropy/latent stages);
-            // `pkg-webgpu` is the non-isolated build, and also the fallback if a deployment
-            // was assembled without `pkg-webgpu-threads`.
-            let m;
-            let pkg = null;
-            const names = isolated ? ['pkg-webgpu-threads', 'pkg-webgpu'] : ['pkg-webgpu'];
-            for (const name of names) {
+            // `webgpu` is the non-isolated build, and also the fallback if a deployment
+            // was assembled without `webgpu-threads`.
+            const candidates = isolated ? ['webgpu-threads', 'webgpu'] : ['webgpu'];
+            for (const name of candidates) {
               try {
-                m = await import(new URL(`../dist/${name}/zenjpegai.js`, import.meta.url).href);
-                pkg = name;
+                mod = await loadPackage(name);
                 break;
               } catch { /* package not built into this site; try the next */ }
             }
-            if (!m) throw new Error(`none of ${names.join(', ')} is served`);
-            await m.default(); // fetches `zenjpegai_bg.wasm` next to zenjpegai.js
-            if (typeof m.initThreadPool === 'function') {
-              await m.initThreadPool(rayonThreads());
-            }
-            gpuInfo = await m.initGpu(gpuSoftwareMode);
-            mod = m;
-            variant = pkg.replace('pkg-', '');
+            if (!mod) throw new Error(`none of ${candidates.join(', ')} is served`);
+            gpuInfo = await mod.initGpu(gpuSoftwareMode);
           } catch (err) {
+            mod = null; // a failed initGpu discards the webgpu module; the CPU package loads below
             gpuError = `no usable GPU context: ${String((err && err.message) || err)}`;
           }
         } else if (!probe) {
@@ -212,13 +225,7 @@ const ready = (async () => {
       }
     }
     if (!mod) {
-      mod = await import(`${cpuPkgBase}zenjpegai.js`);
-      // Object form: wasm-bindgen's positional `init(module_or_path, memory)` signature is
-      // deprecated and warns. The wasm file defaults to `zenjpegai_bg.wasm` next to the glue.
-      await mod.default({ module_or_path: new URL('zenjpegai_bg.wasm', cpuPkgBase).href });
-      if (cpuVariant === 'threads') {
-        await mod.initThreadPool(rayonThreads());
-      }
+      mod = await loadPackage(cpuVariant);
     }
     self.postMessage({ type: 'ready', variant, tier: mod.simdTier(), gpu: gpuInfo, gpuError, adapterProbe });
   } catch (err) {
