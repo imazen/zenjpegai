@@ -2,7 +2,7 @@
 # Encode + decode a matrix of configurations with the reference software and dump the decoder's
 # intermediate tensors for the parity tests.
 #
-#   scripts/ref_vectors/make_reference_streams.sh [SET]      SET: smoke (default) | regions | tools | filters | efe | filtertiles | qmap | formats | icci420 | encoder | cubeflags | rate | all
+#   scripts/ref_vectors/make_reference_streams.sh [SET]      SET: smoke (default) | regions | tools | filters | efe | efesolves | filtertiles | qmap | formats | icci420 | encoder | cubeflags | rate | all
 #
 # Output: $OUT/<name>/{stream.bits,encoder.log,tensors.bin,manifest.txt,decoded.png,stdout.log}
 # with OUT=/mnt/v/output/zenjpegai/reference/vectors. Existing streams are kept (delete the
@@ -201,6 +201,28 @@ if [ "$SET" = efe ] || [ "$SET" = all ]; then
   # (a 4:2:2 source coded 4:2:0 is not implemented in the reference encoder.)
   }
 fi
+# EFE-linear solver dumps (`<vector>/efe_solves/`): dump_efe_solves.py re-runs the
+# reference's SplitDecide on the vector's own `EFElinear.in.*` planes and records every
+# lstsq triple, every integerizeTensor pair, and each spec's decision — the oracle for
+# `encoder::filters::efe_linear::tests::oracle`. Additive: writes only efe_solves/.
+efe_solves() { # vector source c_ver c_hor spec...
+  local vector=$1 source=$2 cver=$3 chor=$4; shift 4
+  local dir="$OUT/$vector"
+  if [ -f "$dir/efe_solves/manifest.txt" ]; then echo "== $vector/efe_solves: exists"; return; fi
+  [ -f "$dir/filters/manifest.txt" ] || { echo "!! $vector/filters missing — run the efe set first"; return 1; }
+  echo "== $vector: dumping EFE solver triples ($*)"
+  EFE_CVER=$cver EFE_CHOR=$chor nice -n 19 python "$HERE/dump_efe_solves.py" \
+      "$dir/efe_solves" "$dir/filters" "$source" "$@" > "$dir/dump_efe_solves.log" 2>&1
+}
+if [ "$SET" = efesolves ] || [ "$SET" = all ]; then
+  # Specs mirror the table in encoder::filters::efe_linear::tests::oracle::DUMPS —
+  # spec order on this command line fixes the dump's solve.N numbering, so a change
+  # here must update that table (solve/int/excused counts).
+  efe_solves crop277_efe_f4c5_f3c6_nl "$OUT/_inputs/crop_277x201_8bit_sRGB.png" 1 1 4:5 up2
+  efe_solves img30_c420_efe_f3c5_f4c7_nl "data/test/$IMG30" 2 2 3:5 4:7 up2
+  efe_solves img30_base_efelin_bpp050 "data/test/$IMG30" 1 1 search:1
+fi
+
 if [ "$SET" = filtertiles ] || [ "$SET" = all ]; then
   # eICCI with its own tiling on (upstream's threshold of 2048^2 samples never tiles the test
   # pictures): 1024 tiles, overlap 48, last column narrower than the filter's 176 minimum, so

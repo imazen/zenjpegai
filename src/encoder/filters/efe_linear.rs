@@ -1315,70 +1315,6 @@ pub(crate) fn decide(i: &EfeLinearInput<'_>) -> Result<EfeLinearOutput> {
 #[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
-
-    /// One tensor of a `scripts/ref_vectors/dump_efe_solves.py` dump (`manifest.txt` + `tensors.bin`, the same
-    /// manifest+blob format `tests/common` reads).
-    struct Dump {
-        dtype: String,
-        shape: Vec<usize>,
-        bytes: Vec<u8>,
-    }
-
-    fn load_dump(dir: &std::path::Path) -> Option<HashMap<String, Dump>> {
-        let manifest = std::fs::read_to_string(dir.join("manifest.txt")).ok()?;
-        let blob = std::fs::read(dir.join("tensors.bin")).ok()?;
-        let mut out = HashMap::new();
-        for line in manifest
-            .lines()
-            .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
-        {
-            let f: Vec<&str> = line.split_whitespace().collect();
-            let ndim: usize = f[2].parse().unwrap();
-            let shape: Vec<usize> = f[3..3 + ndim].iter().map(|d| d.parse().unwrap()).collect();
-            let offset: usize = f[3 + ndim].parse().unwrap();
-            let nbytes: usize = f[4 + ndim].parse().unwrap();
-            out.insert(
-                f[0].to_string(),
-                Dump {
-                    dtype: f[1].to_string(),
-                    shape,
-                    bytes: blob[offset..offset + nbytes].to_vec(),
-                },
-            );
-        }
-        Some(out)
-    }
-
-    impl Dump {
-        fn f32(&self) -> Vec<f32> {
-            assert_eq!(self.dtype, "f32");
-            self.bytes
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .map(|b| f32::from_le_bytes(*b))
-                .collect()
-        }
-        fn i64(&self) -> Vec<i64> {
-            assert_eq!(self.dtype, "i64");
-            self.bytes
-                .as_chunks::<8>()
-                .0
-                .iter()
-                .map(|b| i64::from_le_bytes(*b))
-                .collect()
-        }
-        fn i32(&self) -> Vec<i32> {
-            assert_eq!(self.dtype, "i32");
-            self.bytes
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .map(|b| i32::from_le_bytes(*b))
-                .collect()
-        }
-    }
 
     /// `integerize` is `clamp(round_half_even(w * 2048) + 32767, 0, 65535)`.
     #[test]
@@ -1394,565 +1330,781 @@ mod tests {
         assert_eq!(integerize(-64.0), 0);
     }
 
-    /// Every `int.N.in` / `int.N.out` pair the dump holds: `integerizeTensor`'s exact output.
-    #[test]
-    fn integerize_matches_reference_pairs() {
-        let Some(dir) = std::env::var_os("ZENJPEGAI_EFE_DUMP").map(std::path::PathBuf::from) else {
-            return;
-        };
-        let Some(dump) = load_dump(&dir) else { return };
-        let mut n = 0;
-        while let Some(pair) = dump
-            .get(&format!("int.{n}.in"))
-            .zip(dump.get(&format!("int.{n}.out")))
-        {
-            let (inp, out) = (pair.0.f32(), pair.1.i64());
-            assert_eq!(inp.len(), out.len());
-            for (k, (&w, &want)) in inp.iter().zip(&out).enumerate() {
-                assert_eq!(
-                    integerize(w),
-                    want as u32,
-                    "int.{n} element {k}: {w} -> {want}"
+    /// Oracle replay against the `efe_solves/` dumps (every `lstsq` triple and
+    /// `integerizeTensor` pair of `EFElinear.SplitDecide` re-run on a vector's own
+    /// `EFElinear.in.*` planes by `scripts/ref_vectors/dump_efe_solves.py`; the `efesolves`
+    /// set of `make_reference_streams.sh` writes them next to each vector). Like every
+    /// `reference-tests` oracle these hard-fail when the data is absent — there are no
+    /// env-var knobs: which vectors host dumps, their coded subsampling and their spec
+    /// lists are the `DUMPS` table.
+    #[cfg(feature = "reference-tests")]
+    mod oracle {
+        use super::*;
+        use std::collections::HashMap;
+        use std::path::{Path, PathBuf};
+
+        /// One spec `dump_efe_solves.py` ran: `fl:cand`/`up2` (a forced `SplitDecide`
+        /// replayed by `split_decide_matches_forced_reference`) or `search:<model>` (the
+        /// free search, replayed by `decide_matches_reference_free_search`).
+        /// `solves` is the number of `solve.N` triples the spec consumed — pinned, so a
+        /// port that walks a different solve sequence than the reference is caught.
+        struct Spec {
+            name: &'static str,
+            solves: usize,
+        }
+
+        /// One `<vector>/efe_solves/` dump: the vector that hosts it, the *coded* chroma
+        /// subsampling (`c_ver`,`c_hor`; 1 = coded at the source's resolution — every
+        /// dumped source is 4:4:4), its spec list in dump order, and the recorded solve
+        /// and integerize-pair counts. `excused` pins how many solves `solve_stability`
+        /// marks ill-posed: a regression that adds excuses fails on the count.
+        struct EfeDump {
+            vector: &'static str,
+            coded: (usize, usize),
+            specs: &'static [Spec],
+            solves: usize,
+            ints: usize,
+            excused: usize,
+        }
+
+        const DUMPS: &[EfeDump] = &[
+            // crop277_efe_f4c5_f3c6_nl, coded 4:4:4: `4:5 up2`.
+            EfeDump {
+                vector: "crop277_efe_f4c5_f3c6_nl",
+                coded: (1, 1),
+                specs: &[
+                    Spec {
+                        name: "4:5",
+                        solves: 10,
+                    },
+                    Spec {
+                        name: "up2",
+                        solves: 2,
+                    },
+                ],
+                solves: 12,
+                ints: 24,
+                excused: 0,
+            },
+            // img30_c420_efe_f3c5_f4c7_nl, coded 4:2:0: `3:5 4:7 up2`.
+            EfeDump {
+                vector: "img30_c420_efe_f3c5_f4c7_nl",
+                coded: (2, 2),
+                specs: &[
+                    Spec {
+                        name: "3:5",
+                        solves: 50,
+                    },
+                    Spec {
+                        name: "4:7",
+                        solves: 70,
+                    },
+                    Spec {
+                        name: "up2",
+                        solves: 10,
+                    },
+                ],
+                solves: 130,
+                ints: 52,
+                excused: 80,
+            },
+            // img30_base_efelin_bpp050, coded 4:4:4: `search:1` (the free search; it ran
+            // its baseline and one forced candidate before the fl=3 early exit).
+            EfeDump {
+                vector: "img30_base_efelin_bpp050",
+                coded: (1, 1),
+                specs: &[Spec {
+                    name: "search:1",
+                    solves: 4,
+                }],
+                solves: 4,
+                ints: 8,
+                excused: 2,
+            },
+        ];
+
+        /// The reference-vectors root — the same `ZENJPEGAI_VECTORS` convention
+        /// `tests/common::vectors_root` uses (unit tests cannot reach `tests/common`).
+        fn vectors_root() -> PathBuf {
+            std::env::var_os("ZENJPEGAI_VECTORS")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("/mnt/v/output/zenjpegai/reference/vectors"))
+        }
+
+        /// One tensor of a `scripts/ref_vectors/dump_efe_solves.py` dump (`manifest.txt` + `tensors.bin`, the same
+        /// manifest+blob format `tests/common` reads).
+        struct Dump {
+            dtype: String,
+            shape: Vec<usize>,
+            bytes: Vec<u8>,
+        }
+
+        fn load_dump(dir: &Path) -> HashMap<String, Dump> {
+            let read = |name: &str| -> Vec<u8> {
+                std::fs::read(dir.join(name)).unwrap_or_else(|e| {
+                    panic!(
+                        "{}: {e} — run scripts/ref_vectors/make_reference_streams.sh efesolves",
+                        dir.join(name).display()
+                    )
+                })
+            };
+            let manifest = String::from_utf8(read("manifest.txt")).unwrap();
+            let blob = read("tensors.bin");
+            let mut out = HashMap::new();
+            for line in manifest
+                .lines()
+                .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+            {
+                let f: Vec<&str> = line.split_whitespace().collect();
+                let ndim: usize = f[2].parse().unwrap();
+                let shape: Vec<usize> = f[3..3 + ndim].iter().map(|d| d.parse().unwrap()).collect();
+                let offset: usize = f[3 + ndim].parse().unwrap();
+                let nbytes: usize = f[4 + ndim].parse().unwrap();
+                out.insert(
+                    f[0].to_string(),
+                    Dump {
+                        dtype: f[1].to_string(),
+                        shape,
+                        bytes: blob[offset..offset + nbytes].to_vec(),
+                    },
                 );
-            }
-            n += 1;
-        }
-        assert!(n > 0, "{dir:?}: no int.N pairs");
-    }
-
-    /// `||Ax - b||` of a solution `x` on a dumped triple (row-major `a`).
-    fn residual(a: &[f64], b: &[f64], m: usize, n: usize, x: &[f64]) -> f64 {
-        let mut sse = 0.0f64;
-        for r in 0..m {
-            let mut dot = 0.0f64;
-            for c in 0..n {
-                dot += a[r * n + c] * x[c];
-            }
-            let d = dot - b[r];
-            sse += d * d;
-        }
-        sse.sqrt()
-    }
-
-    /// `smin / smax` of `A` (row-major `m x n`), via cyclic Jacobi eigendecomposition of
-    /// `A^T A`. `n` is at most 32 here, so the eigensolver is cheap and deterministic.
-    fn cond_inv(a: &[f64], m: usize, n: usize) -> f64 {
-        let mut g = alloc::vec![0.0f64; n * n];
-        for r in 0..m {
-            let row = &a[r * n..(r + 1) * n];
-            for i in 0..n {
-                for j in 0..=i {
-                    g[i * n + j] += row[i] * row[j];
-                }
-            }
-        }
-        for i in 0..n {
-            for j in 0..i {
-                g[j * n + i] = g[i * n + j];
-            }
-        }
-        // Cyclic Jacobi sweeps: rotate p,q to zero the off-diagonal.
-        for _ in 0..30 {
-            let mut off = 0.0f64;
-            for i in 0..n {
-                for j in 0..i {
-                    off = off.max(g[i * n + j].abs());
-                }
-            }
-            if off == 0.0 {
-                break;
-            }
-            for p in 0..n {
-                for q in p + 1..n {
-                    let (app, aqq, apq) = (g[p * n + p], g[q * n + q], g[p * n + q]);
-                    if apq == 0.0 {
-                        continue;
-                    }
-                    let theta = (aqq - app) / (2.0 * apq);
-                    let t = theta.signum() / (theta.abs() + (theta * theta + 1.0).sqrt());
-                    let (c, s) = (1.0 / (t * t + 1.0).sqrt(), t / (t * t + 1.0).sqrt());
-                    for k in 0..n {
-                        let (gkp, gkq) = (g[k * n + p], g[k * n + q]);
-                        g[k * n + p] = c * gkp - s * gkq;
-                        g[k * n + q] = s * gkp + c * gkq;
-                    }
-                    for k in 0..n {
-                        let (gpk, gqk) = (g[p * n + k], g[q * n + k]);
-                        g[p * n + k] = c * gpk - s * gqk;
-                        g[q * n + k] = s * gpk + c * gqk;
-                    }
-                }
-            }
-        }
-        let mut lo = f64::MAX;
-        let mut hi = 0.0f64;
-        for i in 0..n {
-            lo = lo.min(g[i * n + i].max(0.0));
-            hi = hi.max(g[i * n + i]);
-        }
-        if hi == 0.0 {
-            return 0.0;
-        }
-        (lo / hi).sqrt()
-    }
-
-    /// Per solve: `true` when the dumped MKL solution attains the minimal residual *and* the
-    /// system is comfortably full-rank (`cond(A) < 100`), the case where the minimizer is
-    /// unique and `lstsq` parity is meaningful. MKL's f32 `gelsy` truncates rank near its
-    /// `rcond ~ eps32 * max(m, n)` threshold — reproducibly worse than the f64 minimizer and
-    /// nondeterministic across calls — and even where it nominally solves, near-deficient
-    /// systems admit a manifold of minimizers so its choice is one of many. On all captured
-    /// dumps `smin/smax >= 3e-3` coincides exactly with zero code divergence.
-    fn solve_stability(dump: &HashMap<String, Dump>) -> Vec<bool> {
-        let mut out = Vec::new();
-        let mut n = 0;
-        while let (Some(a), Some(b), Some(x)) = (
-            dump.get(&format!("solve.{n}.A")),
-            dump.get(&format!("solve.{n}.B")),
-            dump.get(&format!("solve.{n}.X")),
-        ) {
-            let (m, cols) = (a.shape[1], a.shape[2]);
-            let af: Vec<f64> = a.f32().iter().map(|&v| v as f64).collect();
-            let bf: Vec<f64> = b.f32().iter().map(|&v| v as f64).collect();
-            let xf: Vec<f64> = x.f32().iter().map(|&v| v as f64).collect();
-            let mine = lstsq(&af, &bf, m, cols).unwrap();
-            let res_mine = residual(&af, &bf, m, cols, &mine);
-            let res_ref = residual(&af, &bf, m, cols, &xf);
-            let well_posed = res_ref <= res_mine * 1.01 + 1e-3 && cond_inv(&af, m, cols) > 1e-2;
-            out.push(well_posed);
-            n += 1;
-        }
-        out
-    }
-
-    /// Every `solve.N.{A,B,X}` triple: the deterministic f64 `lstsq` must never be
-    /// meaningfully worse than MKL's dumped solution, and must produce identical
-    /// *integerised* weights on every stable solve (where MKL attains the minimizer).
-    /// Borderline systems — where MKL's f32 rank estimate truncates — are reported, not
-    /// asserted: the reference itself is nondeterministic there (see the module docs).
-    #[test]
-    fn lstsq_matches_reference_solves() {
-        let Some(dir) = std::env::var_os("ZENJPEGAI_EFE_DUMP").map(std::path::PathBuf::from) else {
-            return;
-        };
-        let Some(dump) = load_dump(&dir) else { return };
-        let stable = solve_stability(&dump);
-        assert!(!stable.is_empty(), "{dir:?}: no solve.N triples");
-        let (mut exact, mut excused) = (0usize, 0usize);
-        for (n, &well_posed) in stable.iter().enumerate() {
-            let (m, cols) = (
-                dump[&format!("solve.{n}.A")].shape[1],
-                dump[&format!("solve.{n}.A")].shape[2],
-            );
-            let (a, b, x) = (
-                dump[&format!("solve.{n}.A")].f32(),
-                dump[&format!("solve.{n}.B")].f32(),
-                dump[&format!("solve.{n}.X")].f32(),
-            );
-            let af: Vec<f64> = a.iter().map(|&v| v as f64).collect();
-            let bf: Vec<f64> = b.iter().map(|&v| v as f64).collect();
-            let xf: Vec<f64> = x.iter().map(|&v| v as f64).collect();
-            let got = lstsq(&af, &bf, m, cols).unwrap();
-            let res_mine = residual(&af, &bf, m, cols, &got);
-            let res_ref = residual(&af, &bf, m, cols, &xf);
-            assert!(
-                res_mine <= res_ref * 1.01 + 1e-3,
-                "solve.{n}: residual {res_mine} worse than reference's {res_ref}"
-            );
-            let mut code_diffs = 0usize;
-            for (k, (&g, &r)) in got.iter().zip(&x).enumerate() {
-                if integerize(g as f32) != integerize(r) {
-                    code_diffs += 1;
-                    eprintln!("solve.{n} col {k}: got {g} ref {r} (codes differ)");
-                }
-            }
-            if code_diffs == 0 {
-                exact += 1;
-            } else {
-                excused += 1;
-                assert!(
-                    !well_posed,
-                    "solve.{n}: {m}x{cols}, {code_diffs}/{cols} codes diverged on a well-posed system"
-                );
-                eprintln!(
-                    "solve.{n}: {m}x{cols} ill-posed (ref residual {res_ref:.3} vs min {res_mine:.3}, {code_diffs} code diffs)"
-                );
-            }
-        }
-        eprintln!("{dir:?}: {exact} solves bit-exact, {excused} excused (ill-posed)");
-    }
-
-    /// `f64` tensor of the dump (the `*.means` entries).
-    impl Dump {
-        fn f64(&self) -> Vec<f64> {
-            assert_eq!(self.dtype, "f64");
-            self.bytes
-                .as_chunks::<8>()
-                .0
-                .iter()
-                .map(|b| f64::from_le_bytes(*b))
-                .collect()
-        }
-    }
-
-    fn tensor(d: &Dump) -> Tensor<f32> {
-        let f = d.f32();
-        Tensor::from_vec(d.shape[0] * d.shape[1], d.shape[2], d.shape[3], f).unwrap()
-    }
-
-    /// The `DecideCtx` `decide` builds, factored out so the dump-replay tests can pin the
-    /// coded subsampling. `c_ver`/`c_hor` are the *coded* subsampling (1 = full resolution);
-    /// the dumps' source is always 4:4:4.
-    fn dump_ctx(
-        eng: &Engine,
-        org: &Planes,
-        rec: &Planes,
-        c_ver: usize,
-        c_hor: usize,
-    ) -> (DecideCtx, [f64; 2]) {
-        let (fv, fh) = (2usize, 2usize);
-        let (s0, s1) = (org.u.h.div_ceil(fv), org.u.w.div_ceil(fh));
-        let mean = [plane_mean(&rec.u), plane_mean(&rec.v)];
-        let luma: Vec<Phase> = (0..4)
-            .map(|i| phase_plane(eng, &rec.y, (2, 2), (i / 2, i % 2), (s0, s1), 0.0))
-            .collect::<Result<_>>()
-            .unwrap();
-        let luma: [Phase; 4] = luma.try_into().map_err(|_| ()).unwrap();
-        let apply_luma = Phases::new(eng, 1, 1, &rec.y).unwrap();
-        let build = |src: &Tensor<f32>, off: f32| -> [Option<Phase>; 4] {
-            let mut out: [Option<Phase>; 4] = [None, None, None, None];
-            for py in 0..fv {
-                for px in 0..fh {
-                    out[py * 2 + px] =
-                        Some(phase_plane(eng, src, (fv, fh), (py, px), (s0, s1), off).unwrap());
-                }
             }
             out
-        };
-        let coded_444 = c_ver == 1 && c_hor == 1;
-        let chroma = [build(&rec.u, mean[0] as f32), build(&rec.v, mean[1] as f32)];
-        let upsampled = [
-            upsampled_phases(&chroma[0], coded_444, (fv, fh), (s0, s1)),
-            upsampled_phases(&chroma[1], coded_444, (fv, fh), (s0, s1)),
-        ];
-        (
-            DecideCtx {
-                s0,
-                s1,
-                fv,
-                fh,
-                coded_444,
-                luma,
-                chroma,
-                org: [build(&org.u, 0.0), build(&org.v, 0.0)],
-                upsampled,
-                apply_luma,
-            },
-            mean,
-        )
-    }
-
-    /// Replay every `<fl>:<cand>` / `up2` spec the dump recorded, in dump order
-    /// (`ZENJPEGAI_EFE_SPECS`, comma separated — the order `scripts/ref_vectors/dump_efe_solves.py` ran them, which
-    /// fixes the `solve.N` numbering). `ZENJPEGAI_EFE_CVER` is the coded subsampling
-    /// `c_ver,c_hor` (`1,1` = coded 4:4:4, `2,2` = coded 4:2:0).
-    ///
-    /// Per region/plane the reference solves are stable-checked: taps fed by solves where
-    /// MKL attained the minimizer must match bit-exactly; taps fed by MKL-truncated solves
-    /// are reported only (the reference is nondeterministic there). `split_decide` is run
-    /// twice and must be self-identical — the port is deterministic where MKL is not.
-    #[test]
-    fn split_decide_matches_forced_reference() {
-        let Some(dir) = std::env::var_os("ZENJPEGAI_EFE_DUMP").map(std::path::PathBuf::from) else {
-            return;
-        };
-        let Some(dump) = load_dump(&dir) else { return };
-        let specs = std::env::var("ZENJPEGAI_EFE_SPECS").unwrap_or_default();
-        if specs.trim().is_empty() {
-            return;
         }
-        let cver = std::env::var("ZENJPEGAI_EFE_CVER").unwrap_or_else(|_| "1,1".into());
-        let (c_ver, c_hor) = {
-            let mut it = cver.split(',').map(|v| v.parse().unwrap());
-            (it.next().unwrap(), it.next().unwrap())
-        };
-        let planes = |k: &str| Planes {
-            y: tensor(&dump[&format!("{k}.a")]),
-            u: tensor(&dump[&format!("{k}.b")]),
-            v: tensor(&dump[&format!("{k}.c")]),
-        };
-        let (org, rec) = (planes("org"), planes("rec"));
-        let eng = Engine::new();
-        let (ctx, mean) = dump_ctx(&eng, &org, &rec, c_ver, c_hor);
-        let stable = solve_stability(&dump);
-        // Solves per (region, plane): coded 4:4:4 solves one phase (its X feeds all four
-        // chroma phases and the luma half); subsampled-coded solves phases 0..=3 then the
-        // luma refine.
-        let spp = if ctx.coded_444 { 1 } else { 5 };
-        let mut cursor = 0usize;
-        for spec in specs.split(',') {
-            let (fl, cand) = if spec == "up2" {
-                (1usize, 0usize)
-            } else {
-                let mut it = spec.split(':').map(|v| v.parse().unwrap());
-                (it.next().unwrap(), it.next().unwrap())
-            };
-            let out = split_decide(&ctx, &eng, &[fl], &[cand], BETAS[1], mean, &org, &rec).unwrap();
-            // Determinism: a second run must produce identical codes and decisions.
-            let out2 =
-                split_decide(&ctx, &eng, &[fl], &[cand], BETAS[1], mean, &org, &rec).unwrap();
-            for p in 0..2 {
-                assert_eq!(out.planes[p].cand, out2.planes[p].cand);
-                assert_eq!(out.planes[p].chroma, out2.planes[p].chroma);
-                assert_eq!(out.planes[p].luma, out2.planes[p].luma);
+
+        impl Dump {
+            fn f32(&self) -> Vec<f32> {
+                assert_eq!(self.dtype, "f32");
+                self.bytes
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|b| f32::from_le_bytes(*b))
+                    .collect()
             }
-            if let Some(m) = dump.get(&format!("{spec}.means")) {
-                assert_eq!(mean, [m.f64()[0], m.f64()[1]], "{spec} mean1/mean2");
+            fn i64(&self) -> Vec<i64> {
+                assert_eq!(self.dtype, "i64");
+                self.bytes
+                    .as_chunks::<8>()
+                    .0
+                    .iter()
+                    .map(|b| i64::from_le_bytes(*b))
+                    .collect()
             }
-            // Each `SplitDecide` solves the baseline first (`searchCore(1, cands[0])`:
-            // one region, planes U then V), then the pinned candidate's regions.
-            let base0 = cursor;
-            cursor += 2 * spp;
-            let nregions = SPLITS[cand].len();
-            // The `fl == 1 && numSplit == 1` forced run is skipped upstream, so an `up2`
-            // spec's winner is the baseline itself.
-            let forced_skipped = fl == 1 && nregions == 1;
-            // Solve indices feeding (region k, plane p) of the forced run.
-            let forced_base = |k: usize, p: usize| base0 + 2 * spp + (k * 2 + p) * spp;
-            if !forced_skipped {
-                cursor += nregions * 2 * spp;
+            fn i32(&self) -> Vec<i32> {
+                assert_eq!(self.dtype, "i32");
+                self.bytes
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|b| i32::from_le_bytes(*b))
+                    .collect()
             }
-            // The solve indices feeding the winner's region `k` of plane `p`: the baseline
-            // block when candidate 0 (or the skip) won, the forced block otherwise. A
-            // compare failure is a bug only when every solve feeding the compared data was
-            // well-posed — near-deficient systems give MKL a nondeterministic choice.
-            let winner_base = |k: usize, p: usize| {
-                if forced_skipped || out.planes[p].cand == 0 {
-                    base0 + p * spp // baseline winner
-                } else {
-                    forced_base(k, p)
+            /// `f64` tensor of the dump (the `*.means` entries).
+            fn f64(&self) -> Vec<f64> {
+                assert_eq!(self.dtype, "f64");
+                self.bytes
+                    .as_chunks::<8>()
+                    .0
+                    .iter()
+                    .map(|b| f64::from_le_bytes(*b))
+                    .collect()
+            }
+        }
+
+        /// Every `int.N.in` / `int.N.out` pair the dump holds: `integerizeTensor`'s exact output.
+        #[test]
+        fn integerize_matches_reference_pairs() {
+            for e in DUMPS {
+                let dump = load_dump(&vectors_root().join(e.vector).join("efe_solves"));
+                let mut n = 0;
+                while let Some(pair) = dump
+                    .get(&format!("int.{n}.in"))
+                    .zip(dump.get(&format!("int.{n}.out")))
+                {
+                    let (inp, out) = (pair.0.f32(), pair.1.i64());
+                    assert_eq!(inp.len(), out.len());
+                    for (k, (&w, &want)) in inp.iter().zip(&out).enumerate() {
+                        assert_eq!(
+                            integerize(w),
+                            want as u32,
+                            "{} int.{n} element {k}: {w} -> {want}",
+                            e.vector
+                        );
+                    }
+                    n += 1;
                 }
-            };
-            let posed = |k: usize, p: usize| -> bool {
-                let base = winner_base(k, p);
-                stable[base..base + spp].iter().all(|&s| s)
-            };
-            if let Some(m) = dump.get(&format!("{spec}.meta")) {
-                let want = m.i32();
-                for p in 0..2 {
-                    if out.planes[p].cand != want[p] as usize {
-                        // The decision is excused when any solve on either search path was
-                        // ill-posed: the reference's own draw is not reproducible then.
-                        let excused = !(0..nregions.max(1)).all(|k| posed(k, p));
-                        assert!(
-                            excused,
-                            "{spec}: cand[{p}] got {} want {} on well-posed solves",
-                            out.planes[p].cand, want[p]
-                        );
-                        eprintln!(
-                            "{spec}: cand[{p}] got {} want {} (ill-posed solves — reported)",
-                            out.planes[p].cand, want[p]
-                        );
+                assert_eq!(n, e.ints, "{}: int.N pair count", e.vector);
+            }
+        }
+
+        /// `||Ax - b||` of a solution `x` on a dumped triple (row-major `a`).
+        fn residual(a: &[f64], b: &[f64], m: usize, n: usize, x: &[f64]) -> f64 {
+            let mut sse = 0.0f64;
+            for r in 0..m {
+                let mut dot = 0.0f64;
+                for c in 0..n {
+                    dot += a[r * n + c] * x[c];
+                }
+                let d = dot - b[r];
+                sse += d * d;
+            }
+            sse.sqrt()
+        }
+
+        /// `smin / smax` of `A` (row-major `m x n`), via cyclic Jacobi eigendecomposition of
+        /// `A^T A`. `n` is at most 32 here, so the eigensolver is cheap and deterministic.
+        fn cond_inv(a: &[f64], m: usize, n: usize) -> f64 {
+            let mut g = alloc::vec![0.0f64; n * n];
+            for r in 0..m {
+                let row = &a[r * n..(r + 1) * n];
+                for i in 0..n {
+                    for j in 0..=i {
+                        g[i * n + j] += row[i] * row[j];
                     }
                 }
             }
-            // `spec.{U,V,U2,V2}.{k}` records the *winner's* filter list: for a baseline
-            // winner only region 0 exists, fed by the baseline solves.
-            for p in 0..2 {
-                let (u, u2) = if p == 0 { ("U", "U2") } else { ("V", "V2") };
-                let want_meta = dump
-                    .get(&format!("{spec}.meta"))
-                    .map(|m| m.i32()[p] as usize);
-                if want_meta != Some(out.planes[p].cand) {
-                    continue; // different winner: filter lists aren't comparable
+            for i in 0..n {
+                for j in 0..i {
+                    g[j * n + i] = g[i * n + j];
                 }
-                for k in 0..nregions.max(1) {
-                    let Some(want_c) = dump.get(&format!("{spec}.{u}.{k}")) else {
-                        break;
-                    };
-                    let want_c = want_c.i64();
-                    let want_l = dump[&format!("{spec}.{u2}.{k}")].i64();
-                    let base = winner_base(k, p);
-                    let solves = &stable[base..base + spp];
-                    let taps = out.planes[p].filter_len * out.planes[p].filter_len;
-                    let mut diffs = 0usize;
-                    if ctx.coded_444 {
-                        // The dump stores four identical phases; the set carries one.
-                        assert_eq!(out.planes[p].chroma[k].len(), taps);
-                        for (k2, &w) in out.planes[p].chroma[k].iter().enumerate() {
-                            diffs += (w as i64 != want_c[k2]) as usize;
+            }
+            // Cyclic Jacobi sweeps: rotate p,q to zero the off-diagonal.
+            for _ in 0..30 {
+                let mut off = 0.0f64;
+                for i in 0..n {
+                    for j in 0..i {
+                        off = off.max(g[i * n + j].abs());
+                    }
+                }
+                if off == 0.0 {
+                    break;
+                }
+                for p in 0..n {
+                    for q in p + 1..n {
+                        let (app, aqq, apq) = (g[p * n + p], g[q * n + q], g[p * n + q]);
+                        if apq == 0.0 {
+                            continue;
                         }
+                        let theta = (aqq - app) / (2.0 * apq);
+                        let t = theta.signum() / (theta.abs() + (theta * theta + 1.0).sqrt());
+                        let (c, s) = (1.0 / (t * t + 1.0).sqrt(), t / (t * t + 1.0).sqrt());
+                        for k in 0..n {
+                            let (gkp, gkq) = (g[k * n + p], g[k * n + q]);
+                            g[k * n + p] = c * gkp - s * gkq;
+                            g[k * n + q] = s * gkp + c * gkq;
+                        }
+                        for k in 0..n {
+                            let (gpk, gqk) = (g[p * n + k], g[q * n + k]);
+                            g[p * n + k] = c * gpk - s * gqk;
+                            g[q * n + k] = s * gpk + c * gqk;
+                        }
+                    }
+                }
+            }
+            let mut lo = f64::MAX;
+            let mut hi = 0.0f64;
+            for i in 0..n {
+                lo = lo.min(g[i * n + i].max(0.0));
+                hi = hi.max(g[i * n + i]);
+            }
+            if hi == 0.0 {
+                return 0.0;
+            }
+            (lo / hi).sqrt()
+        }
+
+        /// Per dumped solve: whether it is *stable* — the dumped MKL solution attains the
+        /// minimal residual (within 1 % + a 1e-3 absolute floor for near-zero residuals)
+        /// *and* the system is comfortably full-rank (`smin/smax > 1e-2`), the case where
+        /// the minimizer is unique and `lstsq` parity is meaningful. MKL's f32 `gelsy`
+        /// truncates rank near its `rcond ~ eps32 * max(m, n)` threshold — reproducibly
+        /// worse than the f64 minimizer and nondeterministic across calls — and even where
+        /// it nominally solves, near-deficient systems admit a manifold of minimizers so
+        /// its choice is one of many. An excused (unstable) solve therefore always has
+        /// `smin/smax <= 1e-2` or a reference residual > 1 % above the f64 minimum.
+        fn solve_stability(dump: &HashMap<String, Dump>) -> Vec<bool> {
+            let mut out = Vec::new();
+            let mut n = 0;
+            while let (Some(a), Some(b), Some(x)) = (
+                dump.get(&format!("solve.{n}.A")),
+                dump.get(&format!("solve.{n}.B")),
+                dump.get(&format!("solve.{n}.X")),
+            ) {
+                let (m, cols) = (a.shape[1], a.shape[2]);
+                let af: Vec<f64> = a.f32().iter().map(|&v| v as f64).collect();
+                let bf: Vec<f64> = b.f32().iter().map(|&v| v as f64).collect();
+                let xf: Vec<f64> = x.f32().iter().map(|&v| v as f64).collect();
+                let mine = lstsq(&af, &bf, m, cols).unwrap();
+                let res_mine = residual(&af, &bf, m, cols, &mine);
+                let res_ref = residual(&af, &bf, m, cols, &xf);
+                let well_posed = res_ref <= res_mine * 1.01 + 1e-3 && cond_inv(&af, m, cols) > 1e-2;
+                out.push(well_posed);
+                n += 1;
+            }
+            out
+        }
+
+        /// Every `solve.N.{A,B,X}` triple: the deterministic f64 `lstsq` must never be
+        /// meaningfully worse than MKL's dumped solution, and must produce identical
+        /// *integerised* weights on every stable solve (where MKL attains the minimizer).
+        /// Borderline systems — where MKL's f32 rank estimate truncates — are reported and
+        /// counted against the dump's pinned `excused` count: the reference itself is
+        /// nondeterministic there (see the module docs), but a port regression that adds
+        /// excuses fails the count.
+        #[test]
+        fn lstsq_matches_reference_solves() {
+            for e in DUMPS {
+                let dump = load_dump(&vectors_root().join(e.vector).join("efe_solves"));
+                let stable = solve_stability(&dump);
+                assert_eq!(stable.len(), e.solves, "{}: solve.N count", e.vector);
+                let (mut exact, mut excused) = (0usize, 0usize);
+                for (n, &well_posed) in stable.iter().enumerate() {
+                    let (m, cols) = (
+                        dump[&format!("solve.{n}.A")].shape[1],
+                        dump[&format!("solve.{n}.A")].shape[2],
+                    );
+                    let (a, b, x) = (
+                        dump[&format!("solve.{n}.A")].f32(),
+                        dump[&format!("solve.{n}.B")].f32(),
+                        dump[&format!("solve.{n}.X")].f32(),
+                    );
+                    let af: Vec<f64> = a.iter().map(|&v| v as f64).collect();
+                    let bf: Vec<f64> = b.iter().map(|&v| v as f64).collect();
+                    let xf: Vec<f64> = x.iter().map(|&v| v as f64).collect();
+                    let got = lstsq(&af, &bf, m, cols).unwrap();
+                    let res_mine = residual(&af, &bf, m, cols, &got);
+                    let res_ref = residual(&af, &bf, m, cols, &xf);
+                    assert!(
+                        res_mine <= res_ref * 1.01 + 1e-3,
+                        "{} solve.{n}: residual {res_mine} worse than reference's {res_ref}",
+                        e.vector
+                    );
+                    let mut code_diffs = 0usize;
+                    for (k, (&g, &r)) in got.iter().zip(&x).enumerate() {
+                        if integerize(g as f32) != integerize(r) {
+                            code_diffs += 1;
+                            eprintln!(
+                                "{} solve.{n} col {k}: got {g} ref {r} (codes differ)",
+                                e.vector
+                            );
+                        }
+                    }
+                    if code_diffs == 0 {
+                        exact += 1;
                     } else {
-                        assert_eq!(out.planes[p].chroma[k].len(), 4 * taps);
-                        for phase in 0..4 {
-                            for (k2, &w) in out.planes[p].chroma[k]
-                                [phase * taps..(phase + 1) * taps]
-                                .iter()
-                                .enumerate()
-                            {
-                                diffs += (w as i64 != want_c[phase * taps + k2]) as usize;
+                        excused += 1;
+                        assert!(
+                            !well_posed,
+                            "{} solve.{n}: {m}x{cols}, {code_diffs}/{cols} codes diverged on a well-posed system",
+                            e.vector
+                        );
+                        eprintln!(
+                            "{} solve.{n}: {m}x{cols} ill-posed (smin/smax {:.3e}, ref residual {res_ref:.3} vs min {res_mine:.3}, {code_diffs} code diffs)",
+                            e.vector,
+                            cond_inv(&af, m, cols)
+                        );
+                    }
+                }
+                assert_eq!(
+                    excused, e.excused,
+                    "{}: excused-solve count changed — the ill-posed gate must not silently grow",
+                    e.vector
+                );
+                eprintln!(
+                    "{}: {exact}/{} solves bit-exact, {excused} excused (ill-posed)",
+                    e.vector,
+                    stable.len()
+                );
+            }
+        }
+
+        fn tensor(d: &Dump) -> Tensor<f32> {
+            let f = d.f32();
+            Tensor::from_vec(d.shape[0] * d.shape[1], d.shape[2], d.shape[3], f).unwrap()
+        }
+
+        fn planes(dump: &HashMap<String, Dump>, k: &str) -> Planes {
+            Planes {
+                y: tensor(&dump[&format!("{k}.a")]),
+                u: tensor(&dump[&format!("{k}.b")]),
+                v: tensor(&dump[&format!("{k}.c")]),
+            }
+        }
+
+        /// The `DecideCtx` `decide` builds, factored out so the dump-replay tests can pin the
+        /// coded subsampling. `c_ver`/`c_hor` are the *coded* subsampling (1 = full resolution);
+        /// the dumps' source is always 4:4:4.
+        fn dump_ctx(
+            eng: &Engine,
+            org: &Planes,
+            rec: &Planes,
+            c_ver: usize,
+            c_hor: usize,
+        ) -> (DecideCtx, [f64; 2]) {
+            let (fv, fh) = (2usize, 2usize);
+            let (s0, s1) = (org.u.h.div_ceil(fv), org.u.w.div_ceil(fh));
+            let mean = [plane_mean(&rec.u), plane_mean(&rec.v)];
+            let luma: Vec<Phase> = (0..4)
+                .map(|i| phase_plane(eng, &rec.y, (2, 2), (i / 2, i % 2), (s0, s1), 0.0))
+                .collect::<Result<_>>()
+                .unwrap();
+            let luma: [Phase; 4] = luma.try_into().map_err(|_| ()).unwrap();
+            let apply_luma = Phases::new(eng, 1, 1, &rec.y).unwrap();
+            let build = |src: &Tensor<f32>, off: f32| -> [Option<Phase>; 4] {
+                let mut out: [Option<Phase>; 4] = [None, None, None, None];
+                for py in 0..fv {
+                    for px in 0..fh {
+                        out[py * 2 + px] =
+                            Some(phase_plane(eng, src, (fv, fh), (py, px), (s0, s1), off).unwrap());
+                    }
+                }
+                out
+            };
+            let coded_444 = c_ver == 1 && c_hor == 1;
+            let chroma = [build(&rec.u, mean[0] as f32), build(&rec.v, mean[1] as f32)];
+            let upsampled = [
+                upsampled_phases(&chroma[0], coded_444, (fv, fh), (s0, s1)),
+                upsampled_phases(&chroma[1], coded_444, (fv, fh), (s0, s1)),
+            ];
+            (
+                DecideCtx {
+                    s0,
+                    s1,
+                    fv,
+                    fh,
+                    coded_444,
+                    luma,
+                    chroma,
+                    org: [build(&org.u, 0.0), build(&org.v, 0.0)],
+                    upsampled,
+                    apply_luma,
+                },
+                mean,
+            )
+        }
+
+        /// Replay every `<fl>:<cand>` / `up2` spec the dump recorded, in dump order — the
+        /// order `dump_efe_solves.py` ran them is what fixes the `solve.N` numbering, and
+        /// `Spec::solves` pins how many triples each spec consumed (`search:` specs are the
+        /// free-search test's; their recorded count is only checked off the cursor here).
+        ///
+        /// Per region/plane the reference solves are stable-checked: taps fed by solves where
+        /// MKL attained the minimizer must match bit-exactly; taps fed by MKL-truncated solves
+        /// are reported only (the reference is nondeterministic there). `split_decide` is run
+        /// twice and must be self-identical — the port is deterministic where MKL is not.
+        #[test]
+        fn split_decide_matches_forced_reference() {
+            for e in DUMPS {
+                let dump = load_dump(&vectors_root().join(e.vector).join("efe_solves"));
+                let (org, rec) = (planes(&dump, "org"), planes(&dump, "rec"));
+                let eng = Engine::new();
+                let (ctx, mean) = dump_ctx(&eng, &org, &rec, e.coded.0, e.coded.1);
+                let stable = solve_stability(&dump);
+                // Solves per (region, plane): coded 4:4:4 solves one phase (its X feeds all four
+                // chroma phases and the luma half); subsampled-coded solves phases 0..=3 then the
+                // luma refine.
+                let spp = if ctx.coded_444 { 1 } else { 5 };
+                let mut cursor = 0usize;
+                for spec in e.specs {
+                    let name = spec.name;
+                    if name.starts_with("search:") {
+                        // The free search's solves are replayed by
+                        // `decide_matches_reference_free_search`; here they only advance
+                        // the cursor past the triples the dump recorded for them.
+                        cursor += spec.solves;
+                        continue;
+                    }
+                    let base0 = cursor;
+                    let (fl, cand) = if name == "up2" {
+                        (1usize, 0usize)
+                    } else {
+                        let mut it = name.split(':').map(|v| v.parse().unwrap());
+                        (it.next().unwrap(), it.next().unwrap())
+                    };
+                    let out = split_decide(&ctx, &eng, &[fl], &[cand], BETAS[1], mean, &org, &rec)
+                        .unwrap();
+                    // Determinism: a second run must produce identical codes and decisions.
+                    let out2 = split_decide(&ctx, &eng, &[fl], &[cand], BETAS[1], mean, &org, &rec)
+                        .unwrap();
+                    for p in 0..2 {
+                        assert_eq!(out.planes[p].cand, out2.planes[p].cand);
+                        assert_eq!(out.planes[p].chroma, out2.planes[p].chroma);
+                        assert_eq!(out.planes[p].luma, out2.planes[p].luma);
+                    }
+                    if let Some(m) = dump.get(&format!("{name}.means")) {
+                        assert_eq!(mean, [m.f64()[0], m.f64()[1]], "{name} mean1/mean2");
+                    }
+                    // Each `SplitDecide` solves the baseline first (`searchCore(1, cands[0])`:
+                    // one region, planes U then V), then the pinned candidate's regions.
+                    cursor += 2 * spp;
+                    let nregions = SPLITS[cand].len();
+                    // The `fl == 1 && numSplit == 1` forced run is skipped upstream, so an `up2`
+                    // spec's winner is the baseline itself.
+                    let forced_skipped = fl == 1 && nregions == 1;
+                    // Solve indices feeding (region k, plane p) of the forced run.
+                    let forced_base = |k: usize, p: usize| base0 + 2 * spp + (k * 2 + p) * spp;
+                    if !forced_skipped {
+                        cursor += nregions * 2 * spp;
+                    }
+                    assert_eq!(
+                        cursor - base0,
+                        spec.solves,
+                        "{} {name}: the spec consumed a different number of solves",
+                        e.vector
+                    );
+                    // The solve indices feeding the winner's region `k` of plane `p`: the baseline
+                    // block when candidate 0 (or the skip) won, the forced block otherwise. A
+                    // compare failure is a bug only when every solve feeding the compared data was
+                    // well-posed — near-deficient systems give MKL a nondeterministic choice.
+                    let winner_base = |k: usize, p: usize| {
+                        if forced_skipped || out.planes[p].cand == 0 {
+                            base0 + p * spp // baseline winner
+                        } else {
+                            forced_base(k, p)
+                        }
+                    };
+                    let posed = |k: usize, p: usize| -> bool {
+                        let base = winner_base(k, p);
+                        stable[base..base + spp].iter().all(|&s| s)
+                    };
+                    if let Some(m) = dump.get(&format!("{name}.meta")) {
+                        let want = m.i32();
+                        for p in 0..2 {
+                            if out.planes[p].cand != want[p] as usize {
+                                // The decision is excused when any solve on either search path was
+                                // ill-posed: the reference's own draw is not reproducible then.
+                                let excused = !(0..nregions.max(1)).all(|k| posed(k, p));
+                                assert!(
+                                    excused,
+                                    "{} {name}: cand[{p}] got {} want {} on well-posed solves",
+                                    e.vector, out.planes[p].cand, want[p]
+                                );
+                                eprintln!(
+                                    "{} {name}: cand[{p}] got {} want {} (ill-posed solves — reported)",
+                                    e.vector, out.planes[p].cand, want[p]
+                                );
                             }
                         }
                     }
-                    assert!(
-                        diffs == 0 || !solves.iter().all(|&s| s),
-                        "{spec}.{u}.{k}: {diffs} chroma codes diverged on well-posed solves"
-                    );
-                    if diffs > 0 {
-                        eprintln!("{spec}.{u}.{k}: {diffs} chroma code diffs (ill-posed)");
+                    // `spec.{U,V,U2,V2}.{k}` records the *winner's* filter list: for a baseline
+                    // winner only region 0 exists, fed by the baseline solves.
+                    for p in 0..2 {
+                        let (u, u2) = if p == 0 { ("U", "U2") } else { ("V", "V2") };
+                        let want_meta = dump
+                            .get(&format!("{name}.meta"))
+                            .map(|m| m.i32()[p] as usize);
+                        if want_meta != Some(out.planes[p].cand) {
+                            continue; // different winner: filter lists aren't comparable
+                        }
+                        for k in 0..nregions.max(1) {
+                            let Some(want_c) = dump.get(&format!("{name}.{u}.{k}")) else {
+                                break;
+                            };
+                            let want_c = want_c.i64();
+                            let want_l = dump[&format!("{name}.{u2}.{k}")].i64();
+                            let base = winner_base(k, p);
+                            let solves = &stable[base..base + spp];
+                            let taps = out.planes[p].filter_len * out.planes[p].filter_len;
+                            let mut diffs = 0usize;
+                            if ctx.coded_444 {
+                                // The dump stores four identical phases; the set carries one.
+                                assert_eq!(out.planes[p].chroma[k].len(), taps);
+                                for (k2, &w) in out.planes[p].chroma[k].iter().enumerate() {
+                                    diffs += (w as i64 != want_c[k2]) as usize;
+                                }
+                            } else {
+                                assert_eq!(out.planes[p].chroma[k].len(), 4 * taps);
+                                for phase in 0..4 {
+                                    for (k2, &w) in out.planes[p].chroma[k]
+                                        [phase * taps..(phase + 1) * taps]
+                                        .iter()
+                                        .enumerate()
+                                    {
+                                        diffs += (w as i64 != want_c[phase * taps + k2]) as usize;
+                                    }
+                                }
+                            }
+                            assert!(
+                                diffs == 0 || !solves.iter().all(|&s| s),
+                                "{} {name}.{u}.{k}: {diffs} chroma codes diverged on well-posed solves",
+                                e.vector
+                            );
+                            if diffs > 0 {
+                                eprintln!(
+                                    "{} {name}.{u}.{k}: {diffs} chroma code diffs (ill-posed)",
+                                    e.vector
+                                );
+                            }
+                            // The luma filter of a subsampled-coded plane is the refine solve, whose
+                            // B is built from the i-solves' X — it is only reproducible when every
+                            // solve of this (region, plane) was well-posed.
+                            let mut ldiffs = 0usize;
+                            for (k2, &w) in out.planes[p].luma[k].iter().enumerate() {
+                                ldiffs += (w as i64 != want_l[k2]) as usize;
+                            }
+                            assert!(
+                                ldiffs == 0 || !solves.iter().all(|&s| s),
+                                "{} {name}.{u2}.{k}: {ldiffs} luma codes diverged on well-posed solves",
+                                e.vector
+                            );
+                            if ldiffs > 0 {
+                                eprintln!(
+                                    "{} {name}.{u2}.{k}: {ldiffs} luma code diffs (ill-posed)",
+                                    e.vector
+                                );
+                            }
+                        }
                     }
-                    // The luma filter of a subsampled-coded plane is the refine solve, whose
-                    // B is built from the i-solves' X — it is only reproducible when every
-                    // solve of this (region, plane) was well-posed.
-                    let mut ldiffs = 0usize;
-                    for (k2, &w) in out.planes[p].luma[k].iter().enumerate() {
-                        ldiffs += (w as i64 != want_l[k2]) as usize;
-                    }
-                    assert!(
-                        ldiffs == 0 || !solves.iter().all(|&s| s),
-                        "{spec}.{u2}.{k}: {ldiffs} luma codes diverged on well-posed solves"
-                    );
-                    if ldiffs > 0 {
-                        eprintln!("{spec}.{u2}.{k}: {ldiffs} luma code diffs (ill-posed)");
+                    for (p, nm) in ["u", "v"].iter().enumerate() {
+                        if let Some(w) = dump.get(&format!("{name}.rec_{nm}")) {
+                            let want = w.f32();
+                            let got = &out.planes[p].filtered.data;
+                            assert_eq!(got.len(), want.len());
+                            let max_diff = got
+                                .iter()
+                                .zip(&want)
+                                .map(|(g, w)| (g - w).abs())
+                                .fold(0.0f32, f32::max);
+                            if max_diff >= 1e-3 {
+                                let excused = !(0..nregions.max(1)).all(|k| posed(k, p));
+                                assert!(
+                                    excused,
+                                    "{} {name}.rec_{nm} deviates by {max_diff} on well-posed solves",
+                                    e.vector
+                                );
+                                eprintln!(
+                                    "{} {name}.rec_{nm}: max diff {max_diff:.3e} (ill-posed solves)",
+                                    e.vector
+                                );
+                            }
+                        }
                     }
                 }
-            }
-            for (p, nm) in ["u", "v"].iter().enumerate() {
-                if let Some(w) = dump.get(&format!("{spec}.rec_{nm}")) {
-                    let want = w.f32();
-                    let got = &out.planes[p].filtered.data;
-                    assert_eq!(got.len(), want.len());
-                    let max_diff = got
-                        .iter()
-                        .zip(&want)
-                        .map(|(g, w)| (g - w).abs())
-                        .fold(0.0f32, f32::max);
-                    if max_diff >= 1e-3 {
-                        let excused = !(0..nregions.max(1)).all(|k| posed(k, p));
-                        assert!(
-                            excused,
-                            "{spec}.rec_{nm} deviates by {max_diff} on well-posed solves"
-                        );
-                        eprintln!("{spec}.rec_{nm}: max diff {max_diff:.3e} (ill-posed solves)");
-                    }
-                }
+                // Every dumped solve must be accounted for: a drifted cursor means the port walks a
+                // different solve sequence than the reference.
+                assert_eq!(
+                    cursor,
+                    stable.len(),
+                    "{}: solve count mismatch vs dump",
+                    e.vector
+                );
             }
         }
-        // Every dumped solve must be accounted for: a drifted cursor means the port walks a
-        // different solve sequence than the reference.
-        assert_eq!(cursor, stable.len(), "solve count mismatch vs dump");
-    }
 
-    /// The free-search replay of `scripts/ref_vectors/dump_efe_solves.py` (`search:<model>` spec) on the reference's
-    /// own `rec` planes (`EFElinear.in.*`). `decide` must always be deterministic; it must
-    /// land on the same candidates, filter lengths and integerised codes whenever the
-    /// reference's solves were all stable — where MKL truncated rank, the reference's own
-    /// result is one draw of a nondeterministic solver and parity is reported, not asserted.
-    #[test]
-    fn decide_matches_reference_free_search() {
-        let Some(dir) = std::env::var_os("ZENJPEGAI_EFE_DUMP").map(std::path::PathBuf::from) else {
-            return;
-        };
-        let Some(dump) = load_dump(&dir) else { return };
-        let Some(meta_ref) = dump
-            .keys()
-            .find(|k| k.starts_with("search:") && k.ends_with(".meta"))
-            .cloned()
-        else {
-            return; // no free-search spec in this dump
-        };
-        let model_id: usize = meta_ref[7..meta_ref.len() - 5].parse().unwrap();
-        let planes = |k: &str| Planes {
-            y: tensor(&dump[&format!("{k}.a")]),
-            u: tensor(&dump[&format!("{k}.b")]),
-            v: tensor(&dump[&format!("{k}.c")]),
-        };
-        let (org, rec) = (planes("org"), planes("rec"));
-        let cver = std::env::var("ZENJPEGAI_EFE_CVER").unwrap_or_else(|_| "1,1".into());
-        let mut it = cver.split(',').map(|v| v.parse().unwrap());
-        let meta = SourceMeta {
-            bit_depth: 8,
-            s_ver: 1,
-            s_hor: 1,
-            c_ver: it.next().unwrap(),
-            c_hor: it.next().unwrap(),
-            colour_transform: crate::header::ColourTransform::None,
-        };
-        let eng = Engine::new();
-        let mk = |decide_meta: &SourceMeta| {
-            decide(&EfeLinearInput {
-                eng: &eng,
-                meta: decide_meta,
-                model_id,
-                dctif_only: false,
-                efe_nonlinear: false,
-                org: &org,
-                rec: &rec,
-            })
-            .unwrap()
-        };
-        let out = mk(&meta);
-        let out2 = mk(&meta);
-        assert_eq!(
-            format!("{:?}", out.header.set),
-            format!("{:?}", out2.header.set),
-            "free search is not deterministic"
-        );
-        let stable = solve_stability(&dump);
-        let all_stable = stable.iter().all(|&s| s);
-        let want = dump[&meta_ref].i32();
-        let got = &out.header.set;
-        eprintln!(
-            "{meta_ref}: got cands [{:?},{:?}] fl [{},{}] want {want:?} (stable solves: {}/{})",
-            got.cand[0],
-            got.cand[1],
-            got.filter_len[0],
-            got.filter_len[1],
-            stable.iter().filter(|&&s| s).count(),
-            stable.len(),
-        );
-        if !all_stable {
-            eprintln!(
-                "{meta_ref}: reference search hit MKL-truncated solves — parity not assertable"
-            );
-        } else {
-            assert_eq!(got.cand[0].unwrap() as i32, want[0], "candU");
-            assert_eq!(got.cand[1].unwrap() as i32, want[1], "candV");
-            // The dumped `search:<m>.{U,V,U2,V2}.0` are the integerised region-0 filters.
-            for (p, (u, u2)) in [("U", "U2"), ("V", "V2")].into_iter().enumerate() {
-                let want_c = dump[&format!("{meta_ref}.{u}.0")].i64();
-                let want_l = dump[&format!("{meta_ref}.{u2}.0")].i64();
-                let flat_c: Vec<u32> = got.chroma_weights[p].concat();
-                let flat_l: Vec<u32> = got.luma_weights[p].concat();
-                // The header stores `code - min_symbol`; add it back to compare codes.
-                let min = got.min_symbol;
-                let coded_c: Vec<i64> = flat_c.iter().map(|&c| c as i64 + min as i64).collect();
-                let coded_l: Vec<i64> = flat_l.iter().map(|&c| c as i64 + min as i64).collect();
-                // Coded 4:4:4 dumps four identical phases; the header set carries one.
-                assert_eq!(coded_c.len() * 4, want_c.len(), "{u}: phase count");
-                for (k, &w) in coded_c.iter().enumerate() {
-                    assert_eq!(w, want_c[k], "{u} tap {k}");
-                }
-                for (k, &w) in coded_l.iter().enumerate() {
-                    assert_eq!(w, want_l[k], "{u2} tap {k}");
+        /// The free-search replay (`search:<model>` specs) on the reference's own `rec`
+        /// planes (`EFElinear.in.*`). `decide` must always be deterministic; it must land
+        /// on the same candidates, filter lengths and integerised codes whenever the
+        /// reference's solves were all stable — where MKL truncated rank, the reference's
+        /// own result is one draw of a nondeterministic solver and parity is reported, not
+        /// asserted.
+        #[test]
+        fn decide_matches_reference_free_search() {
+            let mut searches = 0usize;
+            for e in DUMPS {
+                let dump = load_dump(&vectors_root().join(e.vector).join("efe_solves"));
+                for spec in e.specs {
+                    let Some(model) = spec.name.strip_prefix("search:") else {
+                        continue;
+                    };
+                    searches += 1;
+                    let model_id: usize = model.parse().unwrap();
+                    let (org, rec) = (planes(&dump, "org"), planes(&dump, "rec"));
+                    let meta = SourceMeta {
+                        bit_depth: 8,
+                        s_ver: 1,
+                        s_hor: 1,
+                        c_ver: e.coded.0 as u8,
+                        c_hor: e.coded.1 as u8,
+                        colour_transform: crate::header::ColourTransform::None,
+                    };
+                    let eng = Engine::new();
+                    let mk = |decide_meta: &SourceMeta| {
+                        decide(&EfeLinearInput {
+                            eng: &eng,
+                            meta: decide_meta,
+                            model_id,
+                            dctif_only: false,
+                            efe_nonlinear: false,
+                            org: &org,
+                            rec: &rec,
+                        })
+                        .unwrap()
+                    };
+                    let out = mk(&meta);
+                    let out2 = mk(&meta);
+                    assert_eq!(
+                        format!("{:?}", out.header.set),
+                        format!("{:?}", out2.header.set),
+                        "{} {spec}: free search is not deterministic",
+                        e.vector,
+                        spec = spec.name
+                    );
+                    let stable = solve_stability(&dump);
+                    let all_stable = stable.iter().all(|&s| s);
+                    let want = dump[&format!("{}.meta", spec.name)].i32();
+                    let got = &out.header.set;
+                    eprintln!(
+                        "{} {name}.meta: got cands [{:?},{:?}] fl [{},{}] want {want:?} (stable solves: {}/{})",
+                        e.vector,
+                        got.cand[0],
+                        got.cand[1],
+                        got.filter_len[0],
+                        got.filter_len[1],
+                        stable.iter().filter(|&&s| s).count(),
+                        stable.len(),
+                        name = spec.name,
+                    );
+                    if !all_stable {
+                        eprintln!(
+                            "{} {name}: reference search hit MKL-truncated solves — parity not assertable",
+                            e.vector,
+                            name = spec.name
+                        );
+                    } else {
+                        assert_eq!(got.cand[0].unwrap() as i32, want[0], "candU");
+                        assert_eq!(got.cand[1].unwrap() as i32, want[1], "candV");
+                        // The dumped `search:<m>.{U,V,U2,V2}.0` are the integerised region-0 filters.
+                        for (p, (u, u2)) in [("U", "U2"), ("V", "V2")].into_iter().enumerate() {
+                            let want_c = dump[&format!("{}.{u}.0", spec.name)].i64();
+                            let want_l = dump[&format!("{}.{u2}.0", spec.name)].i64();
+                            let flat_c: Vec<u32> = got.chroma_weights[p].concat();
+                            let flat_l: Vec<u32> = got.luma_weights[p].concat();
+                            // The header stores `code - min_symbol`; add it back to compare codes.
+                            let min = got.min_symbol;
+                            let coded_c: Vec<i64> =
+                                flat_c.iter().map(|&c| c as i64 + min as i64).collect();
+                            let coded_l: Vec<i64> =
+                                flat_l.iter().map(|&c| c as i64 + min as i64).collect();
+                            // Coded 4:4:4 dumps four identical phases; the header set carries one.
+                            assert_eq!(coded_c.len() * 4, want_c.len(), "{u}: phase count");
+                            for (k, &w) in coded_c.iter().enumerate() {
+                                assert_eq!(w, want_c[k], "{u} tap {k}");
+                            }
+                            for (k, &w) in coded_l.iter().enumerate() {
+                                assert_eq!(w, want_l[k], "{u2} tap {k}");
+                            }
+                        }
+                    }
+                    // Whatever the search picks, the header must serialise and re-parse intact.
+                    let pih = crate::encoder::picture_header(
+                        org.y.w as u32,
+                        org.y.h as u32,
+                        1,
+                        [0, 0],
+                        crate::encoder::EncodeParams::default(),
+                        &meta,
+                    );
+                    let tools = crate::header::ToolHeader {
+                        efe_linear: Some(out.header.clone()),
+                        ..Default::default()
+                    };
+                    let bytes = tools.write(&pih).unwrap();
+                    let parsed = crate::header::ToolHeader::parse(&bytes, &pih).unwrap();
+                    assert_eq!(parsed.efe_linear, Some(out.header));
                 }
             }
+            assert!(searches > 0, "DUMPS holds no search: spec");
         }
-        // Whatever the search picks, the header must serialise and re-parse intact.
-        let pih = crate::encoder::picture_header(
-            org.y.w as u32,
-            org.y.h as u32,
-            1,
-            [0, 0],
-            crate::encoder::EncodeParams::default(),
-            &meta,
-        );
-        let tools = crate::header::ToolHeader {
-            efe_linear: Some(out.header.clone()),
-            ..Default::default()
-        };
-        let bytes = tools.write(&pih).unwrap();
-        let parsed = crate::header::ToolHeader::parse(&bytes, &pih).unwrap();
-        assert_eq!(parsed.efe_linear, Some(out.header));
     }
 }

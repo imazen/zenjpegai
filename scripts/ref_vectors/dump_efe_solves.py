@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Re-run the reference EFElinear.SplitDecide standalone and dump every lstsq triple
-plus the integerized filter codes. Oracle for `encoder::filters::efe_linear::tests`
-(env vars ZENJPEGAI_EFE_DUMP / ZENJPEGAI_EFE_CVER / ZENJPEGAI_EFE_SPECS).
+plus the integerized filter codes. Oracle for
+`encoder::filters::efe_linear::tests::oracle` — the tests read the dump from
+`<vector>/efe_solves/` under the reference-vectors root; the `efesolves` set of
+`make_reference_streams.sh` invokes this script.
 
 Usage (from the ref checkout, venv active):
 
