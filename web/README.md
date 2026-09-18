@@ -303,7 +303,7 @@ it needs SharedArrayBuffer). `pkg-simd` and `pkg-threads` are unchanged.
   timestamp-query maps issued together (one device-drain round-trip instead of two). The ~27 ms
   residual readback is the device drain itself (~20 ms device time) plus one IPC round-trip.
   CPU comparisons from the same runs (`benchmarks/wasm_decode_2026-09-18_gpu.tsv`, medians over
-  the ~1 MP demo corpus): `threads` ~98-104 ms, `simd` ~705-718 ms — the GPU path beats both on
+  the ~1 MP demo corpus): `threads` ~98-104 ms, `simd` ~675-765 ms — the GPU path beats both on
   this hardware class, so `auto` takes it (isolated → `pkg-webgpu-threads`, non-isolated →
   `pkg-webgpu`, which at ~193 ms warm still beats `simd` ~3.7x). The GPU win is
   measured only on the ~0.5-1 MP demo corpus; no smaller-size crossover was measured. Cold

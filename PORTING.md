@@ -588,7 +588,7 @@ measured numbers in the status table above when you close an item.
   and staged readback in a single submit) and one batched map round-trip
   (`GpuContext::map_read2`) took warm ~1 MP `decode_ms` from ~179 ms to ~55 ms on the RTX 2080 —
   ~1.9x faster than the `threads` CPU package (~98-104 ms) and ~13x faster than `simd`
-  (~705-718 ms), so `auto` now prefers a non-software adapter on both page kinds. GPU parity
+  (~675-765 ms), so `auto` now prefers a non-software adapter on both page kinds. GPU parity
   unchanged (same kernels, same counts: 6+6 `gpu/tests`, 195/3,000,000 samples differ by 1
   in-browser). Detail in `web/README.md` §7.
   **B2 done 2026-09-18** — demo throttling +

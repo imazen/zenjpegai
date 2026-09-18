@@ -190,7 +190,8 @@
   `rgba8unorm` convert, staged RGBA readback — `GpuOut` on `GpuDecoder::decode_to_gpu_with`)
   into one command encoder, and `GpuContext::map_read2` maps the staging and timestamp buffers
   in one device-drain round-trip. Warm ~1 MP `decode_ms` on the RTX 2080 through Dawn/Vulkan:
-  ~179 -> ~55 ms (vs `threads` ~95-104 ms, `simd` ~645 ms), so `auto` now takes a hardware
+  ~179 -> ~55 ms (vs `threads` ~98-104 ms, `simd` ~675-765 ms medians on
+  `benchmarks/wasm_decode_2026-09-18_gpu.tsv`), so `auto` now takes a hardware
   adapter on isolated and non-isolated pages alike. Parity unchanged (same kernels; 195 of
   3,000,000 samples differ by 1 in-browser).
 - WebGPU upload trap (`gpu/`): `create_buffer_init` created buffers with `mappedAtCreation`,

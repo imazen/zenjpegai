@@ -67,7 +67,7 @@ Two picture sizes is a thin sample: no tiny pictures, nothing above 3 MP yet.
 
 In the browser (Chromium 153, RTX 2080 via Dawn/Vulkan, ~1 MP demo corpus, medians from
 `benchmarks/wasm_decode_2026-09-18_gpu.tsv`): the WebGPU package decodes a warm stream in
-~55 ms vs ~104 ms on the threaded CPU package and ~715 ms on the single-threaded SIMD one,
+~55 ms vs ~104 ms on the threaded CPU package and ~700 ms on the single-threaded SIMD one,
 so `auto` uses the GPU when a hardware adapter exists (details: `web/README.md` §7).
 
 ## What JPEG AI is
