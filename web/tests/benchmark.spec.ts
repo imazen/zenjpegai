@@ -35,8 +35,10 @@ test('decode every demo stream and record timings', async ({ page, browserName, 
   const rows: string[] = [];
   for (const img of manifest.images) {
     for (const v of img.variants) {
-      const bpp2 = String(Math.round(v.bpp * 100)).padStart(2, '0');
-      const stream = `streams/${img.slug}_bpp${bpp2}.jai`;
+      // Same content-addressed URL the demo uses (`?v=<sha256>` keeps the fetch honest if a
+      // stream file was swapped under its name); fall back to the name convention.
+      const file = v.file || `${img.slug}_bpp${String(Math.round(v.bpp * 100)).padStart(2, '0')}.jai`;
+      const stream = `streams/${file}${v.sha256 ? `?v=${v.sha256}` : ''}`;
       const r = await page.evaluate(
         async ({ stream }) => {
           const f0 = performance.now();

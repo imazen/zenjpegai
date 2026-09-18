@@ -50,8 +50,15 @@ fetch('upstream-notices/LICENSE').then((r) => r.ok ? r.text() : null).then((text
   $noticeBox.hidden = false;
 });
 
-const manifest = await fetch('manifest.json').then((r) => r.json());
-const pool = new DecoderPool({ modelsBaseUrl: 'models/' });
+// `no-cache`: the manifest is the version authority — every asset URL below derives a `?v=`
+// token from it, so it must always be revalidated, never served stale. (Without validators
+// this is just an unconditional fetch; with ETag/Last-Modified it is a conditional one.)
+const manifest = await fetch('manifest.json', { cache: 'no-cache' }).then((r) => r.json());
+// Model-bundle digests -> the worker's Cache API keys (see worker.js): a bundle replaced
+// under the same file name still gets a fresh cache entry.
+const bundleVersions = {};
+for (const [name, info] of Object.entries(manifest.models || {})) bundleVersions[name] = info.sha256;
+const pool = new DecoderPool({ modelsBaseUrl: 'models/', bundleVersions });
 // Test/debug hooks: the Playwright scheduling spec reads these.
 window.__pool = pool;
 window.__poolStats = () => pool.stats();
@@ -141,9 +148,14 @@ async function decodeVariant(slug, variant, canvas, timing, buttons, active, pri
   for (const b of buttons) b.setAttribute('aria-pressed', String(b === active));
   timing.textContent = 'queued…';
   if (card) card.dataset.state = 'queued';
-  const bpp2 = String(Math.round(variant.bpp * 100)).padStart(2, '0');
+  // Content-addressed URL: a stream file keeps its name across asset swaps, so the digest
+  // from the manifest goes in the query — swapped content is a different URL and can never
+  // be served from a stale HTTP-cache/Cache-API entry. The `variant.file`/`sha256` fields
+  // are absent in manifests from before this scheme; fall back to the name convention.
+  const file = variant.file || `${slug}_bpp${String(Math.round(variant.bpp * 100)).padStart(2, '0')}.jai`;
+  const url = `streams/${file}${variant.sha256 ? `?v=${variant.sha256}` : ''}`;
   const t0 = performance.now();
-  const bytes = await fetch(`streams/${slug}_bpp${bpp2}.jai`).then((r) => r.arrayBuffer());
+  const bytes = await fetch(url).then((r) => r.arrayBuffer());
   const t1 = performance.now();
   try {
     const { width, height, rgba, timings } = await pool.decode(bytes, {

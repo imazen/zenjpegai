@@ -21,13 +21,17 @@ export class DecoderPool {
    * @param {string} modelsBaseUrl - directory holding `m<id>_common.zjb` / `m<id>_<op>.zjb`.
    * @param {number} [maxWorkers] - cap N on the simd-variant pool size (ignored when isolated).
    * @param {URL|string} [workerUrl] - override for `worker.js` (tests point this at a fixture).
+   * @param {Object<string,string>} [bundleVersions] - file name -> version token (the demo
+   *   passes each bundle's sha256 from manifest.json). Appended to bundle URLs as `?v=` so a
+   *   bundle swapped under the same file name can't be served stale from the Cache API.
    */
-  constructor({ modelsBaseUrl, maxWorkers = 4, workerUrl } = {}) {
+  constructor({ modelsBaseUrl, maxWorkers = 4, workerUrl, bundleVersions } = {}) {
     if (!modelsBaseUrl) throw new Error('DecoderPool requires modelsBaseUrl');
     // Resolved to an absolute URL against the PAGE's location: workers have their own base URL
     // (the worker script's own location), so a relative modelsBaseUrl passed through as-is would
     // resolve against `worker.js`'s directory instead of the page that constructed this pool.
     this.modelsBaseUrl = new URL(modelsBaseUrl, typeof location !== 'undefined' ? location.href : undefined).href;
+    this.bundleVersions = bundleVersions || null;
     this.isolated = typeof crossOriginIsolated !== 'undefined' && crossOriginIsolated === true;
     const hwc = (typeof navigator !== 'undefined' && navigator.hardwareConcurrency) || 4;
     this.size = this.isolated ? 1 : Math.max(1, Math.min(maxWorkers, hwc - 1));
@@ -154,7 +158,7 @@ export class DecoderPool {
       this._maxInflight = Math.max(this._maxInflight, this._pending.size);
       job.onDispatch?.();
       worker.postMessage(
-        { type: 'decode', id: job.id, stream: job.buf, modelsBaseUrl: this.modelsBaseUrl },
+        { type: 'decode', id: job.id, stream: job.buf, modelsBaseUrl: this.modelsBaseUrl, bundleVersions: this.bundleVersions },
         [job.buf],
       );
     }

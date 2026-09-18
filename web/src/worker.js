@@ -7,7 +7,7 @@
 // changes throughput, never output.
 //
 // Message protocol (posted from `pool.js`):
-//   {type: 'decode', id, stream: ArrayBuffer, modelsBaseUrl}
+//   {type: 'decode', id, stream: ArrayBuffer, modelsBaseUrl, bundleVersions?}
 //     -> {type: 'result', id, width, height, rgba: ArrayBuffer, timings} (rgba.buffer transferred)
 //     -> {type: 'error', id, message}
 //   {type: 'releaseBuffers'}   (no reply; see zj.releaseBuffers doc)
@@ -19,12 +19,21 @@ const isolated = typeof crossOriginIsolated !== 'undefined' && crossOriginIsolat
 const variant = isolated ? 'threads' : 'simd';
 const pkgBase = new URL(`../dist/pkg-${variant}/`, import.meta.url);
 
-const CACHE_NAME = 'zenjpegai-models-v1';
+// Cache namespace for the model bundles. Keys inside it carry the bundle's own `?v=` version
+// token (see fetchBundle), so a bundle whose bytes change under the same file name gets a new
+// key. v1 keys had no version and could pin a stale bundle forever; the bump abandons them and
+// the delete below reclaims the space.
+const CACHE_NAME = 'zenjpegai-models-v2';
+const STALE_CACHES = ['zenjpegai-models-v1'];
+if (typeof caches !== 'undefined') for (const name of STALE_CACHES) caches.delete(name).catch(() => {});
 
-async function fetchBundle(url) {
+async function fetchBundle(url, version) {
   // Cache API, not HTTP cache alone: guarantees the (multi-MB) bundle is fetched at most once
   // per browser profile regardless of HTTP cache eviction, and lets the demo/tests assert a
-  // cache hit on the second image that reuses a model.
+  // cache hit on the second image that reuses a model. The version token is part of the key
+  // (and of the fetch URL — harmless to a static host, which ignores the query): content
+  // swapped under the same file name is a different key, never a stale hit.
+  const key = version ? `${url}?v=${version}` : url;
   let cache = null;
   try {
     cache = await caches.open(CACHE_NAME);
@@ -32,14 +41,14 @@ async function fetchBundle(url) {
     // Cache API unavailable (some private-browsing modes); fall back to a plain fetch.
   }
   if (cache) {
-    const hit = await cache.match(url);
+    const hit = await cache.match(key);
     if (hit) return new Uint8Array(await hit.arrayBuffer());
   }
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`model bundle fetch failed: ${url} (${res.status})`);
+  const res = await fetch(key);
+  if (!res.ok) throw new Error(`model bundle fetch failed: ${key} (${res.status})`);
   if (cache) {
     try {
-      await cache.put(url, res.clone());
+      await cache.put(key, res.clone());
     } catch {
       // ignore cache write failures (quota, opaque response, etc.)
     }
@@ -48,12 +57,14 @@ async function fetchBundle(url) {
 }
 
 /** `models/m<id>_common.zjb` + `models/m<id>_<op>.zjb`, relative to `modelsBaseUrl`. */
-async function ensureModels(mod, modelsBaseUrl, modelId, op) {
+async function ensureModels(mod, modelsBaseUrl, modelId, op, bundleVersions) {
   if (mod.hasModels(modelId, op)) return;
   const base = modelsBaseUrl.endsWith('/') ? modelsBaseUrl : `${modelsBaseUrl}/`;
-  mod.addModels(await fetchBundle(`${base}m${modelId}_common.zjb`));
+  const common = `m${modelId}_common.zjb`;
+  mod.addModels(await fetchBundle(`${base}${common}`, bundleVersions?.[common]));
   if (mod.hasModels(modelId, op)) return;
-  mod.addModels(await fetchBundle(`${base}m${modelId}_${op}.zjb`));
+  const part = `m${modelId}_${op}.zjb`;
+  mod.addModels(await fetchBundle(`${base}${part}`, bundleVersions?.[part]));
 }
 
 // `self.onmessage` MUST be assigned before any `await` below, in the same synchronous turn the
@@ -114,7 +125,7 @@ async function decodeOne(msg) {
     const bytes = new Uint8Array(msg.stream);
     const t0 = performance.now();
     const head = mod.info(bytes);
-    await ensureModels(mod, modelsBaseUrl, head.modelId, head.operatingPoint);
+    await ensureModels(mod, modelsBaseUrl, head.modelId, head.operatingPoint, msg.bundleVersions);
     const t1 = performance.now();
     const img = mod.decode(bytes);
     const t2 = performance.now();

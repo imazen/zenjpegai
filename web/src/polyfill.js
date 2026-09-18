@@ -37,6 +37,8 @@ const SELECTOR = [
  *   measured tradeoff: canvas skips a PNG encode/decode round trip, img keeps native `<img>`
  *   semantics — alt text, "Save Image As", srcset re-evaluation on resize).
  * @property {Document|ShadowRoot} [root] - defaults to `document`.
+ * @property {Object<string,string>} [bundleVersions] - passed to `DecoderPool`: model-bundle
+ *   file name -> version token, appended to bundle URLs as `?v=` (see pool.js/worker.js).
  */
 
 // Scheduling (see pool.js's contract): every decode enters the pool's shared queue ordered by
@@ -54,7 +56,7 @@ const FAR_PRIORITY = 1_000_000_000;
 /** @param {PolyfillOptions} options */
 export function installJpegAiPolyfill(options) {
   const opts = { renderMode: 'canvas', root: document, ...options };
-  const pool = new DecoderPool({ modelsBaseUrl: opts.modelsBaseUrl, maxWorkers: opts.maxWorkers, workerUrl: opts.workerUrl });
+  const pool = new DecoderPool({ modelsBaseUrl: opts.modelsBaseUrl, maxWorkers: opts.maxWorkers, workerUrl: opts.workerUrl, bundleVersions: opts.bundleVersions });
 
   const visRank = new WeakMap();
   let rankSeq = 0;

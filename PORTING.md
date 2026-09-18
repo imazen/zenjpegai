@@ -485,6 +485,12 @@ measured numbers in the status table above when you close an item.
   first-image 1123/1097 ms and all-eight-images 2073/2082 ms — on this 32-core box the change
   is about ordering, laziness and the bounded-inflight guarantee, not throughput; on a
   smaller-core-count machine the queue is what prevents decode oversubscription.
+  **B4 done 2026-09-18** — cache-safe demo assets: `manifest.json` carries per-variant
+  `file`/`sha256` and a `models` digest map (`web/scripts/update-demo-manifest.mjs`, re-uploaded
+  to `demo-assets-v1`); `demo.js` fetches `streams/<file>?v=<sha256>` and `manifest.json` with
+  `cache: 'no-cache'`; `worker.js` keys Cache API entries on `?v=` digests
+  (`zenjpegai-models-v2`; v1 purged). `web/tests/cache-swap.spec.ts` proves a same-name asset
+  swap renders new content without clearing storage.
   **B3** GPU kernels: after the tuning of 711233ad + 0120c800 (gate / residual fused into the
   convolution's store, the transposed convolution's dead taps skipped, the depthwise 3x3 tiled
   in workgroup memory, the workgroup edge chosen per layer — device time for one picture BOP

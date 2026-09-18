@@ -250,4 +250,14 @@ reference-vector set carries non-sRGB CICP to develop and test it against.
 `manifest.json` in the `demo-assets-v1` release is published verbatim on the site. Its
 `sourceFile` values must stay redacted to `<id>_..._<WxH>.<ext>` (like `demo/IMAGES.md`): the
 full imazen-26 filenames encode where and when a photo was taken and on which device. Checked
-and scrubbed 2026-09-18; re-check whenever the release is regenerated.
+and scrubbed 2026-09-18; re-check whenever the release is regenerated
+(`web/scripts/update-demo-manifest.mjs` refuses to write a manifest with an unredacted
+`sourceFile`).
+
+**Cache-safety** (2026-09-18 incident: a swapped stream kept its file name and the demo kept
+rendering the stale bytes): the manifest carries `file` + `sha256` per variant and a `models`
+map of every bundle's digest; `demo.js` fetches `streams/<file>?v=<sha256>` and `manifest.json`
+with `cache: 'no-cache'`; `worker.js` keys its Cache API entries on `?v=` digests
+(`zenjpegai-models-v2`, the unversioned `v1` namespace is deleted on load). Regenerating the
+manifest re-stamps every digest, so a swapped asset is a different URL everywhere it is cached.
+Regression test: `web/tests/cache-swap.spec.ts`.

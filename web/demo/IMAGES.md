@@ -15,7 +15,9 @@ None of these bytes are in git: streams (`.jai`), the two model bundle parts eac
 that reuses a model), and the reference-decoder PNGs used as the pixel-parity oracle in the
 Playwright suite are published as assets of the `demo-assets-v1` GitHub release (prerelease).
 `manifest.json` in that release ties it together: per-image slug, source category/license,
-and per-rate bytes/width/height/`modelId`.
+and per-rate `file`/`sha256`/bytes/width/height/`modelId`, plus a `models` map of every
+bundle's digest — the digests make the site's asset URLs content-addressed (see
+`web/README.md` "Demo asset hygiene").
 
 | slug | source (imazen-26) | category | license |
 | --- | --- | --- | --- |
@@ -51,4 +53,12 @@ target/release/zenjpegai pack-models --models $ZENJPEGAI_REF/models --model <0..
 target/release/zenjpegai decode out.bits out.native.png --models m<id>_bop.zjb   # after merging common+bop in one PackedBundle, or use a full --only-less pack
 gh release create demo-assets-v1 --prerelease --title "Demo assets v1" --notes "..." \
   <slug>_bpp{25,75}.jai <slug>_bpp{25,75}.native.png m{0,1,2,3}_{common,bop}.zjb manifest.json
+```
+
+After (re)generating assets, re-stamp and re-upload the manifest — `sourceFile` stays redacted:
+
+```
+node web/scripts/fetch-demo-assets.mjs --force
+node web/scripts/update-demo-manifest.mjs
+gh release upload demo-assets-v1 web/.demo-assets/manifest.json --clobber --repo imazen/zenjpegai
 ```

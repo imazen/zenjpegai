@@ -99,6 +99,16 @@
 - `mans`: me-tANS entropy coder (tables, decoder, encoder), bit-exact against the reference C++ extension.
 
 ### Fixed
+- Demo asset staleness (`web/`): stream/bundle files keep their names across `demo-assets-v1`
+  swaps, so URL-keyed caches (HTTP + Cache API) served old bytes indefinitely — the live demo
+  showed a stale image after an asset swap. `manifest.json` now carries each variant's
+  `file`/`sha256` and a per-bundle digest map (`web/scripts/update-demo-manifest.mjs`,
+  uploaded 2026-09-18); `demo.js` fetches `streams/<file>?v=<sha256>` and the manifest itself
+  with `cache: 'no-cache'`; `worker.js` keys Cache API entries on `?v=` digests
+  (`zenjpegai-models-v2`, the unversioned v1 cache is deleted). `DecoderPool`/`polyfill` take
+  an optional `bundleVersions` map. `web/tests/cache-swap.spec.ts` proves a same-name swap
+  renders new content on reload without clearing storage. `playwright.config.ts` ports are
+  shiftable via `JAI_PORT_BASE` so sibling workspaces stop testing each other's `dist/site`.
 - Browser decode scheduling (`web/`): `DecoderPool` now runs all decodes through one shared
   priority queue instead of posting every job to a worker at once — at most
   `min(navigator.hardwareConcurrency - 1, N)` in-flight on the simd build (one hardware thread
