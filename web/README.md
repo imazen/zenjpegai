@@ -125,11 +125,16 @@ whenever another workspace is running tests (seen live: a foreign server on 3032
   `chromium-webgpu` project, decode and present timed separately, appends to
   `benchmarks/wasm_decode_<date>_gpu.tsv` + `.meta` (adapter name and launch flags included).
 
-Measured decode times (isolated server, `threads` package, this session — Ryzen 9 9950X3D,
-shared box, chromium): **160-360 ms** per ~1 MP image including first-time model-bundle fetch;
-plain server (`simd` package, single-threaded): **~800-870 ms**. Firefox/WebKit numbers are
-close (all three engines run the exact same wasm bytes) — see
-`benchmarks/wasm_decode_2026-09-18.tsv` for the full 48-row table (16 streams x 3 browsers).
+Measured decode times (isolated server, `threads` package — Ryzen 9 9950X3D, shared box):
+**~95-130 ms** median per ~1 MP image in chromium/firefox, ~130 ms in webkit — roughly half of
+the 2026-09-18 baseline. The wins: the rayon pool defaults to `min(hardwareConcurrency, 16)`
+child workers (a 32-child pool regressed past the 16-core knee: 162 vs 132 ms mean —
+`benchmarks/wasm_threads_2026-09-18.tsv`), and the conv kernel's per-row border scratch is
+`thread_local` instead of two allocations per output row. The `run_row` micro-kernel itself is
+at its bit-identity floor (unfused `mul`+`add`, 16 v128 registers) — see
+`benchmarks/wasm_profile_2026-09-18.md` for the profile and the rejected experiments.
+Plain server (`simd` package, single-threaded): **~730-870 ms**. Full 192-row table:
+`benchmarks/wasm_decode_2026-09-18.tsv`.
 
 ### 3. Demo (`web/demo/`) + `demo-assets-v1` release
 
