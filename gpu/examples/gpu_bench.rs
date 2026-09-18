@@ -5,7 +5,10 @@
 //!         --vectors /mnt/v/output/zenjpegai/reference/vectors --out benchmarks/gpu_decode_<date>.tsv
 //!
 //! Options: `--adapter <name substring>`, `--allow-software`, `--rounds N` (default 7),
-//! `--max-size N` (largest square of the size sweep, default 4096), `--ops sop,bop,hop`.
+//! `--max-size N` (largest square of the size sweep, default 4096), `--ops sop,bop,hop`,
+//! `--profile` (instead of the sweep: per-dispatch device time at 560x888 and 1024x1024, one
+//! compute pass per dispatch; the `single_pass_ms` column is the same picture timed as one pass,
+//! so the profiling overhead is visible).
 //!
 //! What is measured (all wall-clock numbers are medians over interleaved rounds: every round
 //! runs GPU, CPU threaded and CPU 1-thread once, in that order, so drift hits all three alike):
@@ -69,6 +72,7 @@ struct Args {
     rounds: usize,
     max_size: usize,
     ops: Vec<OperatingPoint>,
+    profile: bool,
 }
 
 fn args() -> Args {
@@ -85,6 +89,7 @@ fn args() -> Args {
             OperatingPoint::Bop,
             OperatingPoint::Hop,
         ],
+        profile: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
@@ -95,6 +100,7 @@ fn args() -> Args {
             "--out" => a.out = Some(val().into()),
             "--adapter" => a.opts.adapter_name = Some(val()),
             "--allow-software" => a.opts.allow_software = true,
+            "--profile" => a.profile = true,
             "--rounds" => a.rounds = val().parse().expect("--rounds"),
             "--max-size" => a.max_size = val().parse().expect("--max-size"),
             "--ops" => {
@@ -131,6 +137,92 @@ fn header_for(template: &PictureHeader, h: usize, w: usize) -> PictureHeader {
     hdr
 }
 
+/// `--profile`: per-dispatch device time at a couple of sizes, one compute pass per dispatch.
+fn profile(a: &Args, models: &ModelDir, template: &PictureHeader, model_id: usize) {
+    let ctx = Arc::new(GpuContext::new(&a.opts).expect("adapter"));
+    let i = ctx.adapter_info();
+    let adapter = format!(
+        "{} [{:?} {:?}; {} {}]",
+        i.name, i.backend, i.device_type, i.driver, i.driver_info
+    );
+    assert!(ctx.has_timestamps(), "adapter has no timestamp queries");
+    let mut tsv = String::from(
+        "kind\tadapter\top\twidth\theight\tindex\tkernel\tgrid\tns\tpct\tdispatch_ms_total\tsingle_pass_ms\n",
+    );
+    for &op in &a.ops {
+        let syn = GpuSynthesis::load(ctx.clone(), models, model_id, op).expect("load");
+        let mut sizes = vec![(888usize, 560usize)];
+        if a.max_size >= 1024 {
+            sizes.push((1024, 1024));
+        }
+        for (h, w) in sizes {
+            let hdr = header_for(template, h, w);
+            let y = latents(h, w);
+            // Warm: build the plan and compile pipelines outside the measurement.
+            let mut ws = Workspace::new();
+            let mut plain = vec![];
+            for _ in 0..=a.rounds {
+                let mut pic = syn
+                    .run_for_header(&mut ws, &hdr, [&y[0], &y[1]])
+                    .expect("run");
+                pollster::block_on(pic.read_planes()).expect("readback");
+                if let Some(ns) = pic.timing.gpu_ns {
+                    plain.push(ns as f64 / 1e6);
+                }
+            }
+            let single_pass = median(&mut plain);
+            ws.set_profile(true);
+            let mut rows: Vec<Vec<u64>> = vec![];
+            let mut labels: Vec<String> = vec![];
+            for _ in 0..a.rounds {
+                let mut pic = syn
+                    .run_for_header(&mut ws, &hdr, [&y[0], &y[1]])
+                    .expect("run");
+                pollster::block_on(pic.read_planes()).expect("readback");
+                let per = pollster::block_on(pic.dispatch_ns())
+                    .expect("timestamps")
+                    .expect("profile mode");
+                if labels.is_empty() {
+                    labels = per.iter().map(|(l, _)| l.clone()).collect();
+                    rows = vec![vec![]; per.len()];
+                }
+                for (r, (_, ns)) in rows.iter_mut().zip(&per) {
+                    r.push(*ns);
+                }
+            }
+            let med: Vec<f64> = rows
+                .iter_mut()
+                .map(|r| {
+                    r.sort_unstable();
+                    r[r.len() / 2] as f64
+                })
+                .collect();
+            let total: f64 = med.iter().sum();
+            for (idx, (label, &ns)) in labels.iter().zip(&med).enumerate() {
+                let (kernel, grid) = label.split_once(" [").unwrap_or((label, ""));
+                writeln!(
+                    tsv,
+                    "profile\t{adapter}\t{op:?}\t{w}\t{h}\t{idx}\t{kernel}\t{}\t{ns:.0}\t{:.2}\t{:.3}\t{single_pass:.3}",
+                    grid.trim_end_matches(']'),
+                    100.0 * ns / total,
+                    total / 1e6,
+                )
+                .unwrap();
+            }
+            eprintln!(
+                "{op:?} {w}x{h}: {} dispatches, {:.2} ms summed (single pass {single_pass:.2} ms)",
+                labels.len(),
+                total / 1e6
+            );
+        }
+    }
+    print!("{tsv}");
+    if let Some(out) = &a.out {
+        std::fs::write(out, &tsv).expect("write tsv");
+        eprintln!("wrote {}", out.display());
+    }
+}
+
 fn main() {
     let a = args();
     let models = ModelDir::new(&a.models);
@@ -142,12 +234,23 @@ fn main() {
             .picture
     };
     let model_id = template.model_id as usize;
+    if a.profile {
+        profile(&a, &models, &template, model_id);
+        return;
+    }
     let cpu_mt = Engine::new();
     let cpu_1t = Engine::with(cpu_mt.tier, false);
     let mut tsv = String::from(
         "kind\tadapter\top\twidth\theight\ttiles\tdispatches\tgpu_wall_ms\tgpu_device_ms\tgpu_submit_ms\tgpu_first_ms\tcpu_mt_ms\tcpu_1t_ms\tgpu_mem_mb\tlargest_map_mb\tnote\n",
     );
     let mut adapter = String::new();
+    // Write after every row: a sweep that dies late (a big operating point can exhaust GPU
+    // memory) must not take the rows it already produced with it.
+    let flush = |tsv: &str| {
+        if let Some(out) = &a.out {
+            std::fs::write(out, tsv).expect("write tsv");
+        }
+    };
 
     for &op in &a.ops {
         // Cold: context, weights, first picture (560 wide x 888 high like the reference test image).
@@ -172,12 +275,14 @@ fn main() {
         let first_ms = ms(t);
         writeln!(
             tsv,
-            "cold\t{adapter}\t{op:?}\t560\t888\t1\t{}\t{:.2}\t\t\t{first_ms:.2}\t\t\t\t\tcontext {ctx_ms:.1} ms + checkpoint parse/upload {load_ms:.1} ms + first picture {first_ms:.1} ms ({} pipelines)",
+            "cold\t{adapter}\t{op:?}\t560\t888\t1\t{}\t{:.2}\t\t\t{first_ms:.2}\t\t\t\t\tcontext {ctx_ms:.1} ms + checkpoint parse/upload {load_ms:.1} ms + first picture {first_ms:.1} ms, of which plan build (pipeline compilation + bind groups) {:.1} ms ({} pipelines)",
             pic.timing.dispatches,
             ctx_ms + load_ms + first_ms,
+            pic.timing.plan_host_ns as f64 / 1e6,
             ctx.pipeline_count(),
         )
         .unwrap();
+        flush(&tsv);
 
         let luma = models
             .load_synthesis_primary(model_id, op, &cpu_mt)
@@ -205,6 +310,7 @@ fn main() {
                         "synthesis\t{adapter}\t{op:?}\t{w}\t{h}\t\t\t\t\t\t\t\t\t\t\tGPU: {e}"
                     )
                     .unwrap();
+                    flush(&tsv);
                     continue;
                 }
             };
@@ -256,6 +362,7 @@ fn main() {
                 largest as f64 / (1 << 20) as f64,
             )
             .unwrap();
+            flush(&tsv);
             eprintln!("{op:?} {w}x{h} done");
         }
     }
@@ -319,12 +426,13 @@ fn main() {
             median(&mut st),
         )
         .unwrap();
+        flush(&tsv);
         eprintln!("{name} done");
     }
 
     print!("{tsv}");
-    if let Some(out) = a.out {
-        std::fs::write(&out, &tsv).expect("write tsv");
+    flush(&tsv);
+    if let Some(out) = &a.out {
         eprintln!("wrote {}", out.display());
     }
 }

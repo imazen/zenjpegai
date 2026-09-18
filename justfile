@@ -35,6 +35,10 @@ build-release:
 gpu-test:
     ZENJPEGAI_REF={{ref}} cargo test -p zenjpegai-gpu --features gpu-tests -- --test-threads 1 --nocapture 2>&1 | tee ~/tmp/zenjpegai-gpu-test.log
 
+# Per-dispatch GPU device time (one compute pass per dispatch). ADAPTER = name substring.
+gpu-profile adapter="":
+    cargo run --release -p zenjpegai-gpu --example gpu_bench -- --profile --rounds 5 {{ if adapter == "" { "" } else { "--adapter " + adapter } }} --out benchmarks/gpu_profile_$(date +%F).tsv
+
 # The test suite on wasm32-wasip1 under node (Wasm128 tier, unfused multiply-add policy).
 test-wasi:
     CARGO_TARGET_WASM32_WASIP1_RUNNER="node --no-warnings {{justfile_directory()}}/scripts/wasm/run_wasi.mjs" RUSTFLAGS="-Ctarget-feature=+simd128" ZENJPEGAI_REF={{ref}} cargo test --target wasm32-wasip1 --no-default-features --features std,reference-tests,unstable-internals --lib --tests 2>&1 | tee ~/tmp/zenjpegai-test-wasi.log

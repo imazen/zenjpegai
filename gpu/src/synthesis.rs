@@ -17,7 +17,7 @@ use zenjpegai::weights::Checkpoint;
 
 use crate::context::GpuContext;
 use crate::error::{GpuError, Result};
-use crate::kernels::{Act, Pointwise};
+use crate::kernels::{Act, Pointwise, Res};
 use crate::layers::{GpuConv, GpuConvTranspose, GpuDepthwise, GpuLayerNorm, f32_buffer, pack_hwc4};
 use crate::plan::{Graph, Plan, Pool, T};
 
@@ -160,12 +160,9 @@ impl ResAu {
         })
     }
 
-    /// In place on `x`.
     fn forward(&self, g: &mut Graph<'_>, x: T) -> Result<T> {
         let m = g.conv_ex(x, &self.conv, (0, 0), true, Act::None)?;
-        let m = g.conv(m, &self.conv2)?;
-        g.pointwise(Pointwise::Gate, x, &[m])?;
-        Ok(x)
+        g.conv_res(m, &self.conv2, Act::None, Res::Gate, x)
     }
 }
 
@@ -212,9 +209,7 @@ impl ResidualBlock {
 
     fn forward(&self, g: &mut Graph<'_>, x: T) -> Result<T> {
         let t = g.conv_ex(x, &self.conv1, (0, 0), false, Act::Relu)?;
-        let out = g.conv(t, &self.conv2)?;
-        g.pointwise(Pointwise::Add, out, &[x])?;
-        Ok(out)
+        g.conv_res(t, &self.conv2, Act::None, Res::Add, x)
     }
 }
 
@@ -484,8 +479,7 @@ impl Primary {
         match self {
             Self::Light(m) => {
                 // LightResidualBlock: relu(conv(x)) + x
-                let x = g.conv_ex(y, &m.res_conv, (0, 0), false, Act::Relu)?;
-                g.pointwise(Pointwise::Add, x, &[y])?;
+                let x = g.conv_res(y, &m.res_conv, Act::Relu, Res::Add, y)?;
                 let x = m.up1.forward(g, x)?;
                 let x = m.act1.forward(g, x)?;
                 let x = g.crop(x, h.div_ceil(8), w.div_ceil(8))?;
@@ -622,6 +616,8 @@ impl Secondary {
 // ---------------------------------------------------------------- picture-level state
 
 const MAX_TIMED_TILES: u32 = 64;
+/// Cap on the dispatches a profiling run times individually (query-set size).
+const MAX_PROFILED_DISPATCHES: usize = 2048;
 
 struct Queries {
     set: wgpu::QuerySet,
@@ -640,6 +636,7 @@ pub struct Workspace {
     staging: Option<wgpu::Buffer>,
     queries: Option<Queries>,
     generation: u64,
+    profile: bool,
 }
 
 fn grow(
@@ -670,6 +667,13 @@ fn grow(
 impl Workspace {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Time every dispatch separately (one compute pass each) so
+    /// [`GpuPicture::dispatch_ns`] can report where the device time went. Off by default:
+    /// splitting the pass perturbs the total. Needs an adapter with timestamp queries.
+    pub fn set_profile(&mut self, on: bool) {
+        self.profile = on;
     }
 
     /// Bytes of GPU memory currently held.
@@ -724,6 +728,7 @@ pub struct GpuPicture {
     pub timing: Timing,
     staging: wgpu::Buffer,
     queries: Option<(wgpu::Buffer, u32)>,
+    profile: Option<(wgpu::Buffer, Vec<String>)>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -763,6 +768,38 @@ impl GpuPicture {
         self.staging.unmap();
         self.timing.gpu_ns = self.gpu_time().await?;
         Ok(Tensor::from_vec(3, self.height, self.width, data)?)
+    }
+
+    /// Device time of each dispatch, in submission order, after a run of a workspace with
+    /// [`Workspace::set_profile(true)`](Workspace::set_profile). `None` otherwise. Every
+    /// dispatch was its own compute pass, so the sum is slightly above the single-pass total.
+    pub async fn dispatch_ns(&self) -> Result<Option<Vec<(String, u64)>>> {
+        let Some((buf, labels)) = &self.profile else {
+            return Ok(None);
+        };
+        let bytes = labels.len() as u64 * 16;
+        self.ctx.map_read(buf, bytes).await?;
+        let period = self.ctx.queue().get_timestamp_period() as f64;
+        let out = {
+            let view = buf
+                .slice(0..bytes)
+                .get_mapped_range()
+                .map_err(|e| GpuError::Device(e.to_string()))?;
+            bytemuck::cast_slice::<u8, u64>(&view)
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .zip(labels)
+                .map(|(t, l)| {
+                    (
+                        l.clone(),
+                        (t[1].saturating_sub(t[0]) as f64 * period) as u64,
+                    )
+                })
+                .collect()
+        };
+        buf.unmap();
+        Ok(Some(out))
     }
 
     /// Device time of the tile passes (waits for the GPU). `None` without timestamp queries.
@@ -1011,7 +1048,8 @@ impl GpuSynthesis {
         timing.upload_host_ns = since(t0);
 
         let timed = (tiles.len() as u32).min(MAX_TIMED_TILES);
-        for (i, tile) in tiles.iter().enumerate() {
+        let mut resolved: Vec<Arc<Plan>> = Vec::with_capacity(tiles.len());
+        for tile in tiles.iter() {
             let key = PlanKey {
                 tile: [
                     tile.image.width,
@@ -1053,24 +1091,69 @@ impl GpuSynthesis {
                     p
                 }
             };
-            let t = now();
-            let mut enc = ctx.device().create_command_encoder(&Default::default());
-            let stamps = ws
-                .queries
-                .as_ref()
-                .filter(|_| (i as u32) < timed)
-                .map(|q| (&q.set, 2 * i as u32));
-            plan.encode(&mut enc, stamps);
-            if i + 1 == tiles.len()
-                && let Some(q) = &ws.queries
-            {
-                enc.resolve_query_set(&q.set, 0..2 * timed, &q.resolve, 0);
-                enc.copy_buffer_to_buffer(&q.resolve, 0, &q.read, 0, timed as u64 * 16);
-            }
-            ctx.queue().submit([enc.finish()]);
             timing.dispatches += plan.dispatches();
             timing.largest_binding_bytes =
                 timing.largest_binding_bytes.max(plan.largest_binding_bytes);
+            resolved.push(plan);
+        }
+
+        // Per-dispatch profiling: its own query set, sized for this picture.
+        let profile = (ws.profile
+            && ctx.timestamps
+            && timing.dispatches <= MAX_PROFILED_DISPATCHES)
+            .then(|| {
+                let count = 2 * timing.dispatches as u32;
+                let bytes = count as u64 * 8;
+                let labels: Vec<String> = resolved
+                    .iter()
+                    .flat_map(|p| p.labels().iter().cloned())
+                    .collect();
+                let set = ctx.device().create_query_set(&wgpu::QuerySetDescriptor {
+                    label: Some("zenjpegai dispatch timestamps"),
+                    ty: wgpu::QueryType::Timestamp,
+                    count,
+                });
+                let mk = |usage| {
+                    ctx.device().create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("zenjpegai dispatch timestamps"),
+                        size: bytes,
+                        usage,
+                        mapped_at_creation: false,
+                    })
+                };
+                let resolve = mk(wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC);
+                let read = mk(wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST);
+                (set, resolve, read, labels)
+            });
+
+        let mut at = 0u32;
+        for (i, plan) in resolved.iter().enumerate() {
+            let t = now();
+            let mut enc = ctx.device().create_command_encoder(&Default::default());
+            match &profile {
+                Some((set, ..)) => {
+                    plan.encode_profiled(&mut enc, set, at);
+                    at += 2 * plan.dispatches() as u32;
+                }
+                None => {
+                    let stamps = ws
+                        .queries
+                        .as_ref()
+                        .filter(|_| (i as u32) < timed)
+                        .map(|q| (&q.set, 2 * i as u32));
+                    plan.encode(&mut enc, stamps);
+                }
+            }
+            if i + 1 == tiles.len() {
+                if let Some((set, resolve, read, _)) = &profile {
+                    enc.resolve_query_set(set, 0..at, resolve, 0);
+                    enc.copy_buffer_to_buffer(resolve, 0, read, 0, at as u64 * 8);
+                } else if let Some(q) = &ws.queries {
+                    enc.resolve_query_set(&q.set, 0..2 * timed, &q.resolve, 0);
+                    enc.copy_buffer_to_buffer(&q.resolve, 0, &q.read, 0, timed as u64 * 16);
+                }
+            }
+            ctx.queue().submit([enc.finish()]);
             timing.submit_host_ns += since(t);
         }
 
@@ -1084,7 +1167,12 @@ impl GpuSynthesis {
             width,
             timing,
             staging: staging.clone(),
-            queries: ws.queries.as_ref().map(|q| (q.read.clone(), timed)),
+            // In profile mode the per-tile query set is not written, so it must not be read.
+            queries: profile
+                .is_none()
+                .then(|| ws.queries.as_ref().map(|q| (q.read.clone(), timed)))
+                .flatten(),
+            profile: profile.map(|(_, _, read, labels)| (read, labels)),
         })
     }
 

@@ -44,6 +44,18 @@ pub enum Act {
     Relu,
 }
 
+/// A second operand combined with the convolution's result as it is stored, saving the read,
+/// write and dispatch of a separate pointwise pass. The operand is indexed exactly like `dst`,
+/// and the arithmetic is the same as the standalone [`Pointwise`] operation, so fusing does not
+/// change a single rounding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Res {
+    /// `dst = acc + res` (residual block).
+    Add,
+    /// `dst = res * (1 + acc)` (ResAU gate).
+    Gate,
+}
+
 /// Compile-time geometry of a convolution kernel.
 #[derive(Clone, Copy, Debug)]
 pub struct ConvVariant {
@@ -55,13 +67,15 @@ pub struct ConvVariant {
     pub act: Act,
     /// Apply ReLU6 to every input sample as it is loaded (the ResAU gate's first step).
     pub pre_relu6: bool,
+    /// Fused second operand (applied after `act`).
+    pub res: Option<Res>,
 }
 
 impl ConvVariant {
     pub fn key(&self) -> String {
         format!(
-            "conv_k{}x{}_s{}_ob{}_{:?}_{}",
-            self.kh, self.kw, self.stride, self.ob, self.act, self.pre_relu6
+            "conv_k{}x{}_s{}_ob{}_{:?}_{}_{:?}",
+            self.kh, self.kw, self.stride, self.ob, self.act, self.pre_relu6, self.res
         )
     }
 }
@@ -78,11 +92,20 @@ fn acc_step(ob: u32) -> String {
         .collect()
 }
 
-fn acc_store(ob: u32, act: Act) -> String {
+fn acc_store(ob: u32, act: Act, res: Option<Res>) -> String {
     (0..ob)
-        .map(|i| match act {
-            Act::None => format!("  dst[o + {i}u] = a{i};\n"),
-            Act::Relu => format!("  dst[o + {i}u] = max(a{i}, vec4<f32>(0.0));\n"),
+        .map(|i| {
+            let v = match act {
+                Act::None => format!("a{i}"),
+                Act::Relu => format!("max(a{i}, vec4<f32>(0.0))"),
+            };
+            match res {
+                None => format!("  dst[o + {i}u] = {v};\n"),
+                Some(Res::Add) => format!("  dst[o + {i}u] = {v} + res[o + {i}u];\n"),
+                Some(Res::Gate) => {
+                    format!("  dst[o + {i}u] = res[o + {i}u] * (vec4<f32>(1.0) + {v});\n")
+                }
+            }
         })
         .collect()
 }
@@ -95,15 +118,28 @@ const CONV_BINDINGS: &str = "
 ";
 
 /// Direct convolution, zero padding by bounds check, any group count whose groups are whole
-/// blocks. Params: `in_h in_w in_c4 out_h out_w out_c4 pad_y pad_x icg4 ocg4`.
+/// blocks. One invocation computes `ob` output blocks of one pixel.
+///
+/// Register tiling over *pixels* (2x2 and 2x1 outputs per invocation, which amortises the
+/// `4 * ob` weight loads of every tap over that many products) was implemented and measured on
+/// an RTX 2080: it helps SOP (1024 x 1024 synthesis 8.48 -> 7.23 ms device) and loses on the
+/// operating points that matter more (BOP 22.4 -> 26.3 ms, HOP 555 -> 711 ms), so the kernel
+/// computes one pixel per invocation. The loss tracks register pressure — `ob * px * py`
+/// accumulators — not the load count, so the lever to try next is fewer channel blocks per
+/// invocation together with a pixel tile, not a larger tile.
+/// Params: `in_h in_w in_c4 out_h out_w out_c4 pad_y pad_x icg4 ocg4`.
 pub fn conv(v: &ConvVariant) -> String {
     let load = if v.pre_relu6 {
         "clamp(src[sb + ic], vec4<f32>(0.0), vec4<f32>(6.0))"
     } else {
         "src[sb + ic]"
     };
+    let res_binding = match v.res {
+        None => "",
+        Some(_) => "@group(0) @binding(5) var<storage, read> res: array<vec4<f32>>;\n",
+    };
     format!(
-        "{params}{CONV_BINDINGS}
+        "{params}{CONV_BINDINGS}{res_binding}
 const KH: u32 = {kh}u; const KW: u32 = {kw}u; const STRIDE: u32 = {stride}u; const OB: u32 = {ob}u;
 @compute @workgroup_size({WG}, {WG}, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{
@@ -137,28 +173,36 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{
         ob = v.ob,
         decl = acc_decl(v.ob, "oc4"),
         step = acc_step(v.ob),
-        store = acc_store(v.ob, v.act),
+        store = acc_store(v.ob, v.act, v.res),
     )
 }
 
 /// Transposed convolution (no groups): output `(oy, ox)` gathers the taps with
-/// `oy + pad - ky` divisible by the stride. Params: `in_h in_w in_c4 out_h out_w out_c4 pad`.
+/// `oy + pad - ky` divisible by the stride. Only those taps are visited — `ky` starts at
+/// `(oy + pad) mod stride` and steps by `stride`, which is exactly the set the divisibility
+/// test used to select, in the same ascending order, so the sum is bit-identical to testing all
+/// `K * K` of them. At stride 2 that is 4 taps of 16 for `K = 4` and at most 4 of 9 for `K = 3`.
+/// Params: `in_h in_w in_c4 out_h out_w out_c4 pad`.
 pub fn conv_transpose(k: u32, stride: u32, ob: u32) -> String {
     format!(
         "{params}{CONV_BINDINGS}
-const K: u32 = {k}u; const STRIDE: i32 = {stride}; const OB: u32 = {ob}u;
+const K: u32 = {k}u; const STRIDE: u32 = {stride}u; const OB: u32 = {ob}u;
 @compute @workgroup_size({WG}, {WG}, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{
   if (gid.x >= p.out_w || gid.y >= p.out_h) {{ return; }}
   let og = gid.z;
   let oc4 = og * OB;
-{decl}  for (var ky = 0u; ky < K; ky++) {{
-    let ty = i32(gid.y + p.pad) - i32(ky);
-    if (ty < 0 || ty % STRIDE != 0 || ty / STRIDE >= i32(p.in_h)) {{ continue; }}
-    for (var kx = 0u; kx < K; kx++) {{
-      let tx = i32(gid.x + p.pad) - i32(kx);
-      if (tx < 0 || tx % STRIDE != 0 || tx / STRIDE >= i32(p.in_w)) {{ continue; }}
-      let sb = (u32(ty / STRIDE) * p.in_w + u32(tx / STRIDE)) * p.in_c4;
+  let by = gid.y + p.pad;
+  let bx = gid.x + p.pad;
+{decl}  for (var ky = by % STRIDE; ky < K; ky += STRIDE) {{
+    if (ky > by) {{ break; }}
+    let iy = (by - ky) / STRIDE;
+    if (iy >= p.in_h) {{ continue; }}
+    for (var kx = bx % STRIDE; kx < K; kx += STRIDE) {{
+      if (kx > bx) {{ break; }}
+      let ix = (bx - kx) / STRIDE;
+      if (ix >= p.in_w) {{ continue; }}
+      let sb = (iy * p.in_w + ix) * p.in_c4;
       let wb = ((og * K + ky) * K + kx) * p.in_c4 * OB;
       for (var ic = 0u; ic < p.in_c4; ic++) {{
         let v = src[sb + ic];
@@ -172,36 +216,59 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{
         params = params(&["in_h", "in_w", "in_c4", "out_h", "out_w", "out_c4", "pad"]),
         decl = acc_decl(ob, "oc4"),
         step = acc_step(ob),
-        store = acc_store(ob, Act::None),
+        store = acc_store(ob, Act::None, None),
     )
 }
 
 /// Depthwise 3x3, stride 1, padding 1, no bias. Weights: `vec4` per `(block, ky, kx)`.
 /// Params: `h w c4`.
+///
+/// One channel block per workgroup, so the `(WG + 2)^2` input halo the workgroup needs is
+/// 1600 bytes of workgroup memory. Staging it there turns the nine reads per output pixel into
+/// `(WG + 2)^2 / WG^2` (1.56 at `WG = 8`) — this kernel does one multiply-add per 16 bytes read,
+/// so it is bound by nothing else. Out-of-picture halo samples are stored as zero and their taps
+/// still added, which is bit-identical to skipping them: adding an exact `w * 0.0` changes no
+/// finite accumulator.
 pub fn depthwise3x3() -> String {
+    let halo = WG + 2;
     format!(
         "{params}
 @group(0) @binding(1) var<storage, read> src: array<vec4<f32>>;
 @group(0) @binding(2) var<storage, read_write> dst: array<vec4<f32>>;
 @group(0) @binding(3) var<storage, read> wt: array<vec4<f32>>;
+const HALO: u32 = {halo}u;
+var<workgroup> tile: array<vec4<f32>, {halo_sq}u>;
 @compute @workgroup_size({WG}, {WG}, 1)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{
-  if (gid.x >= p.w || gid.y >= p.h) {{ return; }}
+fn main(
+  @builtin(global_invocation_id) gid: vec3<u32>,
+  @builtin(local_invocation_id) lid: vec3<u32>,
+  @builtin(workgroup_id) wid: vec3<u32>,
+) {{
   let c = gid.z;
+  let x0 = i32(wid.x * {WG}u) - 1;
+  let y0 = i32(wid.y * {WG}u) - 1;
+  for (var i = lid.y * {WG}u + lid.x; i < HALO * HALO; i += {WG}u * {WG}u) {{
+    let sy = y0 + i32(i / HALO);
+    let sx = x0 + i32(i % HALO);
+    var v = vec4<f32>(0.0);
+    if (sy >= 0 && sy < i32(p.h) && sx >= 0 && sx < i32(p.w)) {{
+      v = src[(u32(sy) * p.w + u32(sx)) * p.c4 + c];
+    }}
+    tile[i] = v;
+  }}
+  workgroupBarrier();
+  if (gid.x >= p.w || gid.y >= p.h) {{ return; }}
   var acc = vec4<f32>(0.0);
   for (var ky = 0u; ky < 3u; ky++) {{
-    let iy = i32(gid.y + ky) - 1;
-    if (iy < 0 || iy >= i32(p.h)) {{ continue; }}
     for (var kx = 0u; kx < 3u; kx++) {{
-      let ix = i32(gid.x + kx) - 1;
-      if (ix < 0 || ix >= i32(p.w)) {{ continue; }}
-      acc += wt[c * 9u + ky * 3u + kx] * src[(u32(iy) * p.w + u32(ix)) * p.c4 + c];
+      acc += wt[c * 9u + ky * 3u + kx] * tile[(lid.y + ky) * HALO + lid.x + kx];
     }}
   }}
   dst[(gid.y * p.w + gid.x) * p.c4 + c] = acc;
 }}
 ",
         params = params(&["h", "w", "c4"]),
+        halo_sq = halo * halo,
     )
 }
 
@@ -545,7 +612,12 @@ pub fn yuv_to_rgba() -> String {
 @group(0) @binding(2) var tex: texture_storage_2d<rgba8unorm, write>;
 const KRY: f32 = 1.5748; const KBY: f32 = 1.8556;
 const GU: f32 = {gu:?}; const GV: f32 = {gv:?};
-fn unit(x: f32) -> f32 {{ return clamp((x * 255.0) / 255.0, 0.0, 1.0); }}
+// The CPU output stage clips to [0, 255] and then rounds half to even (`ImageIO.write_png`).
+// Rounding here instead of leaving it to the fixed-function `rgba8unorm` conversion is what
+// makes the texture match it: the hardware's float-to-unorm rounding is not the same on every
+// driver (llvmpipe agreed with the CPU stage, NVIDIA's differs on ~3% of samples by one step),
+// and an already-integral k/255 converts back to k everywhere.
+fn unit(x: f32) -> f32 {{ return round(clamp((x * 255.0) / 255.0, 0.0, 1.0) * 255.0) / 255.0; }}
 @compute @workgroup_size({WG}, {WG}, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{
   if (gid.x >= p.w || gid.y >= p.h) {{ return; }}

@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::context::GpuContext;
 use crate::error::{GpuError, Result};
-use crate::kernels::{self, Act, ConvVariant, Pointwise, WG, WG1};
+use crate::kernels::{self, Act, ConvVariant, Pointwise, Res, WG, WG1};
 use crate::layers::{GpuConv, GpuConvTranspose, GpuDepthwise, GpuLayerNorm};
 
 /// A virtual feature map in HWC4 layout.
@@ -54,6 +54,7 @@ enum Bind {
 }
 
 struct Step {
+    label: String,
     pipeline: wgpu::ComputePipeline,
     params: [u32; 16],
     binds: Vec<Bind>,
@@ -160,6 +161,7 @@ impl<'a> Graph<'a> {
             }
         }
         self.steps.push(Step {
+            label: key.to_string(),
             pipeline: self.ctx.pipeline(key, src),
             params: p,
             binds,
@@ -176,6 +178,25 @@ impl<'a> Graph<'a> {
         extra: (usize, usize),
         pre_relu6: bool,
         act: Act,
+    ) -> Result<T> {
+        self.conv_full(x, l, extra, pre_relu6, act, None)
+    }
+
+    /// Convolution whose store fuses a second operand of the output's shape: `Res::Add` for a
+    /// residual sum, `Res::Gate` for the ResAU gate. Same arithmetic as the separate
+    /// [`Graph::pointwise`] step, one dispatch and one round trip through memory fewer.
+    pub fn conv_res(&mut self, x: T, l: &GpuConv, act: Act, op: Res, res: T) -> Result<T> {
+        self.conv_full(x, l, (0, 0), false, act, Some((op, res)))
+    }
+
+    fn conv_full(
+        &mut self,
+        x: T,
+        l: &GpuConv,
+        extra: (usize, usize),
+        pre_relu6: bool,
+        act: Act,
+        res: Option<(Res, T)>,
     ) -> Result<T> {
         if x.c != l.in_ch {
             return Err(GpuError::Shape(format!(
@@ -195,6 +216,13 @@ impl<'a> Graph<'a> {
             ));
         };
         let y = self.tensor(l.out_ch, oh, ow)?;
+        if let Some((_, r)) = res
+            && (r.c, r.h, r.w) != (y.c, oh, ow)
+        {
+            return Err(GpuError::Shape(
+                "conv: fused operand has a different shape from the output".into(),
+            ));
+        }
         let v = ConvVariant {
             kh: l.k.0 as u32,
             kw: l.k.1 as u32,
@@ -202,8 +230,18 @@ impl<'a> Graph<'a> {
             ob: l.ob as u32,
             act,
             pre_relu6,
+            res: res.map(|(op, _)| op),
         };
         let (gx, gy) = grid2(ow, oh);
+        let mut binds = vec![
+            Bind::Tensor(x.id),
+            Bind::Tensor(y.id),
+            Bind::Buffer(l.weight.clone()),
+            Bind::Buffer(l.bias.clone()),
+        ];
+        if let Some((_, r)) = res {
+            binds.push(Bind::Tensor(r.id));
+        }
         self.push(
             &v.key(),
             || kernels::conv(&v),
@@ -219,12 +257,7 @@ impl<'a> Graph<'a> {
                 l.icg4 as u32,
                 l.ocg4 as u32,
             ],
-            vec![
-                Bind::Tensor(x.id),
-                Bind::Tensor(y.id),
-                Bind::Buffer(l.weight.clone()),
-                Bind::Buffer(l.bias.clone()),
-            ],
+            binds,
             [gx, gy, (y.c4() / l.ob) as u32],
         );
         Ok(y)
@@ -771,6 +804,14 @@ impl<'a> Graph<'a> {
             });
             steps.push((step.pipeline.clone(), bind_group, step.dispatch));
         }
+        let labels = self
+            .steps
+            .iter()
+            .map(|s| {
+                let [x, y, z] = s.dispatch;
+                format!("{} [{x}x{y}x{z}]", s.label)
+            })
+            .collect();
         let tensor_buffers = (0..self.tensors.len())
             .map(|id| {
                 (born[id] != usize::MAX || self.tensors[id].pinned).then(|| buffer_of(id).clone())
@@ -778,6 +819,7 @@ impl<'a> Graph<'a> {
             .collect();
         Ok(Plan {
             steps,
+            labels,
             tensor_buffers,
             activation_bytes: slot_bytes.iter().sum(),
             largest_binding_bytes: self.tensors.iter().map(|t| t.bytes).max().unwrap_or(0),
@@ -788,6 +830,7 @@ impl<'a> Graph<'a> {
 /// A recorded network, ready to replay.
 pub struct Plan {
     steps: Vec<(wgpu::ComputePipeline, wgpu::BindGroup, [u32; 3])>,
+    labels: Vec<String>,
     tensor_buffers: Vec<Option<wgpu::Buffer>>,
     /// Sum of the activation slot sizes this plan needs.
     pub activation_bytes: u64,
@@ -798,6 +841,31 @@ pub struct Plan {
 impl Plan {
     pub fn dispatches(&self) -> usize {
         self.steps.len()
+    }
+
+    /// One label per dispatch: kernel key and workgroup grid.
+    pub fn labels(&self) -> &[String] {
+        &self.labels
+    }
+
+    /// Record the plan with **one compute pass per dispatch**, each timed by a begin / end
+    /// timestamp pair at `first + 2 * i`. Only for profiling: splitting the pass adds per-pass
+    /// overhead (the whole-plan total measured this way is a few percent above
+    /// [`Plan::encode`]'s), and it needs `2 * dispatches()` queries in the set.
+    pub fn encode_profiled(&self, enc: &mut wgpu::CommandEncoder, q: &wgpu::QuerySet, first: u32) {
+        for (i, (pipeline, bind_group, [x, y, z])) in self.steps.iter().enumerate() {
+            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some(&self.labels[i]),
+                timestamp_writes: Some(wgpu::ComputePassTimestampWrites {
+                    query_set: q,
+                    beginning_of_pass_write_index: Some(first + 2 * i as u32),
+                    end_of_pass_write_index: Some(first + 2 * i as u32 + 1),
+                }),
+            });
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, bind_group, &[]);
+            pass.dispatch_workgroups(*x, *y, *z);
+        }
     }
 
     /// Record the whole plan as one compute pass. `timestamps`: query set and the index of the
