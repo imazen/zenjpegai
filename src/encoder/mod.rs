@@ -118,6 +118,18 @@ pub struct EncodeParams {
     /// ([`RateEstimate::Coded`], default) or the reference's `ECLibLH` likelihood estimate
     /// ([`RateEstimate::Likelihood`]), which picks the same `(model, beta)` the reference does.
     pub rate_estimate: RateEstimate,
+    /// EFE linear post-filter (`cfg/tools/EFElinear.json`). The encoder searches the
+    /// candidate splits and filter lengths on the reconstruction once, after the rate loop
+    /// (never per trial, so the trials' stream sizes do not carry the tool header).
+    pub efe_linear: bool,
+    /// `EFElinearParams.DCTIF_only`: signal the EFE linear tool with both filter sets empty
+    /// (the header then carries only the enable flag and the two `minSymbol`/`maxSymbol`
+    /// pairs).
+    pub efe_dctif_only: bool,
+    /// `EFEnonlinear.enabled` of the reference's tool config. With it on, the EFE linear
+    /// search also fits the up-sampled-picture filter set (`filtersBest2`, the first set in
+    /// the tool header) that `EFEnonlinear` needs.
+    pub efe_nonlinear: bool,
 }
 
 /// How a region's residual reaches the codestream
@@ -167,6 +179,9 @@ impl Default for EncodeParams {
             diff_display: (0, 0),
             lef: false,
             rate_estimate: RateEstimate::Coded,
+            efe_linear: false,
+            efe_dctif_only: false,
+            efe_nonlinear: false,
         }
     }
 }
@@ -481,6 +496,7 @@ impl Encoder {
                 quality_map,
                 &enough::Unstoppable,
                 true,
+                None,
             )
             .map_err(|e| at!(e))?;
         Self::trace(stream, components, quality_map).map_err(|e| at!(e))
@@ -520,6 +536,11 @@ impl Encoder {
             zs.next().ok_or(Error::InvalidData("internal: luma z"))?,
             zs.next().ok_or(Error::InvalidData("internal: chroma z"))?,
         ];
+        // `org_img_i` of `EFElinear.compress`: the source's planes at its own subsampling.
+        let efe_org = params
+            .efe_linear
+            .then(|| efe_source_planes(src, &meta))
+            .transpose()?;
         self.encode_from_latents(
             [&ys[0], &ys[1]],
             Some(z),
@@ -530,6 +551,7 @@ impl Encoder {
             quality_map,
             stop,
             keep_trace,
+            efe_org.as_ref(),
         )
     }
 
@@ -588,8 +610,15 @@ impl Encoder {
         // likelihood estimate when `params.rate_estimate` asks for it.
         let mut latents: Vec<Option<ModelLatents>> =
             (0..model::MODEL_BETAS.len()).map(|_| None).collect();
+        // `org_img_i` of `EFElinear.compress`, computed once for the final encode; the rate
+        // trials leave `efe_linear` off so their stream sizes never carry the tool header.
+        let efe_org = params
+            .efe_linear
+            .then(|| efe_source_planes(src, &meta))
+            .transpose()?;
         let code = |ccs_model: usize,
                     beta: i32,
+                    efe: Option<&crate::decoder::reconstruct::Planes>,
                     latents: &mut [Option<ModelLatents>],
                     trials: &mut usize|
          -> Result<(Vec<u8>, f64)> {
@@ -618,6 +647,7 @@ impl Encoder {
             let params = EncodeParams {
                 model_id: ccs_model as u8,
                 beta_displacement_log: [beta; 2],
+                efe_linear: efe.is_some(),
                 ..base_params
             };
             let (stream, components) = self.encode_from_latents(
@@ -632,6 +662,7 @@ impl Encoder {
                 // The likelihood measure reads `scale_log`/`residual_q` off the trace;
                 // the coded measure sheds them for the early-drop memory win.
                 params.rate_estimate == RateEstimate::Likelihood,
+                efe,
             )?;
             let bpp = match params.rate_estimate {
                 RateEstimate::Likelihood => {
@@ -657,7 +688,7 @@ impl Encoder {
         let mut base: Vec<Option<f64>> = alloc::vec![None; model::MODEL_BETAS.len()];
         for id in 0..model::MODEL_BETAS.len() {
             stop.check()?;
-            let bpp = code(id, 0, &mut latents, &mut trials)?.1;
+            let bpp = code(id, 0, None, &mut latents, &mut trials)?.1;
             base[id] = Some(bpp);
             let diff = (bpp - target_bpp).abs() / bpp;
             if diff < best_diff {
@@ -679,7 +710,7 @@ impl Encoder {
                     return Ok(v);
                 }
                 stop.check()?;
-                let bpp = code(best_model, b, &mut latents, &mut trials)?.1;
+                let bpp = code(best_model, b, None, &mut latents, &mut trials)?.1;
                 cache.insert(b, bpp);
                 Ok(bpp)
             };
@@ -698,7 +729,13 @@ impl Encoder {
                 &mut cached,
             )?
         };
-        let (stream, estimate) = code(best_model, beta, &mut latents, &mut trials)?;
+        let (stream, estimate) = code(
+            best_model,
+            beta,
+            efe_org.as_ref(),
+            &mut latents,
+            &mut trials,
+        )?;
         let bpp = stream.len() as f64 * 8.0 / pixels;
         Ok((
             stream,
@@ -840,6 +877,9 @@ impl Encoder {
     /// `encode_traced*`; the plain encode paths shed them as soon as the residual payload is
     /// coded (they are ~10 B per picture sample of dead weight while the second component and
     /// the container are still being built).
+    /// `efe_org`: the source's YUV planes (`colour::source_planes`) when
+    /// `params.efe_linear` is set; `None` on rate-search trials (the reference decides the
+    /// filters once on the final reconstruction, so trials never carry the tool header).
     #[allow(clippy::too_many_arguments)]
     fn encode_from_latents(
         &self,
@@ -852,6 +892,7 @@ impl Encoder {
         quality_map: Option<&QualityMap>,
         stop: &dyn enough::Stop,
         keep_trace: bool,
+        efe_org: Option<&crate::decoder::reconstruct::Planes>,
     ) -> Result<(Vec<u8>, Vec<Component>)> {
         let set = self.model_set(self.check_params(w, h, params)?, params.op)?;
         let eng = &self.engine;
@@ -906,6 +947,10 @@ impl Encoder {
         let mut components = Vec::with_capacity(2);
         let mut residual_payloads = Vec::with_capacity(2);
         let mut lef_channel = None;
+        // EFE linear decides on the decoded picture: keep the masked dequantised residual
+        // (and the `likely` map for LSBS) so `reconstruct_latent` can rebuild `y_hat`.
+        let mut efe_residuals: Vec<Option<Tensor<f32>>> = Vec::with_capacity(2);
+        let mut efe_likely: Vec<Option<Tensor<u16>>> = Vec::with_capacity(2);
         for (ccs, latent) in latents.into_iter().enumerate() {
             stop.check()?;
             let model = &set.common[ccs];
@@ -943,9 +988,6 @@ impl Encoder {
                 cube_flag,
                 psi,
             } = out;
-            // The dequantised residual is only a stepping stone to the cube flags; nothing
-            // downstream reads it.
-            drop(residual);
 
             // 6. `encoder_skip_and_cubeflag_for_tiles`: the final mask is the threshold mask
             //    widened by the cubes that must not be skipped; everything else is dropped.
@@ -957,6 +999,20 @@ impl Encoder {
                     *q = 0;
                 }
             }
+            // Masked positions carry no residual symbol, so the decoder's dequantised
+            // residual is `dequantize(0) = 0` there — masking this tensor gives exactly it.
+            efe_residuals.push(if params.efe_linear {
+                let mut residual = residual;
+                for (v, &m) in residual.data.iter_mut().zip(&mask.data) {
+                    if !m {
+                        *v = 0.0;
+                    }
+                }
+                Some(residual)
+            } else {
+                None
+            });
+            efe_likely.push((params.efe_linear && params.lsbs).then(|| scales.likely.clone()));
             hdr.components[ccs].rvs_enabled = params.rvs;
             hdr.components[ccs].grfs_channel_flags = scales.grfs_flags.clone();
             hdr.components[ccs].cube_flags = cube_flags.clone();
@@ -1004,11 +1060,105 @@ impl Encoder {
         let soz_threads = z_enc.finish();
         let soz = join_threads(&soz_threads.iter().map(|t| t.as_slice()).collect::<Vec<_>>());
 
+        // 7c. `EFElinear.compress`: the post-filter runs once on the decoded picture (never
+        //     inside a rate trial). `reconstruct_latent` + `synthesize` rebuild exactly what
+        //     the decoder produces, then `to_source_format` lands it on the source's chroma
+        //     lattice.
+        let mut efe_linear = None;
+        if params.efe_linear {
+            let Some(org) = efe_org else {
+                return Err(Error::InvalidArgument(
+                    "EFE linear: the encode needs the source planes",
+                ));
+            };
+            // The synthesis transform the decoder runs: the stream's first listed one
+            // (`pick_operating_point`), which `picture_header` sets to `params.op`.
+            let synth_op = hdr
+                .synthesis_transforms
+                .first()
+                .copied()
+                .unwrap_or(params.op);
+            let synth_y = model::load_synthesis_primary(
+                &*self.models,
+                params.model_id as usize,
+                synth_op,
+                eng,
+            )?;
+            let synth_uv = model::load_synthesis_secondary(
+                &*self.models,
+                params.model_id as usize,
+                synth_op,
+                eng,
+            )?;
+            let mut y_hat: [Option<Tensor<f32>>; 2] = [None, None];
+            let mut it = efe_residuals.into_iter().zip(efe_likely).enumerate();
+            for (ccs, (residual, likely)) in &mut it {
+                stop.check()?;
+                let ent = crate::decoder::entropy::ComponentEntropy {
+                    z_hat: components[ccs].z_hat.clone(),
+                    skip_scale_log: Tensor::zeros(0, 0, 0)?,
+                    scale_log: Tensor::zeros(0, 0, 0)?,
+                    likely: likely.unwrap_or(Tensor::zeros(0, 0, 0)?),
+                    mask: Tensor::zeros(0, 0, 0)?,
+                    residual_q: Tensor::zeros(0, 0, 0)?,
+                    residual: residual.ok_or(Error::InvalidData("internal: EFE residual"))?,
+                };
+                let mut lat = crate::decoder::reconstruct::reconstruct_latent_with(
+                    eng,
+                    &hdr,
+                    ccs,
+                    &set.common[ccs],
+                    &ent,
+                    stop,
+                )?;
+                // `ls_processing.post_processing` before synthesis, as the decoder does.
+                let tools = ToolHeader {
+                    lsbs_enabled: [params.lsbs; 2],
+                    ..ToolHeader::default()
+                };
+                crate::decoder::reconstruct::post_process_latent(
+                    &hdr, &tools, ccs, &ent, &mut lat,
+                )?;
+                y_hat[ccs] = Some(lat.y_hat);
+            }
+            let planes = crate::decoder::reconstruct::synthesize_with(
+                eng,
+                &hdr,
+                &synth_y,
+                &synth_uv,
+                [
+                    y_hat[0].as_ref().expect("component 0"),
+                    y_hat[1].as_ref().expect("component 1"),
+                ],
+                stop,
+            )?;
+            let rec = crate::decoder::output::to_source_format(&hdr, planes)?;
+            let out = filters::efe_linear::decide(&filters::efe_linear::EfeLinearInput {
+                eng,
+                meta,
+                model_id: params.model_id as usize,
+                dctif_only: params.efe_dctif_only,
+                efe_nonlinear: params.efe_nonlinear,
+                org,
+                rec: &rec,
+            })?;
+            // `ans[0]`/`ans[1]` (the filtered and up-sampled pictures) feed only the
+            // EFE non-linear filter's search — E2 will consume them.
+            let filters::efe_linear::EfeLinearOutput {
+                header,
+                filtered,
+                upsampled,
+            } = out;
+            drop((filtered, upsampled));
+            efe_linear = Some(header);
+        }
+
         // 8. Container. The reference writes the residual substreams before SOZ.
         let mut out = CodestreamWriter::new();
         out.substream(Marker::Pih, &hdr.write()?)?;
         let tools = ToolHeader {
             lsbs_enabled: [params.lsbs; 2],
+            efe_linear,
             // `LEF.compress` -> `analyze`: the channel of the luma scale map with the highest
             // mean. The filter itself runs on the decoder; nothing else about it is coded.
             lef_channel,
@@ -1426,6 +1576,20 @@ fn skip_mask_or_cubes(
         }
     }
     out
+}
+
+/// `EFElinear.compress`'s `org_img_i`: the source's planes in `[0, 255]` at its own
+/// chroma subsampling (`img.to_YUV_()` + `convert_range_`), as decoder-side `Planes`.
+fn efe_source_planes(
+    src: &SourceImage,
+    meta: &SourceMeta,
+) -> Result<crate::decoder::reconstruct::Planes> {
+    let sp = colour::source_planes(src, meta)?;
+    Ok(crate::decoder::reconstruct::Planes {
+        y: Tensor::from_vec(1, src.height(), src.width(), sp.luma)?,
+        u: Tensor::from_vec(1, sp.chroma_height, sp.chroma_width, sp.u)?,
+        v: Tensor::from_vec(1, sp.chroma_height, sp.chroma_width, sp.v)?,
+    })
 }
 
 /// The picture header of a fixed-model, single-region, tools-off encode.

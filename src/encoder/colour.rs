@@ -376,19 +376,23 @@ fn to_coded_format(
     Ok((resample(u)?, resample(v)?, tch, tcw))
 }
 
-/// RGB (4:4:4) or planar YUV (4:4:4 / 4:2:2 / 4:2:0) → the analysis transforms' inputs, with
-/// the chroma at the coded subsampling `meta` was resolved with ([`SourceImage::meta`]).
-///
-/// The 12-plane chroma tensor is `ccs_sgmm_tool.py::compress`'s: channels 0..4 are the luma's
-/// four pixel-unshuffle phases (its "support information"); 4..12 are the coded chroma —
-/// four U phases then four V phases at 4:4:4, U and V each repeated four times at 4:2:0, and
-/// each chroma row phase repeated twice at 4:2:2.
-pub fn preprocess(src: &SourceImage, meta: &SourceMeta) -> Result<AnalysisInput> {
+/// The source's components in `[0, 255]` at its own subsampling — `img.to_YUV_()` +
+/// `convert_range_` of `EFElinear.compress`'s `org_img_i`.
+pub(crate) struct SourcePlanes {
+    pub luma: Vec<f32>,
+    pub u: Vec<f32>,
+    pub v: Vec<f32>,
+    pub chroma_height: usize,
+    pub chroma_width: usize,
+}
+
+/// `EFElinear.compress`'s `org_img_i` — see [`SourcePlanes`].
+pub(crate) fn source_planes(src: &SourceImage, meta: &SourceMeta) -> Result<SourcePlanes> {
     let (w, h) = (src.width(), src.height());
     let max = ((1u32 << meta.bit_depth) - 1) as f32;
     // The three components in `[0, 255]` (`convert_range_` to [0, 1], `to_YUV_`, then
     // `convert_range_` to the internal range). Chroma starts at the source's subsampling.
-    let (yp, up, vp, sch, scw) = match src {
+    let planes = match src {
         SourceImage::Rgb(rgb) => {
             if rgb.data.len() != w * h * 3 {
                 return Err(Error::InvalidArgument("RGB buffer size does not match"));
@@ -408,7 +412,13 @@ pub fn preprocess(src: &SourceImage, meta: &SourceMeta) -> Result<AnalysisInput>
                 up[i] = ((b - y) / KBY + 0.5) * 255.0;
                 vp[i] = ((r - y) / KRY + 0.5) * 255.0;
             }
-            (yp, up, vp, h, w)
+            SourcePlanes {
+                luma: yp,
+                u: up,
+                v: vp,
+                chroma_height: h,
+                chroma_width: w,
+            }
         }
         SourceImage::Yuv(yuv) => {
             let (cw, ch) = (yuv.chroma_width, yuv.chroma_height);
@@ -417,9 +427,34 @@ pub fn preprocess(src: &SourceImage, meta: &SourceMeta) -> Result<AnalysisInput>
             }
             // `read_yuv` keeps the [0, 1] range; `convert_range_` to the internal range.
             let scale = |p: &[u16]| p.iter().map(|&v| v as f32 / max * 255.0).collect();
-            (scale(&yuv.y), scale(&yuv.u), scale(&yuv.v), ch, cw)
+            SourcePlanes {
+                luma: scale(&yuv.y),
+                u: scale(&yuv.u),
+                v: scale(&yuv.v),
+                chroma_height: ch,
+                chroma_width: cw,
+            }
         }
     };
+    Ok(planes)
+}
+
+/// RGB (4:4:4) or planar YUV (4:4:4 / 4:2:2 / 4:2:0) → the analysis transforms' inputs, with
+/// the chroma at the coded subsampling `meta` was resolved with ([`SourceImage::meta`]).
+///
+/// The 12-plane chroma tensor is `ccs_sgmm_tool.py::compress`'s: channels 0..4 are the luma's
+/// four pixel-unshuffle phases (its "support information"); 4..12 are the coded chroma —
+/// four U phases then four V phases at 4:4:4, U and V each repeated four times at 4:2:0, and
+/// each chroma row phase repeated twice at 4:2:2.
+pub fn preprocess(src: &SourceImage, meta: &SourceMeta) -> Result<AnalysisInput> {
+    let (w, h) = (src.width(), src.height());
+    let SourcePlanes {
+        luma: yp,
+        u: up,
+        v: vp,
+        chroma_height: sch,
+        chroma_width: scw,
+    } = source_planes(src, meta)?;
 
     // `pad_` luma to an even size for the four support-channel phases (`chroma_sup_info`);
     // the analysis transform itself sees the luma unpadded.

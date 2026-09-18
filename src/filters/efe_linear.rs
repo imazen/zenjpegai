@@ -32,7 +32,7 @@ use crate::tensor::Tensor;
 
 /// `EFElinear.cands[k][2..]`: the regions of each candidate split, as fractions
 /// `[row_start, row_end, col_start, col_end]` of the phase plane.
-const SPLITS: [&[[f64; 4]]; 8] = [
+pub(crate) const SPLITS: [&[[f64; 4]]; 8] = [
     &[[0.0, 1.0, 0.0, 1.0]],
     &[[0.0, 0.5, 0.0, 1.0], [0.5, 1.0, 0.0, 1.0]],
     &[[0.0, 1.0, 0.0, 0.5], [0.0, 1.0, 0.5, 1.0]],
@@ -72,7 +72,7 @@ const SPLITS: [&[[f64; 4]]; 8] = [
 
 /// `EFElinear.DCT_IF_4TAP`, phases 1 (horizontal), 2 (vertical) and 3 (diagonal); phase 0 is
 /// all zero. Unsignalled constants of the reference.
-const DCT_IF_4TAP: [[f32; 16]; 4] = [
+pub(crate) const DCT_IF_4TAP: [[f32; 16]; 4] = [
     [0.0; 16],
     [
         0.0, 0.0, 0.0, 0.0, //
@@ -107,32 +107,39 @@ const DCT_IF_4TAP: [[f32; 16]; 4] = [
 ];
 
 /// `deinteger`: 16-bit weight code → float, `(code - 32767) / 2^11`. Exact in f32.
-pub(super) fn deinteger(code: i64) -> f32 {
+pub(crate) fn deinteger(code: i64) -> f32 {
     (code - 32767) as f32 / 2048.0
 }
 
+/// `integerize`: float weight → 16-bit code, `clamp(round(w * 2^11) + 32767, 0, 65535)` —
+/// Python's `round`, half to even, on the f64 of the f32 weight (`integerize` /
+/// `integerizeTensor`).
+pub(crate) fn integerize(w: f32) -> u32 {
+    ((w as f64 * 2048.0).round_ties_even() + 32767.0).clamp(0.0, 65535.0) as u32
+}
+
 /// One region of one chroma plane with its convolution kernels.
-struct Region {
-    rows: (usize, usize),
-    cols: (usize, usize),
+pub(crate) struct Region {
+    pub(crate) rows: (usize, usize),
+    pub(crate) cols: (usize, usize),
     /// Kernel side: `fL` for pictures coded at the source's chroma resolution, else 4.
-    k: usize,
+    pub(crate) k: usize,
     /// Rows / columns of context before the output sample (`start` in `SplitApply`).
-    before: usize,
+    pub(crate) before: usize,
     /// Chroma kernels of the four phases, `k * k` taps each, identity (and DCT-IF) included.
-    chroma: [Vec<f32>; 4],
+    pub(crate) chroma: [Vec<f32>; 4],
     /// Luma kernel, shared by the phases.
-    luma: Vec<f32>,
+    pub(crate) luma: Vec<f32>,
 }
 
 /// `round(split * (s + 31) / 32) * 32`, Python's round (half to even) on doubles.
-fn split_edge(fraction: f64, s: usize) -> usize {
+pub(crate) fn split_edge(fraction: f64, s: usize) -> usize {
     let v = (fraction * (s + 31) as f64 / 32.0).round_ties_even();
     v as usize * 32
 }
 
 /// Regions and kernels of plane `p` (`0` = U, `1` = V) for one coded filter set.
-fn regions(
+pub(crate) fn regions(
     set: &EfeLinearSet,
     p: usize,
     coded_444: bool,
@@ -212,25 +219,26 @@ fn regions(
     Ok(out)
 }
 
-/// Rows / columns of replicated border around a phase plane: the kernels reach at most one
-/// sample before and two after the output position.
-const PAD_BEFORE: usize = 1;
-const PAD_AFTER: usize = 2;
-
 /// One sampling phase of a plane, replicate-padded (`pixelUnshuffleGeneral` + `pad`), with
 /// `offset` subtracted from every sample.
-struct Phase {
+pub(crate) struct Phase {
     /// Row stride: `s1 + PAD_BEFORE + PAD_AFTER`.
-    stride: usize,
-    data: Vec<f32>,
+    pub(crate) stride: usize,
+    /// Padded samples: row `r` holds phase-plane row `r - PAD_BEFORE` (clamped).
+    pub(crate) data: Vec<f32>,
 }
+
+/// Rows / columns of replicated border around a phase plane: the kernels reach at most one
+/// sample before and two after the output position.
+pub(crate) const PAD_BEFORE: usize = 1;
+pub(crate) const PAD_AFTER: usize = 2;
 
 /// Phase `(py, px)` of `src` sampled every `(fv, fh)` samples, as an `s0 x s1` plane plus border.
 /// Rows and columns the (odd-sized) plane lacks replicate its last ones, like the reference's
 /// padding before the split.
 #[allow(clippy::too_many_arguments)]
-fn phase_plane(
-    ctx: &FilterContext<'_>,
+pub(crate) fn phase_plane(
+    eng: &crate::nn::fast::Engine,
     src: &Tensor<f32>,
     (fv, fh): (usize, usize),
     (py, px): (usize, usize),
@@ -247,7 +255,7 @@ fn phase_plane(
     } else {
         0
     };
-    for_each_row(ctx.eng, &mut data, stride, |r, dst| {
+    for_each_row(eng, &mut data, stride, |r, dst| {
         let sy = r.saturating_sub(PAD_BEFORE).min(s0 - 1);
         let row = &src.data[(sy * fv + py).min(h - 1) * w..][..w];
         let (body, tail) = dst[PAD_BEFORE..].split_at_mut(direct);
@@ -266,22 +274,29 @@ fn phase_plane(
 }
 
 /// The phase planes `SplitApply` works on, shared by both chroma planes' filter sets.
-struct Phases {
+pub(crate) struct Phases {
     /// Chroma phase factors (`3 - s_ver`, `3 - s_hor`): 2 where the source has full chroma
     /// resolution, 1 where it is subsampled.
-    fv: usize,
-    fh: usize,
+    pub(crate) fv: usize,
+    /// See `fv`, horizontal factor.
+    pub(crate) fh: usize,
     /// Phase plane size (`ceil(H / 2)`, `ceil(W / 2)` of luma).
-    s0: usize,
-    s1: usize,
+    pub(crate) s0: usize,
+    /// See `s0`, horizontal size.
+    pub(crate) s1: usize,
     /// Luma phases by conv group (`py * 2 + px`); only the groups the output uses are built.
-    luma: [Option<Phase>; 4],
+    pub(crate) luma: [Option<Phase>; 4],
 }
 
 impl Phases {
-    fn new(ctx: &FilterContext<'_>, luma: &Tensor<f32>) -> Result<Self> {
-        let hdr = ctx.hdr;
-        let (fv, fh) = (3 - hdr.s_ver as usize, 3 - hdr.s_hor as usize);
+    /// Luma phase planes for a picture whose source subsampling is `s_ver` x `s_hor`.
+    pub(crate) fn new(
+        eng: &crate::nn::fast::Engine,
+        s_ver: u8,
+        s_hor: u8,
+        luma: &Tensor<f32>,
+    ) -> Result<Self> {
+        let (fv, fh) = (3 - s_ver as usize, 3 - s_hor as usize);
         let (s0, s1) = (luma.h.div_ceil(2), luma.w.div_ceil(2));
         if luma.h == 0 || luma.w == 0 {
             return Err(Error::InvalidArgument("EFE linear: empty picture"));
@@ -289,7 +304,7 @@ impl Phases {
         let mut planes: [Option<Phase>; 4] = [None, None, None, None];
         for py in 0..fv {
             for px in 0..fh {
-                let phase = phase_plane(ctx, luma, (2, 2), (py, px), (s0, s1), 0.0)?;
+                let phase = phase_plane(eng, luma, (2, 2), (py, px), (s0, s1), 0.0)?;
                 planes[py * 2 + px] = Some(phase);
             }
         }
@@ -312,9 +327,11 @@ fn axpy(acc: &mut [f32], w: f32, line: &[f32]) {
     }
 }
 
-/// `SplitApply` for one chroma plane.
-fn filter_plane(
-    ctx: &FilterContext<'_>,
+/// `SplitApply` for one chroma plane. `coded_444` is `PictureHeader::efe_coded_444`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn filter_plane(
+    eng: &crate::nn::fast::Engine,
+    coded_444: bool,
     set: &EfeLinearSet,
     p: usize,
     mean: f32,
@@ -322,7 +339,6 @@ fn filter_plane(
     chroma: &[Option<Phase>; 4],
     src: &Tensor<f32>,
 ) -> Result<Tensor<f32>> {
-    let coded_444 = ctx.hdr.efe_coded_444();
     if set.cand[p].is_none() && coded_444 {
         // "Plane not filtered" at full coded chroma resolution: the reference (encoder and
         // decoder alike) fails on the missing luma weights, so there is no behaviour to match.
@@ -334,7 +350,7 @@ fn filter_plane(
     let regions = regions(set, p, coded_444, (g.s0, g.s1))?;
     let mut out = Tensor::<f32>::zeros(1, src.h, src.w)?;
     let cw = src.w;
-    for_each_row(ctx.eng, &mut out.data, cw, |oy, row| {
+    for_each_row(eng, &mut out.data, cw, |oy, row| {
         let (py, yy) = (oy % g.fv, oy / g.fv);
         let mut acc = Vec::new();
         let mut lum = Vec::new();
@@ -401,7 +417,7 @@ pub fn apply(
 ) -> Result<FilterState> {
     supported_format(ctx.hdr)?;
     let img = state.image;
-    let g = Phases::new(ctx, &img.y)?;
+    let g = Phases::new(ctx.eng, ctx.hdr.s_ver, ctx.hdr.s_hor, &img.y)?;
     if img.u.h.div_ceil(g.fv) != g.s0
         || img.u.w.div_ceil(g.fh) != g.s1
         || (img.v.h, img.v.w) != (img.u.h, img.u.w)
@@ -417,15 +433,17 @@ pub fn apply(
     for (p, src) in [&img.u, &img.v].into_iter().enumerate() {
         for py in 0..g.fv {
             for px in 0..g.fh {
-                let phase = phase_plane(ctx, src, (g.fv, g.fh), (py, px), (g.s0, g.s1), mean[p])?;
+                let phase =
+                    phase_plane(ctx.eng, src, (g.fv, g.fh), (py, px), (g.s0, g.s1), mean[p])?;
                 chroma[p][py * 2 + px] = Some(phase);
             }
         }
     }
+    let coded_444 = ctx.hdr.efe_coded_444();
     let run = |set: &EfeLinearSet| -> Result<[Tensor<f32>; 2]> {
         Ok([
-            filter_plane(ctx, set, 0, mean[0], &g, &chroma[0], &img.u)?,
-            filter_plane(ctx, set, 1, mean[1], &g, &chroma[1], &img.v)?,
+            filter_plane(ctx.eng, coded_444, set, 0, mean[0], &g, &chroma[0], &img.u)?,
+            filter_plane(ctx.eng, coded_444, set, 1, mean[1], &g, &chroma[1], &img.v)?,
         ])
     };
     // The alternative picture for the EFE non-linear filter's on/off switch: built from the

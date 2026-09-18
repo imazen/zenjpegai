@@ -50,6 +50,9 @@ OPTIONS:
     --rvs --grfs       encode: residual variance scaling / channel gain flags
     --lsbs             encode: latent scaling before synthesis (a decoder-side tool)
     --lef              encode: signal the luma edge post-filter (LEF_chIdx is derived)
+    --efe-linear       encode: search and signal the EFE linear post-filter
+    --efe-dctif-only   encode: signal EFE linear with no filters (DCTIF_only)
+    --efe-nonlinear    encode: also fit the up-sampled set EFE non-linear needs
     --ans-threads <n>  encode: ANS threads per substream (1, 2, 4, 8 or 16)
     --regions <mode>   encode: region partitioning, `dependent` or `independent` (large
                        pictures only; the grid follows the picture size)
@@ -90,6 +93,9 @@ struct Args {
     grfs: bool,
     lsbs: bool,
     lef: bool,
+    efe_linear: bool,
+    efe_dctif_only: bool,
+    efe_nonlinear: bool,
     ans_threads: u8,
     regions: Option<zenjpegai::encoder::RegionMode>,
     quality_map: Option<PathBuf>,
@@ -121,6 +127,9 @@ fn parse_args() -> Result<Args, String> {
         grfs: false,
         lsbs: false,
         lef: false,
+        efe_linear: false,
+        efe_dctif_only: false,
+        efe_nonlinear: false,
         ans_threads: 1,
         regions: None,
         quality_map: None,
@@ -175,6 +184,12 @@ fn parse_args() -> Result<Args, String> {
             "--grfs" => a.grfs = true,
             "--lsbs" => a.lsbs = true,
             "--lef" => a.lef = true,
+            "--efe-linear" => a.efe_linear = true,
+            "--efe-dctif-only" => {
+                a.efe_linear = true;
+                a.efe_dctif_only = true;
+            }
+            "--efe-nonlinear" => a.efe_nonlinear = true,
             "--ans-threads" => {
                 a.ans_threads = value("--ans-threads")?
                     .parse()
@@ -370,6 +385,9 @@ fn run() -> Result<(), String> {
                 grfs: args.grfs,
                 lsbs: args.lsbs,
                 lef: args.lef,
+                efe_linear: args.efe_linear,
+                efe_dctif_only: args.efe_dctif_only,
+                efe_nonlinear: args.efe_nonlinear,
                 num_threads_z: args.ans_threads,
                 num_threads_r: args.ans_threads,
                 regions: args.regions,
