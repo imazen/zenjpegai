@@ -83,8 +83,19 @@ def main():
         help="replace QualityMap.decode_header: upstream's calls .item() on an int (crash) and "
         "reads log2_num_threads_q_minus1 with 1 bit where its encoder writes 2 (see PORTING.md).",
     )
+    ap.add_argument(
+        "--patch-icci420",
+        action="store_true",
+        help="read icci_enable_flag + the eICCI header for a 4:2:0 source, where the stock "
+        "syntax omits them (the flag auto-detects to off). Only streams written by "
+        "force_icci_encode.py --flag420 need this; see PORTING.md.",
+    )
     args = ap.parse_args()
     os.makedirs(args.out_dir, exist_ok=True)
+    if args.patch_icci420:
+        from src.codec.coding_tools.filters.eICCI.icci_filter import EfficientICCIFilter
+
+        EfficientICCIFilter.auto_enableflag_detected_value = lambda self: None
     if args.fix_qmap_header:
         from src.codec.coding_tools.quality_map import quality_map as qm
 

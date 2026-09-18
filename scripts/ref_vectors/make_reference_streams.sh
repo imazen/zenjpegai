@@ -2,7 +2,7 @@
 # Encode + decode a matrix of configurations with the reference software and dump the decoder's
 # intermediate tensors for the parity tests.
 #
-#   scripts/ref_vectors/make_reference_streams.sh [SET]      SET: smoke (default) | regions | tools | filters | efe | filtertiles | qmap | formats | encoder | cubeflags | all
+#   scripts/ref_vectors/make_reference_streams.sh [SET]      SET: smoke (default) | regions | tools | filters | efe | filtertiles | qmap | formats | icci420 | encoder | cubeflags | all
 #
 # Output: $OUT/<name>/{stream.bits,encoder.log,tensors.bin,manifest.txt,decoded.png,stdout.log}
 # with OUT=/mnt/v/output/zenjpegai/reference/vectors. Existing streams are kept (delete the
@@ -223,6 +223,42 @@ if [ "$SET" = formats ] || [ "$SET" = all ]; then
   printf 'zenjpegai UDI test \000\001\377 payload' > "$IN/udi_payload.bin"
   one_fixed img30_base_off_udi_m1 $IMG30 1 100 cfg/tools_off.json cfg/profiles/base.json -udi.filepath "$IN/udi_payload.bin"
   one_fixed img30_base_off_display_m1 $IMG30 1 100 cfg/tools_off.json cfg/profiles/base.json -diff_display_img_width 37 -diff_display_img_height 5
+fi
+if [ "$SET" = icci420 ] || [ "$SET" = all ]; then
+  # eICCI on chroma-subsampled sources: the reference encoder never enables it for them, so it
+  # is forced (force_icci_encode.py, model selection 7:3 on the long list). For a 4:2:2 source
+  # `icci_enable_flag` is part of the syntax and the stream is conformant. For 4:2:0 it is not
+  # (auto-detected off): the stream carries the flag + header anyway, and only the decoder
+  # patched the same way (--patch-icci420) can read it — PORTING.md documents why that stream
+  # is a per-filter oracle only.
+  IN=$OUT/../inputs
+  icci() { # name input [force args...]
+    local name=$1 input=$2; shift 2
+    local dir="$OUT/$name"
+    if [ ! -f "$dir/manifest.txt" ] && [ ! -f "$dir/fixed_decoder/manifest.txt" ]; then
+      mkdir -p "$dir"
+      echo "== $name: encoding, eICCI forced on ($(date -u +%H:%M:%S))"
+      nice -n 19 python "$HERE/force_icci_encode.py" "$@" -- "$input" "$dir/stream.bits" \
+          --cfg cfg/tools_off.json cfg/tools/eICCI.json cfg/profiles/base.json -target_device cpu \
+          -model.bitrate_matcher.enabled 0 -model.bitrate_matcher.target_tool_idx 1 \
+          -model.bitrate_matcher.target_beta_disp_Y 0 > "$dir/encoder.log" 2>&1
+      echo "== $name: decoding + dumping"
+      nice -n 19 python "$HERE/dump_decode.py" "$dir/stream.bits" "$dir" > "$dir/dump.log" 2>&1 \
+          || echo "   stock reference decoder FAILED on this stream (see $dir/dump.log)"
+      nice -n 19 python "$HERE/dump_decode.py" "$dir/stream.bits" "$dir/fixed_decoder" \
+          --contiguous-masks --patch-icci420 > "$dir/dump_fixed.log" 2>&1
+      { grep -hs "^MD5" "$dir/encoder.log" "$dir/stdout.log" "$dir/fixed_decoder/stdout.log" || true; } \
+          | sort | uniq -c | sed 's/^/   /'
+      ls -la "$dir/stream.bits" | awk '{print "   stream bytes:", $5}'
+    fi
+  }
+  icci img30yuv422_base_eicci "$IN/img30_560x888_8bit_422.yuv"
+  icci img30yuv420_base_eicci "$IN/img30_560x888_8bit_420.yuv" --flag420
+  for v in img30yuv422_base_eicci img30yuv420_base_eicci; do
+    [ -f "$OUT/$v/filters_lef_icci/manifest.txt" ] || nice -n 19 python "$HERE/dump_filters_lef_icci.py" \
+        "$OUT/$v/stream.bits" "$OUT/$v/filters_lef_icci" --patch-icci420 \
+        > "$OUT/$v/dump_filters_lef_icci.log" 2>&1
+  done
 fi
 if [ "$SET" = encoder ] || [ "$SET" = all ]; then
   # Oracles for the ENCODER port: fixed-model encodes whose analysis-side tensors are dumped

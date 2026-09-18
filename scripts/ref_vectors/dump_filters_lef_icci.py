@@ -38,8 +38,19 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("bits")
     ap.add_argument("out_dir")
+    ap.add_argument(
+        "--patch-icci420",
+        action="store_true",
+        help="read icci_enable_flag + the eICCI header for a 4:2:0 source, where the stock "
+        "syntax omits them (the flag auto-detects to off). Only streams written by "
+        "force_icci_encode.py --flag420 need this; see PORTING.md.",
+    )
     args = ap.parse_args()
     os.makedirs(args.out_dir, exist_ok=True)
+    if args.patch_icci420:
+        # A forced-4:2:0 stream carries the flag; the stock decoder would skip it and
+        # desynchronise on the bits that follow.
+        EfficientICCIFilter.auto_enableflag_detected_value = lambda self: None
     dump = Dumper(args.out_dir)
     captured = {}
     notes = []
@@ -59,9 +70,26 @@ def main():
                 captured[f"{tag}.out.{c}"] = out[0].get_component(c).clone()
             if tag == "eicci":
                 tm = self.tile_manager
+                mi = self.models_idxes
+                # Signalled (coded) indices, inverse of `model_selection = map[idx] + 1`;
+                # the forced-4:2:0 stream's tool header is not readable by an unpatched
+                # parser, so the test rebuilds it from this note.
+                map_y, map_uv = mi.map_idx
+                sig = [[map_y.index(t[0] - 1) if t[0] else 0,
+                        map_uv.index(t[1] - 1) if t[1] else 0]
+                       for t in mi.model_state_per_tile]
                 notes.append(f"# eicci tiling enabled {int(bool(tm.is_enabled()))} "
-                             f"selection {self.models_idxes.model_state_per_tile} "
+                             f"selection {mi.model_state_per_tile} "
+                             f"short_list {int(mi.use_short_list)} signalled {sig} "
                              f"base {self.get_base_model_info()}")
+                # Machine-readable copy of the same data: the forced-4:2:0 stream's tool
+                # header cannot be read by an unpatched parser, so the test rebuilds the
+                # IcciHeader from these tensors (icci_use = selection != 0 per plane).
+                captured["eicci.selection"] = torch.tensor(mi.model_state_per_tile,
+                                                         dtype=torch.int32)
+                captured["eicci.signalled"] = torch.tensor(sig, dtype=torch.int32)
+                captured["eicci.short_list"] = torch.tensor(int(mi.use_short_list),
+                                                           dtype=torch.uint8)
                 for row in tm.image_tiles.tiles:
                     for t in row:
                         core, rel = tm.get_core_of_overlapping_image_tile(t)
