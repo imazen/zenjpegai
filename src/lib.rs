@@ -87,7 +87,7 @@ pub use decoder::Decoder;
 pub use decoder::limits::{Limits, MemoryEstimate, estimate_memory};
 pub use decoder::output::{Picture, RgbImage, YuvImage};
 #[cfg(feature = "std")]
-pub use encoder::{EncodeParams, Encoder};
+pub use encoder::{EncodeLimits, EncodeParams, Encoder, estimate_encode_memory};
 pub use error::Error;
 // `Decoder::with_engine` / `Decoder::engine` (always public, `std`-gated only) take/return
 // `nn::fast::Engine`, so it must stay reachable regardless of `unstable-internals` — otherwise

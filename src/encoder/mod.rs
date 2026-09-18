@@ -23,10 +23,12 @@ mod colour;
 pub mod filters;
 #[cfg(not(feature = "unstable-internals"))]
 pub(crate) mod filters;
+pub mod limits;
 mod rate;
 mod tiles;
 
 pub use colour::{AnalysisInput, SourceImage, SourceMeta, preprocess, preprocess_rgb};
+pub use limits::{EncodeLimits, estimate_encode_memory};
 pub use rate::{BDL_SEARCH_RANGE, RateMatch, search_beta};
 pub use tiles::{AnalysisTile, analysis_tiles};
 
@@ -180,7 +182,14 @@ pub struct Encoder {
     models: Box<dyn ModelSource + Send + Sync>,
     engine: Engine,
     tables: AnsTables,
+    limits: EncodeLimits,
     cache: Mutex<HashMap<(usize, OperatingPoint), Arc<ModelSet>>>,
+}
+
+impl Drop for Encoder {
+    fn drop(&mut self) {
+        crate::nn::fast::release_buffers();
+    }
 }
 
 /// One model's analysis output for a whole picture: the two latents and the two hyper-latents.
@@ -195,7 +204,6 @@ struct Component {
     residual_q: Tensor<i16>,
     mask: Tensor<bool>,
     cube_flag: Vec<bool>,
-    cube_flags: Option<Vec<bool>>,
 }
 
 /// What one component committed to the codestream: exactly the tensors
@@ -231,12 +239,60 @@ impl Encoder {
             models,
             engine,
             tables: AnsTables::new(),
+            limits: EncodeLimits::default(),
             cache: Mutex::new(HashMap::new()),
         }
     }
 
+    /// Resource limits for every encode of this encoder (default: [`EncodeLimits::default`]).
+    pub fn limits(mut self, limits: EncodeLimits) -> Self {
+        self.limits = limits;
+        self
+    }
+
+    /// Predicted heap use of encoding a `width` x `height` picture at operating point `op`
+    /// (see [`estimate_encode_memory`]). `rate_matched` is what [`Encoder::encode_to_bpp`] does.
+    pub fn estimate_memory(
+        &self,
+        width: u64,
+        height: u64,
+        op: OperatingPoint,
+        rate_matched: bool,
+    ) -> crate::MemoryEstimate {
+        estimate_encode_memory(width, height, op, rate_matched)
+    }
+
+    /// Free the feature-map buffers kept for reuse between encodes.
+    ///
+    /// Encoding recycles its large intermediate buffers through the same process-wide pool
+    /// the decoder uses (at most 24 buffers and 1 GiB). The pool is also emptied when an
+    /// `Encoder` is dropped.
+    pub fn release_buffers(&self) {
+        crate::nn::fast::release_buffers();
+    }
+
     pub fn engine(&self) -> &Engine {
         &self.engine
+    }
+
+    /// Judge `limits` against the source size and, when a memory bound is set, shrink the
+    /// recycled-buffer pool to fit under what is left (the decoder does the same in
+    /// `decode_inner`).
+    fn check_limits(
+        &self,
+        w: usize,
+        h: usize,
+        op: OperatingPoint,
+        rate_matched: bool,
+    ) -> Result<()> {
+        let estimate = self.limits.check(w, h, op, rate_matched)?;
+        if let Some(max) = self.limits.max_memory_bytes {
+            let room = usize::try_from(max - estimate.live_bytes).unwrap_or(usize::MAX);
+            if crate::nn::fast::pool_limit() > room {
+                crate::nn::fast::set_pool_limit(room);
+            }
+        }
+        Ok(())
     }
 
     fn model_set(&self, id: usize, op: OperatingPoint) -> Result<Arc<ModelSet>> {
@@ -295,9 +351,15 @@ impl Encoder {
         params: EncodeParams,
         quality_map: &QualityMap,
     ) -> core::result::Result<Vec<u8>, At<Error>> {
-        self.encode_inner(&src.into(), params, Some(quality_map), &enough::Unstoppable)
-            .map(|(stream, _)| stream)
-            .map_err(|e| at!(e))
+        self.encode_inner(
+            &src.into(),
+            params,
+            Some(quality_map),
+            &enough::Unstoppable,
+            false,
+        )
+        .map(|(stream, _)| stream)
+        .map_err(|e| at!(e))
     }
 
     /// [`Encoder::encode`] with cooperative cancellation. `stop` is checked between network
@@ -308,7 +370,7 @@ impl Encoder {
         params: EncodeParams,
         stop: &dyn enough::Stop,
     ) -> core::result::Result<Vec<u8>, At<Error>> {
-        self.encode_inner(&src.into(), params, None, stop)
+        self.encode_inner(&src.into(), params, None, stop, false)
             .map(|(stream, _)| stream)
             .map_err(|e| at!(e))
     }
@@ -331,7 +393,7 @@ impl Encoder {
         quality_map: Option<&QualityMap>,
     ) -> core::result::Result<(Vec<u8>, [ComponentTrace; 2]), At<Error>> {
         let (stream, components) = self
-            .encode_inner(&src.into(), params, quality_map, &enough::Unstoppable)
+            .encode_inner(&src.into(), params, quality_map, &enough::Unstoppable, true)
             .map_err(|e| at!(e))?;
         Self::trace(stream, components, quality_map).map_err(|e| at!(e))
     }
@@ -386,6 +448,8 @@ impl Encoder {
         params: EncodeParams,
         quality_map: Option<&QualityMap>,
     ) -> core::result::Result<(Vec<u8>, [ComponentTrace; 2]), At<Error>> {
+        self.check_limits(width, height, params.op, false)
+            .map_err(|e| at!(e))?;
         // Latents carry no source metadata: the reference's default (8 bit, 4:4:4, BT.709).
         let meta = SourceMeta::resolve(1, 1, 8, ColourTransform::Bt709, params.c_ver, params.c_hor)
             .map_err(|e| at!(e))?;
@@ -399,6 +463,7 @@ impl Encoder {
                 params,
                 quality_map,
                 &enough::Unstoppable,
+                true,
             )
             .map_err(|e| at!(e))?;
         Self::trace(stream, components, quality_map).map_err(|e| at!(e))
@@ -410,8 +475,10 @@ impl Encoder {
         params: EncodeParams,
         quality_map: Option<&QualityMap>,
         stop: &dyn enough::Stop,
+        keep_trace: bool,
     ) -> Result<(Vec<u8>, Vec<Component>)> {
         stop.check()?;
+        self.check_limits(src.width(), src.height(), params.op, false)?;
         let meta = src.meta(params.c_ver, params.c_hor)?;
         let set = self.model_set(
             self.check_params(src.width(), src.height(), params)?,
@@ -431,7 +498,11 @@ impl Encoder {
             ys.push(y);
             zs.push(z);
         }
-        let z = [zs[0].clone(), zs[1].clone()];
+        let mut zs = zs.into_iter();
+        let z = [
+            zs.next().ok_or(Error::InvalidData("internal: luma z"))?,
+            zs.next().ok_or(Error::InvalidData("internal: chroma z"))?,
+        ];
         self.encode_from_latents(
             [&ys[0], &ys[1]],
             Some(z),
@@ -441,6 +512,7 @@ impl Encoder {
             params,
             quality_map,
             stop,
+            keep_trace,
         )
     }
 
@@ -484,6 +556,7 @@ impl Encoder {
         if !(target_bpp.is_finite() && target_bpp > 0.0) {
             return Err(Error::InvalidArgument("target bpp must be positive"));
         }
+        self.check_limits(src.width(), src.height(), op, true)?;
         let meta = src.meta(params.c_ver, params.c_hor)?;
         let pixels = (src.width() * src.height()) as f64;
         let input = preprocess(src, &meta)?;
@@ -510,10 +583,16 @@ impl Encoder {
                     ys.push(y);
                     zs.push(z);
                 }
-                latents[ccs_model] = Some((
-                    [ys[0].clone(), ys[1].clone()],
-                    [zs[0].clone(), zs[1].clone()],
-                ));
+                // Move, don't clone: `Tensor` clones are deep copies and these are the
+                // biggest tensors the rate loop holds.
+                fn pair<T>(v: Vec<T>) -> Result<[T; 2]> {
+                    let mut it = v.into_iter();
+                    Ok([
+                        it.next().ok_or(Error::InvalidData("internal: luma"))?,
+                        it.next().ok_or(Error::InvalidData("internal: chroma"))?,
+                    ])
+                }
+                latents[ccs_model] = Some((pair(ys)?, pair(zs)?));
             }
             let (y, z) = latents[ccs_model].as_ref().expect("just computed");
             *trials += 1;
@@ -531,11 +610,14 @@ impl Encoder {
                 params,
                 None,
                 stop,
+                false,
             )?;
             Ok(stream)
         };
 
-        // `match_luma`: the model whose rate at displacement 0 is relatively closest.
+        // `match_luma`: the model whose rate at displacement 0 is relatively closest. Latents
+        // of every model but the best-so-far are dropped as soon as they are known losers;
+        // keeping all four sets to the end of the loop would hold ~45 MB extra at 3 MP.
         let mut best_model = 0usize;
         let mut best_diff = f64::INFINITY;
         let mut base: Vec<Option<f64>> = alloc::vec![None; model::MODEL_BETAS.len()];
@@ -546,13 +628,12 @@ impl Encoder {
             let diff = (bpp - target_bpp).abs() / bpp;
             if diff < best_diff {
                 best_diff = diff;
+                if best_model != id {
+                    latents[best_model] = None;
+                }
                 best_model = id;
-            }
-            // Only the chosen model's latents are needed from here on.
-        }
-        for (id, slot) in latents.iter_mut().enumerate() {
-            if id != best_model {
-                *slot = None;
+            } else {
+                latents[id] = None;
             }
         }
 
@@ -707,6 +788,10 @@ impl Encoder {
         Ok(params.model_id as usize)
     }
 
+    /// `keep_trace` retains each component's scales / masks / quantised residual for
+    /// `encode_traced*`; the plain encode paths shed them as soon as the residual payload is
+    /// coded (they are ~10 B per picture sample of dead weight while the second component and
+    /// the container are still being built).
     #[allow(clippy::too_many_arguments)]
     fn encode_from_latents(
         &self,
@@ -718,6 +803,7 @@ impl Encoder {
         params: EncodeParams,
         quality_map: Option<&QualityMap>,
         stop: &dyn enough::Stop,
+        keep_trace: bool,
     ) -> Result<(Vec<u8>, Vec<Component>)> {
         let set = self.model_set(self.check_params(w, h, params)?, params.op)?;
         let eng = &self.engine;
@@ -770,6 +856,8 @@ impl Encoder {
         hdr.check_conformance()?;
 
         let mut components = Vec::with_capacity(2);
+        let mut residual_payloads = Vec::with_capacity(2);
+        let mut lef_channel = None;
         for (ccs, latent) in latents.into_iter().enumerate() {
             stop.check()?;
             let model = &set.common[ccs];
@@ -801,14 +889,21 @@ impl Encoder {
             let out = compress_regions(
                 eng, &hdr, ccs, model, z_hat, latent, &mask, &q, lh, lw, stop,
             )?;
+            let mcm::Compressed {
+                mut residual_q,
+                residual,
+                cube_flag,
+                psi,
+            } = out;
+            // The dequantised residual is only a stepping stone to the cube flags; nothing
+            // downstream reads it.
+            drop(residual);
 
             // 6. `encoder_skip_and_cubeflag_for_tiles`: the final mask is the threshold mask
             //    widened by the cubes that must not be skipped; everything else is dropped.
-            let cube_flag = out.cube_flag;
             let all_skippable = cube_flag.iter().all(|&f| f);
             let cube_flags = (!all_skippable).then(|| cube_flag.clone());
             let mask = skip_mask(&scales.skip_scale_log, cube_flags.as_deref())?;
-            let mut residual_q = out.residual_q;
             for (q, &m) in residual_q.data.iter_mut().zip(&mask.data) {
                 if !m {
                     *q = 0;
@@ -816,22 +911,37 @@ impl Encoder {
             }
             hdr.components[ccs].rvs_enabled = params.rvs;
             hdr.components[ccs].grfs_channel_flags = scales.grfs_flags.clone();
-            components.push(Component {
+            hdr.components[ccs].cube_flags = cube_flags.clone();
+            let mut c = Component {
                 z_hat: z_hats[ccs].clone(),
-                psi: out.psi,
+                psi,
                 scales,
                 residual_q,
                 mask,
                 cube_flag,
-                cube_flags,
-            });
-        }
-        for (ccs, c) in components.iter().enumerate() {
-            hdr.components[ccs].cube_flags = c.cube_flags.clone();
+            };
+            // 7a. This component's residual payload is coded now so that the big tensors it is
+            //     built from can die here instead of after the other component's compress.
+            residual_payloads.push(self.encode_residual(&hdr, ccs, &c)?);
+            if ccs == 0 && params.lef {
+                // `LEF.compress` -> `analyze`: the channel of the luma scale map with the
+                // highest mean. Read it before the scale map is shed below.
+                lef_channel = Some(filters::lef::reference_channel(&c.scales.scale_log)?);
+            }
+            if !keep_trace {
+                c.psi = Tensor::zeros(0, 0, 0)?;
+                c.scales.skip_scale_log = Tensor::zeros(0, 0, 0)?;
+                c.scales.scale_log = Tensor::zeros(0, 0, 0)?;
+                c.scales.likely = Tensor::zeros(0, 0, 0)?;
+                c.residual_q = Tensor::zeros(0, 0, 0)?;
+                c.mask = Tensor::zeros(0, 0, 0)?;
+                c.cube_flag = Vec::new();
+            }
+            components.push(c);
         }
 
-        // 7. Entropy coding. The encoder runs the decoder's call order backwards, so the
-        //    chroma `z` is written before the luma `z` into the one SOZ payload.
+        // 7b. Entropy coding of `z`. The encoder runs the decoder's call order backwards, so
+        //     the chroma `z` is written before the luma `z` into the one SOZ payload.
         stop.check()?;
         let mut z_enc = self.tables.encoder(hdr.num_threads_z as usize)?;
         for ccs in [1usize, 0] {
@@ -846,12 +956,6 @@ impl Encoder {
         let soz_threads = z_enc.finish();
         let soz = join_threads(&soz_threads.iter().map(|t| t.as_slice()).collect::<Vec<_>>());
 
-        let mut residual_payloads = Vec::with_capacity(2);
-        for (ccs, c) in components.iter().enumerate() {
-            stop.check()?;
-            residual_payloads.push(self.encode_residual(&hdr, ccs, c)?);
-        }
-
         // 8. Container. The reference writes the residual substreams before SOZ.
         let mut out = CodestreamWriter::new();
         out.substream(Marker::Pih, &hdr.write()?)?;
@@ -859,10 +963,7 @@ impl Encoder {
             lsbs_enabled: [params.lsbs; 2],
             // `LEF.compress` -> `analyze`: the channel of the luma scale map with the highest
             // mean. The filter itself runs on the decoder; nothing else about it is coded.
-            lef_channel: params
-                .lef
-                .then(|| filters::lef::reference_channel(&components[0].scales.scale_log))
-                .transpose()?,
+            lef_channel,
             ..ToolHeader::default()
         };
         out.substream(Marker::Ton, &tools.write(&hdr)?)?;

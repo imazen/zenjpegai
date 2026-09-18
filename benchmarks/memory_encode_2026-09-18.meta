@@ -1,0 +1,26 @@
+memory_encode_2026-09-18.tsv — peak heap of one `zenjpegai encode` process, heaptrack 1.5
+(peak heap memory consumption; peak_rss includes heaptrack's own overhead). Produced by
+scripts/bench/memory_encode.sh (E8, encoder limits and memory).
+
+host:    AMD Ryzen 9 9950X3D, 32 threads, Linux 7.0, rustc 1.98.1, release profile,
+         default features + cli
+images:  <ref>/data/test/00030_TE_560x888_8bit_sRGB.png (img30_560x888) and
+         <ref>/data/test/00001_TE_2096x1400_8bit_sRGB.png (img01_2096x1400) —
+         the reference software's own test images
+modes:   encode = fixed model 1, beta-disp 0, BOP (CLI: --model 1 --beta-disp 0 --op bop)
+         bpp050 = rate matched to 0.5 bpp (CLI: --bpp 0.5 --op bop; the search runs all
+         four models' analysis once, keeps the best, then tries beta displacements)
+threads: 32 = rayon pool, 1 = --single-thread
+
+labels
+  encode        default recycled-buffer pool (1 GiB): pooled buffers stay resident,
+                so peak heap exceeds the live bytes the encode itself needs
+  encode-pool0  --pool-mb 0: no buffer recycling = the memory the encode itself holds;
+                the EncodeLimits / estimate_encode_memory model is calibrated on these rows
+
+estimate_encode_memory (BOP) versus the measured pool0 peak heap:
+  560x888   fixed:         357.3 MB est / 266.5 MB measured = 1.34x
+  560x888   rate matched:  447.3 MB est / 344.9 MB measured = 1.30x
+  2096x1400 fixed:         857.5 MB est / 593.8 MB measured = 1.44x
+  2096x1400 rate matched:  957.3 MB est / 682.1 MB measured = 1.40x
+The E8 gate is "estimate within 1x-2x of measured"; tests/api_ref.rs pins these ratios.

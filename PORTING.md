@@ -483,9 +483,25 @@ measured numbers in the status table above when you close an item.
   optional `RateEstimate::Likelihood` so our search picks the reference's displacements exactly;
   gate: same `(model, beta)` as the reference at the five CTC rates on both test pictures, and
   the estimator's bit count within 0.5 % of the coded size.
-- **E8 Encoder limits and memory.** `Limits` for encoding, `estimate_encode_memory`, heaptrack
-  measurements at 560x888 and 2096x1400 (fixed model and rate-matched) in `benchmarks/memory_encode_<date>.tsv`;
-  drop trial streams/latents early. Gate: estimate within 1x–2x of measured; pixels unchanged.
+- ~~**E8 Encoder limits and memory.**~~ **Done 2026-09-18**: `EncodeLimits` +
+  `Encoder::limits` (max pixels / dimensions / estimated heap; defaults 120 MP and 4 GiB, as
+  the decoder's), `estimate_encode_memory` / `Encoder::estimate_memory` and
+  `Encoder::release_buffers` in `src/encoder/limits.rs`, mirroring `decoder::limits`. Bounds
+  are judged on the source size before any picture-sized allocation or network run, and
+  `max_memory_bytes` shrinks the shared recycled-buffer pool to fit under what is left.
+  Rate matching now drops each losing model's latents as soon as model selection knows it is
+  worse (only the best-so-far set survives the loop; ~45 MB held less at 3 MP), trial streams
+  die as soon as their size is measured, latents move instead of deep-cloning, each
+  component's residual payload is coded before the next component's compress runs, and
+  non-traced encodes shed scales / masks / quantised residuals right after their payload
+  (`encode_traced*` keeps them). heaptrack measurements (`scripts/bench/memory_encode.sh`):
+  `benchmarks/memory_encode_2026-09-18.tsv` — calibrated on the `--pool-mb 0` rows the
+  estimate lands at 1.30x–1.44x of the measured peak heap on both sizes, fixed and
+  rate-matched (gate: within 1x–2x), pinned by
+  `tests/api_ref.rs::encode_memory_estimate_covers_the_measured_peaks`. Pixels unchanged:
+  `encoder_end_to_end_matches_reference`, `rate_matching_hits_the_target` and the `formats`
+  vectors still pass. CLI `--pool-mb` now applies to `encode` too. Still unmeasured: HOP
+  encodes (the estimate pads HOP's fixed cost from the decoder-side model ratio).
 - **E9 zencodec encoder trait.** Mirror `src/codec.rs` for encoding (config carries the model
   source and `EncodeParams`); test bit-identity with `Encoder::encode`.
 

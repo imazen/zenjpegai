@@ -6,6 +6,18 @@
 <!-- Breaking changes that will ship together in the next major (or minor for 0.x) release. -->
 
 ### Added
+- Encoder resource limits and a memory estimate, mirroring the decoder's (`E8`):
+  `EncodeLimits` (max pixels / dimensions / estimated heap; default 120 MP and 4 GiB),
+  `Encoder::limits`, `estimate_encode_memory` / `Encoder::estimate_memory` (fixed-model or
+  rate-matched) and `Encoder::release_buffers`. Bounds are checked on the source size before
+  any network runs; `max_memory_bytes` also shrinks the shared recycled-buffer pool, and
+  `--pool-mb` now applies to `zenjpegai encode` too. Rate matching drops losing models'
+  latents during selection (no more deep clones; only the best-so-far set is kept), trial
+  streams die once measured, each component's residual payload is coded before the next
+  component's compress runs, and non-traced encodes shed scales / masks / quantised residuals
+  right after their payload is coded. heaptrack: `benchmarks/memory_encode_2026-09-18.tsv` —
+  the estimate is 1.30x–1.44x of the measured pool-free peak heap at 560x888 and 2096x1400,
+  fixed and rate-matched (gate: within 1x–2x).
 - Encoder: chroma-subsampled, 10-bit and YUV sources. `SourceImage::{Rgb, Yuv}` with
   `SourceImage::read_yuv` (planar YUV whose `WxH_Nbit_{420,422,444}` file name carries the
   geometry, like the reference's `extract_info`), `SourceMeta` with `s_ver`/`s_hor` from the

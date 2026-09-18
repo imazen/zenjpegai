@@ -336,6 +336,9 @@ fn run() -> Result<(), String> {
                 Tier::detect()
             };
             let engine = Engine::with(tier, !args.single_thread && cfg!(feature = "parallel"));
+            if let Some(mb) = args.pool_mb {
+                zenjpegai::nn::fast::set_pool_limit(mb << 20);
+            }
             let bytes = std::fs::read(input).map_err(|e| format!("{input}: {e}"))?;
             // `read_file`: ".yuv" is planar YUV, size/depth/format from the file name;
             // anything else is PNG (8- and 16-bit, like the reference's `read_png`).

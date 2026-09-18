@@ -122,6 +122,57 @@ fn memory_estimate_covers_the_measured_peaks() {
     }
 }
 
+/// Peak heap of `zenjpegai encode --pool-mb 0 --single-thread`, heaptrack,
+/// `benchmarks/memory_encode_2026-09-18.tsv` (label `encode-pool0`), on the reference's own
+/// test images: (width, height, rate_matched, measured). The estimate must cover each and
+/// stay within 2x of it.
+const MEASURED_LIVE_ENCODE: [(u64, u64, bool, u64); 4] = [
+    (560, 888, false, 266_470_000),
+    (560, 888, true, 344_910_000),
+    (2096, 1400, false, 593_750_000),
+    (2096, 1400, true, 682_140_000),
+];
+
+#[test]
+fn encode_memory_estimate_covers_the_measured_peaks() {
+    use zenjpegai::header::OperatingPoint;
+    for (w, h, rate_matched, measured) in MEASURED_LIVE_ENCODE {
+        let est = zenjpegai::estimate_encode_memory(w, h, OperatingPoint::Bop, rate_matched);
+        assert!(
+            est.live_bytes >= measured && est.live_bytes <= 2 * measured,
+            "{w}x{h} rate_matched={rate_matched}: estimated {} for a measured {measured}",
+            est.live_bytes
+        );
+        assert_eq!(est.peak_bytes(), est.live_bytes + est.pool_bytes);
+    }
+}
+
+/// `EncodeLimits` must refuse before any checkpoint or picture-sized buffer is touched.
+#[test]
+fn encode_limits_reject_from_the_size_alone() {
+    use zenjpegai::EncodeLimits;
+    // A models directory that does not exist: a limit violation must surface before any
+    // checkpoint is touched.
+    let nowhere = ref_root().join("no-such-models-dir");
+    let image = zenjpegai::encoder::SourceImage::from(zenjpegai::RgbImage {
+        width: 560,
+        height: 888,
+        bit_depth: 8,
+        data: vec![0u16; 3 * 560 * 888],
+    });
+    for limits in [
+        EncodeLimits::none().with_max_pixels(560 * 888 - 1),
+        EncodeLimits::none().with_max_dimensions(559, 888),
+        EncodeLimits::none().with_max_memory(100 << 20),
+    ] {
+        let err = zenjpegai::Encoder::new(&nowhere)
+            .limits(limits)
+            .encode(&image, zenjpegai::EncodeParams::default())
+            .unwrap_err();
+        assert!(matches!(err.error(), Error::LimitExceeded(_)), "{err:?}");
+    }
+}
+
 #[test]
 fn limits_reject_from_the_header_alone() {
     use zenjpegai::Limits;
