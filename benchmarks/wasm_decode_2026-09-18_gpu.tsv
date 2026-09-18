@@ -1,36 +1,37 @@
 browser	browser_version	os	slug	bpp	model_id	width	height	stream_bytes	variant	tier	gpu_mode	call	path	presented	adapter	software_adapter	gpu_ns	gpu_error	fetch_ms	models_ms	decode_ms	total_ms
-chromium	153.0.8010.12	linux	car	0.25	1	1155	866	33016	webgpu	Wasm128	software	decode	gpu		BrowserWebGpu	true	2016548271		1.15	52.32	2566.70	2620.17
-chromium	153.0.8010.12	linux	car	0.25	1	1155	866	33016	webgpu	Wasm128	software	present	gpu	gpu	BrowserWebGpu	true	1982059104		1.98	0.04	2145.75	2147.77
-chromium	153.0.8010.12	linux	car	0.75	2	1155	866	98890	webgpu	Wasm128	software	decode	cpu		BrowserWebGpu	true		wasm trap in GPU path: Uncaught RuntimeError: unreachable	1.57	0.04	765.09	766.70
-chromium	153.0.8010.12	linux	car	0.75	2	1155	866	98890	webgpu	Wasm128	software	present	cpu	2d	BrowserWebGpu	true		no GPU context: disabled after a trap in the GPU path	1.29	0.04	721.65	722.99
-chromium	153.0.8010.12	linux	mountain	0.25	1	1155	866	32887	webgpu	Wasm128	software	decode	cpu		BrowserWebGpu	true			1.73	0.07	723.14	724.94
-chromium	153.0.8010.12	linux	mountain	0.25	1	1155	866	32887	webgpu	Wasm128	software	present	cpu	2d	BrowserWebGpu	true		no GPU context: disabled after a trap in the GPU path	1.21	0.06	713.97	715.24
-chromium	153.0.8010.12	linux	mountain	0.75	2	1155	866	90684	webgpu	Wasm128	software	decode	cpu		BrowserWebGpu	true			1.23	0.06	715.62	716.91
-chromium	153.0.8010.12	linux	mountain	0.75	2	1155	866	90684	webgpu	Wasm128	software	present	cpu	2d	BrowserWebGpu	true		no GPU context: disabled after a trap in the GPU path	1.46	0.04	717.21	718.71
-chromium	153.0.8010.12	linux	dumplings	0.25	1	1155	866	32928	webgpu	Wasm128	software	decode	cpu		BrowserWebGpu	true			1.25	0.08	718.58	719.90
-chromium	153.0.8010.12	linux	dumplings	0.25	1	1155	866	32928	webgpu	Wasm128	software	present	cpu	2d	BrowserWebGpu	true		no GPU context: disabled after a trap in the GPU path	1.38	0.05	715.09	716.52
-chromium	153.0.8010.12	linux	dumplings	0.75	2	1155	866	93621	webgpu	Wasm128	software	decode	cpu		BrowserWebGpu	true			8.93	0.06	717.50	726.49
-chromium	153.0.8010.12	linux	dumplings	0.75	2	1155	866	93621	webgpu	Wasm128	software	present	cpu	2d	BrowserWebGpu	true		no GPU context: disabled after a trap in the GPU path	1.66	0.07	716.27	718.00
-chromium	153.0.8010.12	linux	artwork	0.25	1	1178	849	32964	webgpu	Wasm128	software	decode	cpu		BrowserWebGpu	true			1.26	0.05	718.46	719.76
-chromium	153.0.8010.12	linux	artwork	0.25	1	1178	849	32964	webgpu	Wasm128	software	present	cpu	2d	BrowserWebGpu	true		no GPU context: disabled after a trap in the GPU path	0.84	0.05	708.48	709.37
-chromium	153.0.8010.12	linux	artwork	0.75	2	1178	849	99407	webgpu	Wasm128	software	decode	cpu		BrowserWebGpu	true			1.55	0.05	709.22	710.82
-chromium	153.0.8010.12	linux	artwork	0.75	2	1178	849	99407	webgpu	Wasm128	software	present	cpu	2d	BrowserWebGpu	true		no GPU context: disabled after a trap in the GPU path	1.56	0.05	710.52	712.13
-chromium	153.0.8010.12	linux	brochure	0.25	1	841	1189	32824	webgpu	Wasm128	software	decode	cpu		BrowserWebGpu	true			1.57	0.05	729.21	730.83
-chromium	153.0.8010.12	linux	brochure	0.25	1	841	1189	32824	webgpu	Wasm128	software	present	cpu	2d	BrowserWebGpu	true		no GPU context: disabled after a trap in the GPU path	1.48	0.05	722.78	724.31
-chromium	153.0.8010.12	linux	brochure	0.75	1	841	1189	86466	webgpu	Wasm128	software	decode	cpu		BrowserWebGpu	true			1.64	0.07	719.21	720.92
-chromium	153.0.8010.12	linux	brochure	0.75	1	841	1189	86466	webgpu	Wasm128	software	present	cpu	2d	BrowserWebGpu	true		no GPU context: disabled after a trap in the GPU path	1.78	0.04	719.87	721.69
-chromium	153.0.8010.12	linux	patent-scan	0.25	0	825	1212	28041	webgpu	Wasm128	software	decode	cpu		BrowserWebGpu	true			1.38	49.77	714.17	765.33
-chromium	153.0.8010.12	linux	patent-scan	0.25	0	825	1212	28041	webgpu	Wasm128	software	present	cpu	2d	BrowserWebGpu	true		no GPU context: disabled after a trap in the GPU path	1.78	0.03	709.08	710.89
-chromium	153.0.8010.12	linux	patent-scan	0.75	1	825	1212	85887	webgpu	Wasm128	software	decode	cpu		BrowserWebGpu	true			1.50	0.04	712.57	714.10
-chromium	153.0.8010.12	linux	patent-scan	0.75	1	825	1212	85887	webgpu	Wasm128	software	present	cpu	2d	BrowserWebGpu	true		no GPU context: disabled after a trap in the GPU path	1.54	0.03	711.76	713.33
-chromium	153.0.8010.12	linux	line-plot	0.25	0	1000	1000	32827	webgpu	Wasm128	software	decode	cpu		BrowserWebGpu	true			1.66	0.04	711.74	713.44
-chromium	153.0.8010.12	linux	line-plot	0.25	0	1000	1000	32827	webgpu	Wasm128	software	present	cpu	2d	BrowserWebGpu	true		no GPU context: disabled after a trap in the GPU path	1.94	0.03	711.75	713.72
-chromium	153.0.8010.12	linux	line-plot	0.75	1	1000	1000	97944	webgpu	Wasm128	software	decode	cpu		BrowserWebGpu	true			1.69	0.04	706.67	708.41
-chromium	153.0.8010.12	linux	line-plot	0.75	1	1000	1000	97944	webgpu	Wasm128	software	present	cpu	2d	BrowserWebGpu	true		no GPU context: disabled after a trap in the GPU path	1.72	0.04	707.49	709.25
-chromium	153.0.8010.12	linux	clipart	0.25	2	816	1225	28034	webgpu	Wasm128	software	decode	cpu		BrowserWebGpu	true			1.50	0.05	713.08	714.62
-chromium	153.0.8010.12	linux	clipart	0.25	2	816	1225	28034	webgpu	Wasm128	software	present	cpu	2d	BrowserWebGpu	true		no GPU context: disabled after a trap in the GPU path	1.53	0.04	716.36	717.94
-chromium	153.0.8010.12	linux	clipart	0.75	3	816	1225	83202	webgpu	Wasm128	software	decode	cpu		BrowserWebGpu	true			2.24	48.18	719.79	770.21
-chromium	153.0.8010.12	linux	clipart	0.75	3	816	1225	83202	webgpu	Wasm128	software	present	cpu	2d	BrowserWebGpu	true		no GPU context: disabled after a trap in the GPU path	3.83	0.03	713.33	717.19
+\\\\\\\        to: qvxpwyvu 19401948 "web: WebGPU adapter probe, WEBGPU_ADAPTER=hardware|swiftshader selector, gpu=on opt-in" (rebase destination)
+ chromium	153.0.8010.12	linux	car	0.25	1	1155	866	33016	webgpu	Wasm128	software	decode	gpu		BrowserWebGpu	true	2016548271		1.15	52.32	2566.70	2620.17
+ chromium	153.0.8010.12	linux	car	0.25	1	1155	866	33016	webgpu	Wasm128	software	present	gpu	gpu	BrowserWebGpu	true	1982059104		1.98	0.04	2145.75	2147.77
+ chromium	153.0.8010.12	linux	car	0.75	2	1155	866	98890	webgpu	Wasm128	software	decode	cpu		BrowserWebGpu	true		wasm trap in GPU path: Uncaught RuntimeError: unreachable	1.57	0.04	765.09	766.70
+ chromium	153.0.8010.12	linux	car	0.75	2	1155	866	98890	webgpu	Wasm128	software	present	cpu	2d	BrowserWebGpu	true		no GPU context: disabled after a trap in the GPU path	1.29	0.04	721.65	722.99
+ chromium	153.0.8010.12	linux	mountain	0.25	1	1155	866	32887	webgpu	Wasm128	software	decode	cpu		BrowserWebGpu	true			1.73	0.07	723.14	724.94
+ chromium	153.0.8010.12	linux	mountain	0.25	1	1155	866	32887	webgpu	Wasm128	software	present	cpu	2d	BrowserWebGpu	true		no GPU context: disabled after a trap in the GPU path	1.21	0.06	713.97	715.24
+ chromium	153.0.8010.12	linux	mountain	0.75	2	1155	866	90684	webgpu	Wasm128	software	decode	cpu		BrowserWebGpu	true			1.23	0.06	715.62	716.91
+ chromium	153.0.8010.12	linux	mountain	0.75	2	1155	866	90684	webgpu	Wasm128	software	present	cpu	2d	BrowserWebGpu	true		no GPU context: disabled after a trap in the GPU path	1.46	0.04	717.21	718.71
+ chromium	153.0.8010.12	linux	dumplings	0.25	1	1155	866	32928	webgpu	Wasm128	software	decode	cpu		BrowserWebGpu	true			1.25	0.08	718.58	719.90
+ chromium	153.0.8010.12	linux	dumplings	0.25	1	1155	866	32928	webgpu	Wasm128	software	present	cpu	2d	BrowserWebGpu	true		no GPU context: disabled after a trap in the GPU path	1.38	0.05	715.09	716.52
+ chromium	153.0.8010.12	linux	dumplings	0.75	2	1155	866	93621	webgpu	Wasm128	software	decode	cpu		BrowserWebGpu	true			8.93	0.06	717.50	726.49
+ chromium	153.0.8010.12	linux	dumplings	0.75	2	1155	866	93621	webgpu	Wasm128	software	present	cpu	2d	BrowserWebGpu	true		no GPU context: disabled after a trap in the GPU path	1.66	0.07	716.27	718.00
+ chromium	153.0.8010.12	linux	artwork	0.25	1	1178	849	32964	webgpu	Wasm128	software	decode	cpu		BrowserWebGpu	true			1.26	0.05	718.46	719.76
+ chromium	153.0.8010.12	linux	artwork	0.25	1	1178	849	32964	webgpu	Wasm128	software	present	cpu	2d	BrowserWebGpu	true		no GPU context: disabled after a trap in the GPU path	0.84	0.05	708.48	709.37
+ chromium	153.0.8010.12	linux	artwork	0.75	2	1178	849	99407	webgpu	Wasm128	software	decode	cpu		BrowserWebGpu	true			1.55	0.05	709.22	710.82
+ chromium	153.0.8010.12	linux	artwork	0.75	2	1178	849	99407	webgpu	Wasm128	software	present	cpu	2d	BrowserWebGpu	true		no GPU context: disabled after a trap in the GPU path	1.56	0.05	710.52	712.13
+ chromium	153.0.8010.12	linux	brochure	0.25	1	841	1189	32824	webgpu	Wasm128	software	decode	cpu		BrowserWebGpu	true			1.57	0.05	729.21	730.83
+ chromium	153.0.8010.12	linux	brochure	0.25	1	841	1189	32824	webgpu	Wasm128	software	present	cpu	2d	BrowserWebGpu	true		no GPU context: disabled after a trap in the GPU path	1.48	0.05	722.78	724.31
+ chromium	153.0.8010.12	linux	brochure	0.75	1	841	1189	86466	webgpu	Wasm128	software	decode	cpu		BrowserWebGpu	true			1.64	0.07	719.21	720.92
+ chromium	153.0.8010.12	linux	brochure	0.75	1	841	1189	86466	webgpu	Wasm128	software	present	cpu	2d	BrowserWebGpu	true		no GPU context: disabled after a trap in the GPU path	1.78	0.04	719.87	721.69
+ chromium	153.0.8010.12	linux	patent-scan	0.25	0	825	1212	28041	webgpu	Wasm128	software	decode	cpu		BrowserWebGpu	true			1.38	49.77	714.17	765.33
+ chromium	153.0.8010.12	linux	patent-scan	0.25	0	825	1212	28041	webgpu	Wasm128	software	present	cpu	2d	BrowserWebGpu	true		no GPU context: disabled after a trap in the GPU path	1.78	0.03	709.08	710.89
+ chromium	153.0.8010.12	linux	patent-scan	0.75	1	825	1212	85887	webgpu	Wasm128	software	decode	cpu		BrowserWebGpu	true			1.50	0.04	712.57	714.10
+ chromium	153.0.8010.12	linux	patent-scan	0.75	1	825	1212	85887	webgpu	Wasm128	software	present	cpu	2d	BrowserWebGpu	true		no GPU context: disabled after a trap in the GPU path	1.54	0.03	711.76	713.33
+ chromium	153.0.8010.12	linux	line-plot	0.25	0	1000	1000	32827	webgpu	Wasm128	software	decode	cpu		BrowserWebGpu	true			1.66	0.04	711.74	713.44
+ chromium	153.0.8010.12	linux	line-plot	0.25	0	1000	1000	32827	webgpu	Wasm128	software	present	cpu	2d	BrowserWebGpu	true		no GPU context: disabled after a trap in the GPU path	1.94	0.03	711.75	713.72
+ chromium	153.0.8010.12	linux	line-plot	0.75	1	1000	1000	97944	webgpu	Wasm128	software	decode	cpu		BrowserWebGpu	true			1.69	0.04	706.67	708.41
+ chromium	153.0.8010.12	linux	line-plot	0.75	1	1000	1000	97944	webgpu	Wasm128	software	present	cpu	2d	BrowserWebGpu	true		no GPU context: disabled after a trap in the GPU path	1.72	0.04	707.49	709.25
+ chromium	153.0.8010.12	linux	clipart	0.25	2	816	1225	28034	webgpu	Wasm128	software	decode	cpu		BrowserWebGpu	true			1.50	0.05	713.08	714.62
+ chromium	153.0.8010.12	linux	clipart	0.25	2	816	1225	28034	webgpu	Wasm128	software	present	cpu	2d	BrowserWebGpu	true		no GPU context: disabled after a trap in the GPU path	1.53	0.04	716.36	717.94
+ chromium	153.0.8010.12	linux	clipart	0.75	3	816	1225	83202	webgpu	Wasm128	software	decode	cpu		BrowserWebGpu	true			2.24	48.18	719.79	770.21
+ chromium	153.0.8010.12	linux	clipart	0.75	3	816	1225	83202	webgpu	Wasm128	software	present	cpu	2d	BrowserWebGpu	true		no GPU context: disabled after a trap in the GPU path	3.83	0.03	713.33	717.19
 chromium	153.0.8010.12	linux	car	0.25	1	1155	866	33016	threads	Wasm128	auto	decode	cpu		only a software WebGPU adapter (fallback)				0.86	53.82	179.35	234.02
 chromium	153.0.8010.12	linux	car	0.25	1	1155	866	33016	threads	Wasm128	auto	present	cpu	2d	only a software WebGPU adapter (fallback)			this package has no GPU presentation	1.40	0.05	110.29	111.74
 chromium	153.0.8010.12	linux	car	0.75	2	1155	866	98890	threads	Wasm128	auto	decode	cpu		only a software WebGPU adapter (fallback)				1.57	52.33	115.93	169.83
@@ -63,3 +64,195 @@ chromium	153.0.8010.12	linux	clipart	0.25	2	816	1225	28034	threads	Wasm128	auto	
 chromium	153.0.8010.12	linux	clipart	0.25	2	816	1225	28034	threads	Wasm128	auto	present	cpu	2d	only a software WebGPU adapter (fallback)			this package has no GPU presentation	1.44	0.06	94.69	96.19
 chromium	153.0.8010.12	linux	clipart	0.75	3	816	1225	83202	threads	Wasm128	auto	decode	cpu		only a software WebGPU adapter (fallback)				1.54	47.89	100.30	149.74
 chromium	153.0.8010.12	linux	clipart	0.75	3	816	1225	83202	threads	Wasm128	auto	present	cpu	2d	only a software WebGPU adapter (fallback)			this package has no GPU presentation	4.48	0.03	95.60	100.11
+chromium	153.0.8010.12	linux	car	0.25	1	1155	866	33016	webgpu	Wasm128	on	decode	gpu		nvidia/turing	false	20379232		2.28	63.19	289.05	354.52
+chromium	153.0.8010.12	linux	car	0.25	1	1155	866	33016	webgpu	Wasm128	on	present	gpu	gpu	nvidia/turing	false	20171552		1.85	0.05	194.40	196.30
+chromium	153.0.8010.12	linux	car	0.75	2	1155	866	98890	webgpu	Wasm128	on	decode	gpu		nvidia/turing	false	20199424		11.74	59.51	203.81	275.07
+chromium	153.0.8010.12	linux	car	0.75	2	1155	866	98890	webgpu	Wasm128	on	present	gpu	gpu	nvidia/turing	false	20156416		2.64	0.10	301.38	304.11
+chromium	153.0.8010.12	linux	mountain	0.25	1	1155	866	32887	webgpu	Wasm128	on	decode	gpu		nvidia/turing	false	20205376		11.84	0.11	285.80	297.75
+chromium	153.0.8010.12	linux	mountain	0.25	1	1155	866	32887	webgpu	Wasm128	on	present	gpu	gpu	nvidia/turing	false	22314144		5.70	0.11	286.42	292.23
+chromium	153.0.8010.12	linux	mountain	0.75	2	1155	866	90684	webgpu	Wasm128	on	decode	gpu		nvidia/turing	false	22282496		13.46	0.11	247.75	261.32
+chromium	153.0.8010.12	linux	mountain	0.75	2	1155	866	90684	webgpu	Wasm128	on	present	gpu	gpu	nvidia/turing	false	22308832		2.21	0.06	242.73	245.00
+chromium	153.0.8010.12	linux	dumplings	0.25	1	1155	866	32928	webgpu	Wasm128	on	decode	gpu		nvidia/turing	false	22305312		11.52	0.08	264.72	276.32
+chromium	153.0.8010.12	linux	dumplings	0.25	1	1155	866	32928	webgpu	Wasm128	on	present	gpu	gpu	nvidia/turing	false	22351584		4.32	0.16	364.47	368.94
+chromium	153.0.8010.12	linux	dumplings	0.75	2	1155	866	93621	webgpu	Wasm128	on	decode	gpu		nvidia/turing	false	22241280		16.96	0.26	350.69	367.92
+chromium	153.0.8010.12	linux	dumplings	0.75	2	1155	866	93621	webgpu	Wasm128	on	present	gpu	gpu	nvidia/turing	false	135255680		4.90	0.14	504.23	509.28
+chromium	153.0.8010.12	linux	artwork	0.25	1	1178	849	32964	webgpu	Wasm128	on	decode	gpu		nvidia/turing	false	129312768		16.33	0.20	492.91	509.43
+chromium	153.0.8010.12	linux	artwork	0.25	1	1178	849	32964	webgpu	Wasm128	on	present	gpu	gpu	nvidia/turing	false	126941600		3.92	0.09	493.26	497.27
+chromium	153.0.8010.12	linux	artwork	0.75	2	1178	849	99407	webgpu	Wasm128	on	decode	gpu		nvidia/turing	false	22226912		16.21	0.38	338.22	354.81
+chromium	153.0.8010.12	linux	artwork	0.75	2	1178	849	99407	webgpu	Wasm128	on	present	gpu	gpu	nvidia/turing	false	22161408		2.47	0.11	366.44	369.02
+chromium	153.0.8010.12	linux	brochure	0.25	1	841	1189	32824	webgpu	Wasm128	on	decode	gpu		nvidia/turing	false	22230912		14.57	0.13	385.35	400.05
+chromium	153.0.8010.12	linux	brochure	0.25	1	841	1189	32824	webgpu	Wasm128	on	present	gpu	gpu	nvidia/turing	false	22112256		8.88	0.06	282.98	291.92
+chromium	153.0.8010.12	linux	brochure	0.75	1	841	1189	86466	webgpu	Wasm128	on	decode	gpu		nvidia/turing	false	22146528		11.56	0.04	189.13	200.74
+chromium	153.0.8010.12	linux	brochure	0.75	1	841	1189	86466	webgpu	Wasm128	on	present	gpu	gpu	nvidia/turing	false	22128736		1.34	0.04	189.52	190.91
+chromium	153.0.8010.12	linux	patent-scan	0.25	0	825	1212	28041	webgpu	Wasm128	on	decode	gpu		nvidia/turing	false	46876448		11.49	51.50	212.93	275.91
+chromium	153.0.8010.12	linux	patent-scan	0.25	0	825	1212	28041	webgpu	Wasm128	on	present	gpu	gpu	nvidia/turing	false	47951872		1.94	0.04	204.17	206.15
+chromium	153.0.8010.12	linux	patent-scan	0.75	1	825	1212	85887	webgpu	Wasm128	on	decode	gpu		nvidia/turing	false	50386976		11.52	0.04	206.76	218.32
+chromium	153.0.8010.12	linux	patent-scan	0.75	1	825	1212	85887	webgpu	Wasm128	on	present	gpu	gpu	nvidia/turing	false	51666400		1.64	0.04	206.60	208.28
+chromium	153.0.8010.12	linux	line-plot	0.25	0	1000	1000	32827	webgpu	Wasm128	on	decode	gpu		nvidia/turing	false	52491712		1.29	0.04	214.21	215.55
+chromium	153.0.8010.12	linux	line-plot	0.25	0	1000	1000	32827	webgpu	Wasm128	on	present	gpu	gpu	nvidia/turing	false	132546560		1.32	0.05	294.90	296.27
+chromium	153.0.8010.12	linux	line-plot	0.75	1	1000	1000	97944	webgpu	Wasm128	on	decode	gpu		nvidia/turing	false	123175808		11.42	0.04	286.00	297.45
+chromium	153.0.8010.12	linux	line-plot	0.75	1	1000	1000	97944	webgpu	Wasm128	on	present	gpu	gpu	nvidia/turing	false	123691104		1.44	0.04	284.62	286.10
+chromium	153.0.8010.12	linux	clipart	0.25	2	816	1225	28034	webgpu	Wasm128	on	decode	gpu		nvidia/turing	false	20376160		11.23	0.07	181.00	192.31
+chromium	153.0.8010.12	linux	clipart	0.25	2	816	1225	28034	webgpu	Wasm128	on	present	gpu	gpu	nvidia/turing	false	20387616		1.45	0.03	180.45	181.93
+chromium	153.0.8010.12	linux	clipart	0.75	3	816	1225	83202	webgpu	Wasm128	on	decode	gpu		nvidia/turing	false	20387840		11.59	52.48	190.87	254.94
+chromium	153.0.8010.12	linux	clipart	0.75	3	816	1225	83202	webgpu	Wasm128	on	present	gpu	gpu	nvidia/turing	false	20397824		3.22	0.04	180.22	183.48
+chromium	153.0.8010.12	linux	car	0.25	1	1155	866	33016	threads	Wasm128	off (threads)	decode	cpu		cpu				0.82	11.11	263.28	275.21
+chromium	153.0.8010.12	linux	car	0.75	2	1155	866	98890	threads	Wasm128	off (threads)	decode	cpu		cpu				1.65	7.75	183.94	193.34
+chromium	153.0.8010.12	linux	mountain	0.25	1	1155	866	32887	threads	Wasm128	off (threads)	decode	cpu		cpu				9.43	0.06	165.32	174.81
+chromium	153.0.8010.12	linux	mountain	0.75	2	1155	866	90684	threads	Wasm128	off (threads)	decode	cpu		cpu				1.62	0.06	171.93	173.61
+chromium	153.0.8010.12	linux	dumplings	0.25	1	1155	866	32928	threads	Wasm128	off (threads)	decode	cpu		cpu				1.72	0.06	176.88	178.65
+chromium	153.0.8010.12	linux	dumplings	0.75	2	1155	866	93621	threads	Wasm128	off (threads)	decode	cpu		cpu				1.45	0.04	174.58	176.06
+chromium	153.0.8010.12	linux	artwork	0.25	1	1178	849	32964	threads	Wasm128	off (threads)	decode	cpu		cpu				1.40	0.05	183.13	184.58
+chromium	153.0.8010.12	linux	artwork	0.75	2	1178	849	99407	threads	Wasm128	off (threads)	decode	cpu		cpu				1.39	0.05	169.63	171.07
+chromium	153.0.8010.12	linux	brochure	0.25	1	841	1189	32824	threads	Wasm128	off (threads)	decode	cpu		cpu				1.38	0.04	208.68	210.11
+chromium	153.0.8010.12	linux	brochure	0.75	1	841	1189	86466	threads	Wasm128	off (threads)	decode	cpu		cpu				1.56	0.05	199.05	200.65
+chromium	153.0.8010.12	linux	patent-scan	0.25	0	825	1212	28041	threads	Wasm128	off (threads)	decode	cpu		cpu				1.50	8.21	204.78	214.49
+chromium	153.0.8010.12	linux	patent-scan	0.75	1	825	1212	85887	threads	Wasm128	off (threads)	decode	cpu		cpu				1.86	0.05	200.92	202.83
+chromium	153.0.8010.12	linux	line-plot	0.25	0	1000	1000	32827	threads	Wasm128	off (threads)	decode	cpu		cpu				1.38	0.05	185.58	187.01
+chromium	153.0.8010.12	linux	line-plot	0.75	1	1000	1000	97944	threads	Wasm128	off (threads)	decode	cpu		cpu				1.62	0.04	175.41	177.07
+chromium	153.0.8010.12	linux	clipart	0.25	2	816	1225	28034	threads	Wasm128	off (threads)	decode	cpu		cpu				1.50	0.05	196.28	197.83
+chromium	153.0.8010.12	linux	clipart	0.75	3	816	1225	83202	threads	Wasm128	off (threads)	decode	cpu		cpu				1.55	9.74	199.78	211.07
+chromium	153.0.8010.12	linux	car	0.25	1	1155	866	33016	simd	Wasm128	off (simd)	decode	cpu		cpu				1.00	56.90	817.20	875.10
+chromium	153.0.8010.12	linux	car	0.75	2	1155	866	98890	simd	Wasm128	off (simd)	decode	cpu		cpu				1.90	50.70	768.70	821.30
+chromium	153.0.8010.12	linux	mountain	0.25	1	1155	866	32887	simd	Wasm128	off (simd)	decode	cpu		cpu				1.50	9.10	769.10	779.70
+chromium	153.0.8010.12	linux	mountain	0.75	2	1155	866	90684	simd	Wasm128	off (simd)	decode	cpu		cpu				10.00	8.60	767.00	785.60
+chromium	153.0.8010.12	linux	dumplings	0.25	1	1155	866	32928	simd	Wasm128	off (simd)	decode	cpu		cpu				2.00	0.10	736.40	738.50
+chromium	153.0.8010.12	linux	dumplings	0.75	2	1155	866	93621	simd	Wasm128	off (simd)	decode	cpu		cpu				1.70	0.00	735.50	737.20
+chromium	153.0.8010.12	linux	artwork	0.25	1	1178	849	32964	simd	Wasm128	off (simd)	decode	cpu		cpu				1.40	0.10	754.90	756.40
+chromium	153.0.8010.12	linux	artwork	0.75	2	1178	849	99407	simd	Wasm128	off (simd)	decode	cpu		cpu				2.00	0.00	741.40	743.40
+chromium	153.0.8010.12	linux	brochure	0.25	1	841	1189	32824	simd	Wasm128	off (simd)	decode	cpu		cpu				1.50	0.00	749.40	750.90
+chromium	153.0.8010.12	linux	brochure	0.75	1	841	1189	86466	simd	Wasm128	off (simd)	decode	cpu		cpu				1.30	8.30	757.60	767.20
+chromium	153.0.8010.12	linux	patent-scan	0.25	0	825	1212	28041	simd	Wasm128	off (simd)	decode	cpu		cpu				1.20	49.10	737.10	787.40
+chromium	153.0.8010.12	linux	patent-scan	0.75	1	825	1212	85887	simd	Wasm128	off (simd)	decode	cpu		cpu				1.10	7.50	742.00	750.60
+chromium	153.0.8010.12	linux	line-plot	0.25	0	1000	1000	32827	simd	Wasm128	off (simd)	decode	cpu		cpu				1.20	7.30	735.50	744.00
+chromium	153.0.8010.12	linux	line-plot	0.75	1	1000	1000	97944	simd	Wasm128	off (simd)	decode	cpu		cpu				1.60	0.10	720.20	721.90
+chromium	153.0.8010.12	linux	clipart	0.25	2	816	1225	28034	simd	Wasm128	off (simd)	decode	cpu		cpu				1.50	7.20	744.60	753.30
+chromium	153.0.8010.12	linux	clipart	0.75	3	816	1225	83202	simd	Wasm128	off (simd)	decode	cpu		cpu				1.70	49.10	758.20	809.00
+chromium	153.0.8010.12	linux	car	0.25	1	1155	866	33016	webgpu	Wasm128	software	decode	gpu		google/swiftshader	true	1996988548		1.03	51.17	2588.32	2640.52
+chromium	153.0.8010.12	linux	car	0.25	1	1155	866	33016	webgpu	Wasm128	software	present	gpu	gpu	google/swiftshader	true	1928090303		2.04	0.05	2096.23	2098.32
+chromium	153.0.8010.12	linux	car	0.75	2	1155	866	98890	webgpu	Wasm128	software	decode	cpu		google/swiftshader	true		GPU device error: Error occurred when trying to async map a buffer	1.89	51.49	946.85	1000.23
+chromium	153.0.8010.12	linux	car	0.75	2	1155	866	98890	webgpu	Wasm128	software	present	cpu	2d	google/swiftshader	true		Device("Error occurred when trying to async map a buffer"); GPU device error: Error occurred when trying to async map a buffer	2.11	0.06	1055.56	1057.73
+chromium	153.0.8010.12	linux	mountain	0.25	1	1155	866	32887	webgpu	Wasm128	software	decode	cpu		google/swiftshader	true		GPU device error: Error occurred when trying to async map a buffer	1.72	0.06	906.65	908.43
+chromium	153.0.8010.12	linux	mountain	0.25	1	1155	866	32887	webgpu	Wasm128	software	present	cpu	2d	google/swiftshader	true		Device("Error occurred when trying to async map a buffer"); GPU device error: Error occurred when trying to async map a buffer	1.37	0.06	1046.42	1047.84
+chromium	153.0.8010.12	linux	mountain	0.75	2	1155	866	90684	webgpu	Wasm128	software	decode	cpu		google/swiftshader	true		GPU device error: Error occurred when trying to async map a buffer	1.93	0.06	891.82	893.81
+chromium	153.0.8010.12	linux	mountain	0.75	2	1155	866	90684	webgpu	Wasm128	software	present	cpu	2d	google/swiftshader	true		Device("Error occurred when trying to async map a buffer"); GPU device error: Error occurred when trying to async map a buffer	1.76	0.06	1047.96	1049.77
+chromium	153.0.8010.12	linux	dumplings	0.25	1	1155	866	32928	webgpu	Wasm128	software	decode	cpu		google/swiftshader	true		GPU device error: Error occurred when trying to async map a buffer	1.85	0.05	887.79	889.69
+chromium	153.0.8010.12	linux	dumplings	0.25	1	1155	866	32928	webgpu	Wasm128	software	present	cpu	2d	google/swiftshader	true		Device("Error occurred when trying to async map a buffer"); GPU device error: Error occurred when trying to async map a buffer	1.46	0.05	1046.45	1047.96
+chromium	153.0.8010.12	linux	dumplings	0.75	2	1155	866	93621	webgpu	Wasm128	software	decode	cpu		google/swiftshader	true		GPU device error: Error occurred when trying to async map a buffer	1.86	0.05	887.80	889.71
+chromium	153.0.8010.12	linux	dumplings	0.75	2	1155	866	93621	webgpu	Wasm128	software	present	cpu	2d	google/swiftshader	true		Device("Error occurred when trying to async map a buffer"); GPU device error: Error occurred when trying to async map a buffer	2.06	0.06	1049.52	1051.64
+chromium	153.0.8010.12	linux	artwork	0.25	1	1178	849	32964	webgpu	Wasm128	software	decode	cpu		google/swiftshader	true		GPU device error: Error occurred when trying to async map a buffer	1.54	0.04	885.12	886.70
+chromium	153.0.8010.12	linux	artwork	0.25	1	1178	849	32964	webgpu	Wasm128	software	present	cpu	2d	google/swiftshader	true		Device("Error occurred when trying to async map a buffer"); GPU device error: Error occurred when trying to async map a buffer	1.58	0.04	1030.58	1032.20
+chromium	153.0.8010.12	linux	artwork	0.75	2	1178	849	99407	webgpu	Wasm128	software	decode	cpu		google/swiftshader	true		GPU device error: Error occurred when trying to async map a buffer	2.13	0.04	879.80	881.98
+chromium	153.0.8010.12	linux	artwork	0.75	2	1178	849	99407	webgpu	Wasm128	software	present	cpu	2d	google/swiftshader	true		Device("Error occurred when trying to async map a buffer"); GPU device error: Error occurred when trying to async map a buffer	10.02	0.04	1032.12	1042.18
+chromium	153.0.8010.12	linux	brochure	0.25	1	841	1189	32824	webgpu	Wasm128	software	decode	cpu		google/swiftshader	true		GPU device error: Error occurred when trying to async map a buffer	1.82	0.06	905.28	907.16
+chromium	153.0.8010.12	linux	brochure	0.25	1	841	1189	32824	webgpu	Wasm128	software	present	cpu	2d	google/swiftshader	true		Device("Error occurred when trying to async map a buffer"); GPU device error: Error occurred when trying to async map a buffer	1.59	0.05	1054.18	1055.82
+chromium	153.0.8010.12	linux	brochure	0.75	1	841	1189	86466	webgpu	Wasm128	software	decode	cpu		google/swiftshader	true		GPU device error: Error occurred when trying to async map a buffer	2.00	0.05	896.60	898.64
+chromium	153.0.8010.12	linux	brochure	0.75	1	841	1189	86466	webgpu	Wasm128	software	present	cpu	2d	google/swiftshader	true		Device("Error occurred when trying to async map a buffer"); GPU device error: Error occurred when trying to async map a buffer	1.82	0.05	1056.03	1057.90
+chromium	153.0.8010.12	linux	patent-scan	0.25	0	825	1212	28041	webgpu	Wasm128	software	decode	cpu		google/swiftshader	true		GPU device error: Error occurred when trying to async map a buffer	1.88	49.25	887.35	938.47
+chromium	153.0.8010.12	linux	patent-scan	0.25	0	825	1212	28041	webgpu	Wasm128	software	present	cpu	2d	google/swiftshader	true		Device("Error occurred when trying to async map a buffer"); GPU device error: Error occurred when trying to async map a buffer	2.09	0.04	1031.93	1034.05
+chromium	153.0.8010.12	linux	patent-scan	0.75	1	825	1212	85887	webgpu	Wasm128	software	decode	cpu		google/swiftshader	true		GPU device error: Error occurred when trying to async map a buffer	1.49	0.05	875.41	876.95
+chromium	153.0.8010.12	linux	patent-scan	0.75	1	825	1212	85887	webgpu	Wasm128	software	present	cpu	2d	google/swiftshader	true		Device("Error occurred when trying to async map a buffer"); GPU device error: Error occurred when trying to async map a buffer	1.65	0.05	1020.26	1021.96
+chromium	153.0.8010.12	linux	line-plot	0.25	0	1000	1000	32827	webgpu	Wasm128	software	decode	cpu		google/swiftshader	true		GPU device error: Error occurred when trying to async map a buffer	1.37	0.05	870.64	872.07
+chromium	153.0.8010.12	linux	line-plot	0.25	0	1000	1000	32827	webgpu	Wasm128	software	present	cpu	2d	google/swiftshader	true		Device("Error occurred when trying to async map a buffer"); GPU device error: Error occurred when trying to async map a buffer	1.76	0.04	1019.10	1020.89
+chromium	153.0.8010.12	linux	line-plot	0.75	1	1000	1000	97944	webgpu	Wasm128	software	decode	cpu		google/swiftshader	true		GPU device error: Error occurred when trying to async map a buffer	1.96	0.06	866.77	868.79
+chromium	153.0.8010.12	linux	line-plot	0.75	1	1000	1000	97944	webgpu	Wasm128	software	present	cpu	2d	google/swiftshader	true		Device("Error occurred when trying to async map a buffer"); GPU device error: Error occurred when trying to async map a buffer	1.92	0.06	1021.35	1023.33
+chromium	153.0.8010.12	linux	clipart	0.25	2	816	1225	28034	webgpu	Wasm128	software	decode	cpu		google/swiftshader	true		GPU device error: Error occurred when trying to async map a buffer	1.70	0.05	873.52	875.28
+chromium	153.0.8010.12	linux	clipart	0.25	2	816	1225	28034	webgpu	Wasm128	software	present	cpu	2d	google/swiftshader	true		Device("Error occurred when trying to async map a buffer"); GPU device error: Error occurred when trying to async map a buffer	1.73	0.05	1027.58	1029.36
+chromium	153.0.8010.12	linux	clipart	0.75	3	816	1225	83202	webgpu	Wasm128	software	decode	cpu		google/swiftshader	true		GPU device error: Error occurred when trying to async map a buffer	1.88	45.32	902.67	949.87
+chromium	153.0.8010.12	linux	clipart	0.75	3	816	1225	83202	webgpu	Wasm128	software	present	cpu	2d	google/swiftshader	true		Device("Error occurred when trying to async map a buffer"); GPU device error: Error occurred when trying to async map a buffer	3.80	0.05	1042.23	1046.08
+chromium	153.0.8010.12	linux	car	0.25	1	1155	866	33016	threads	Wasm128	off (threads)	decode	cpu		cpu				0.80	15.39	259.06	275.25
+chromium	153.0.8010.12	linux	car	0.75	2	1155	866	98890	threads	Wasm128	off (threads)	decode	cpu		cpu				1.93	7.40	186.67	196.00
+chromium	153.0.8010.12	linux	mountain	0.25	1	1155	866	32887	threads	Wasm128	off (threads)	decode	cpu		cpu				1.33	0.06	177.37	178.76
+chromium	153.0.8010.12	linux	mountain	0.75	2	1155	866	90684	threads	Wasm128	off (threads)	decode	cpu		cpu				1.74	0.05	163.15	164.94
+chromium	153.0.8010.12	linux	dumplings	0.25	1	1155	866	32928	threads	Wasm128	off (threads)	decode	cpu		cpu				1.40	0.05	169.02	170.48
+chromium	153.0.8010.12	linux	dumplings	0.75	2	1155	866	93621	threads	Wasm128	off (threads)	decode	cpu		cpu				1.61	0.05	172.91	174.57
+chromium	153.0.8010.12	linux	artwork	0.25	1	1178	849	32964	threads	Wasm128	off (threads)	decode	cpu		cpu				1.66	0.05	174.45	176.16
+chromium	153.0.8010.12	linux	artwork	0.75	2	1178	849	99407	threads	Wasm128	off (threads)	decode	cpu		cpu				1.42	0.05	165.90	167.37
+chromium	153.0.8010.12	linux	brochure	0.25	1	841	1189	32824	threads	Wasm128	off (threads)	decode	cpu		cpu				1.39	0.05	202.60	204.04
+chromium	153.0.8010.12	linux	brochure	0.75	1	841	1189	86466	threads	Wasm128	off (threads)	decode	cpu		cpu				1.49	0.05	191.76	193.30
+chromium	153.0.8010.12	linux	patent-scan	0.25	0	825	1212	28041	threads	Wasm128	off (threads)	decode	cpu		cpu				1.60	7.89	193.91	203.41
+chromium	153.0.8010.12	linux	patent-scan	0.75	1	825	1212	85887	threads	Wasm128	off (threads)	decode	cpu		cpu				1.66	0.04	188.97	190.67
+chromium	153.0.8010.12	linux	line-plot	0.25	0	1000	1000	32827	threads	Wasm128	off (threads)	decode	cpu		cpu				1.40	0.04	190.77	192.21
+chromium	153.0.8010.12	linux	line-plot	0.75	1	1000	1000	97944	threads	Wasm128	off (threads)	decode	cpu		cpu				1.65	0.06	176.12	177.83
+chromium	153.0.8010.12	linux	clipart	0.25	2	816	1225	28034	threads	Wasm128	off (threads)	decode	cpu		cpu				1.59	0.05	193.27	194.91
+chromium	153.0.8010.12	linux	clipart	0.75	3	816	1225	83202	threads	Wasm128	off (threads)	decode	cpu		cpu				1.49	10.14	200.48	212.11
+chromium	153.0.8010.12	linux	car	0.25	1	1155	866	33016	simd	Wasm128	off (simd)	decode	cpu		cpu				1.20	57.60	816.70	875.50
+chromium	153.0.8010.12	linux	car	0.75	2	1155	866	98890	simd	Wasm128	off (simd)	decode	cpu		cpu				1.50	48.90	768.40	818.80
+chromium	153.0.8010.12	linux	mountain	0.25	1	1155	866	32887	simd	Wasm128	off (simd)	decode	cpu		cpu				1.80	8.30	767.60	777.70
+chromium	153.0.8010.12	linux	mountain	0.75	2	1155	866	90684	simd	Wasm128	off (simd)	decode	cpu		cpu				1.60	8.40	764.50	774.50
+chromium	153.0.8010.12	linux	dumplings	0.25	1	1155	866	32928	simd	Wasm128	off (simd)	decode	cpu		cpu				2.20	0.20	732.10	734.50
+chromium	153.0.8010.12	linux	dumplings	0.75	2	1155	866	93621	simd	Wasm128	off (simd)	decode	cpu		cpu				1.50	0.00	731.00	732.50
+chromium	153.0.8010.12	linux	artwork	0.25	1	1178	849	32964	simd	Wasm128	off (simd)	decode	cpu		cpu				1.40	0.00	730.00	731.40
+chromium	153.0.8010.12	linux	artwork	0.75	2	1178	849	99407	simd	Wasm128	off (simd)	decode	cpu		cpu				1.50	0.00	747.10	748.60
+chromium	153.0.8010.12	linux	brochure	0.25	1	841	1189	32824	simd	Wasm128	off (simd)	decode	cpu		cpu				1.40	0.00	746.90	748.30
+chromium	153.0.8010.12	linux	brochure	0.75	1	841	1189	86466	simd	Wasm128	off (simd)	decode	cpu		cpu				1.70	8.10	758.10	767.90
+chromium	153.0.8010.12	linux	patent-scan	0.25	0	825	1212	28041	simd	Wasm128	off (simd)	decode	cpu		cpu				1.30	46.50	734.40	782.20
+chromium	153.0.8010.12	linux	patent-scan	0.75	1	825	1212	85887	simd	Wasm128	off (simd)	decode	cpu		cpu				1.80	8.60	734.40	744.80
+chromium	153.0.8010.12	linux	line-plot	0.25	0	1000	1000	32827	simd	Wasm128	off (simd)	decode	cpu		cpu				1.30	8.10	725.50	734.90
+chromium	153.0.8010.12	linux	line-plot	0.75	1	1000	1000	97944	simd	Wasm128	off (simd)	decode	cpu		cpu				9.90	0.10	726.90	736.90
+chromium	153.0.8010.12	linux	clipart	0.25	2	816	1225	28034	simd	Wasm128	off (simd)	decode	cpu		cpu				1.70	7.30	740.50	749.50
+chromium	153.0.8010.12	linux	clipart	0.75	3	816	1225	83202	simd	Wasm128	off (simd)	decode	cpu		cpu				1.70	48.30	746.30	796.30
+chromium	153.0.8010.12	linux	car	0.25	1	1155	866	33016	threads	Wasm128	on	decode	cpu		google/swiftshader				19.83	119.52	360.17	499.52
+chromium	153.0.8010.12	linux	car	0.25	1	1155	866	33016	threads	Wasm128	on	present	cpu	2d	google/swiftshader			this package has no GPU presentation	1.42	0.07	317.44	318.93
+chromium	153.0.8010.12	linux	car	0.75	2	1155	866	98890	threads	Wasm128	on	decode	cpu		google/swiftshader				4.04	100.38	234.39	338.81
+chromium	153.0.8010.12	linux	car	0.75	2	1155	866	98890	threads	Wasm128	on	present	cpu	2d	google/swiftshader			this package has no GPU presentation	1.46	0.07	256.07	257.60
+chromium	153.0.8010.12	linux	mountain	0.25	1	1155	866	32887	threads	Wasm128	on	decode	cpu		google/swiftshader				1.95	0.09	277.45	279.50
+chromium	153.0.8010.12	linux	mountain	0.25	1	1155	866	32887	threads	Wasm128	on	present	cpu	2d	google/swiftshader			this package has no GPU presentation	2.54	0.10	252.96	255.60
+chromium	153.0.8010.12	linux	mountain	0.75	2	1155	866	90684	threads	Wasm128	on	decode	cpu		google/swiftshader				2.00	0.09	204.76	206.86
+chromium	153.0.8010.12	linux	mountain	0.75	2	1155	866	90684	threads	Wasm128	on	present	cpu	2d	google/swiftshader			this package has no GPU presentation	1.61	0.08	204.68	206.36
+chromium	153.0.8010.12	linux	dumplings	0.25	1	1155	866	32928	threads	Wasm128	on	decode	cpu		google/swiftshader				1.46	0.06	206.71	208.23
+chromium	153.0.8010.12	linux	dumplings	0.25	1	1155	866	32928	threads	Wasm128	on	present	cpu	2d	google/swiftshader			this package has no GPU presentation	1.79	0.08	202.31	204.18
+chromium	153.0.8010.12	linux	dumplings	0.75	2	1155	866	93621	threads	Wasm128	on	decode	cpu		google/swiftshader				1.69	0.05	188.82	190.55
+chromium	153.0.8010.12	linux	dumplings	0.75	2	1155	866	93621	threads	Wasm128	on	present	cpu	2d	google/swiftshader			this package has no GPU presentation	1.72	0.05	199.08	200.85
+chromium	153.0.8010.12	linux	artwork	0.25	1	1178	849	32964	threads	Wasm128	on	decode	cpu		google/swiftshader				1.58	0.05	207.01	208.64
+chromium	153.0.8010.12	linux	artwork	0.25	1	1178	849	32964	threads	Wasm128	on	present	cpu	2d	google/swiftshader			this package has no GPU presentation	1.42	0.05	192.37	193.84
+chromium	153.0.8010.12	linux	artwork	0.75	2	1178	849	99407	threads	Wasm128	on	decode	cpu		google/swiftshader				1.50	0.04	190.77	192.31
+chromium	153.0.8010.12	linux	artwork	0.75	2	1178	849	99407	threads	Wasm128	on	present	cpu	2d	google/swiftshader			this package has no GPU presentation	1.59	0.04	305.16	306.79
+chromium	153.0.8010.12	linux	brochure	0.25	1	841	1189	32824	threads	Wasm128	on	decode	cpu		google/swiftshader				1.34	0.17	294.34	295.85
+chromium	153.0.8010.12	linux	brochure	0.25	1	841	1189	32824	threads	Wasm128	on	present	cpu	2d	google/swiftshader			this package has no GPU presentation	2.38	0.07	221.00	223.44
+chromium	153.0.8010.12	linux	brochure	0.75	1	841	1189	86466	threads	Wasm128	on	decode	cpu		google/swiftshader				1.48	0.06	322.99	324.53
+chromium	153.0.8010.12	linux	brochure	0.75	1	841	1189	86466	threads	Wasm128	on	present	cpu	2d	google/swiftshader			this package has no GPU presentation	2.61	0.10	273.37	276.07
+chromium	153.0.8010.12	linux	patent-scan	0.25	0	825	1212	28041	threads	Wasm128	on	decode	cpu		google/swiftshader				1.81	72.17	297.15	371.14
+chromium	153.0.8010.12	linux	patent-scan	0.25	0	825	1212	28041	threads	Wasm128	on	present	cpu	2d	google/swiftshader			this package has no GPU presentation	2.01	0.05	306.69	308.75
+chromium	153.0.8010.12	linux	patent-scan	0.75	1	825	1212	85887	threads	Wasm128	on	decode	cpu		google/swiftshader				2.20	0.05	254.50	256.75
+chromium	153.0.8010.12	linux	patent-scan	0.75	1	825	1212	85887	threads	Wasm128	on	present	cpu	2d	google/swiftshader			this package has no GPU presentation	1.78	0.05	276.31	278.14
+chromium	153.0.8010.12	linux	line-plot	0.25	0	1000	1000	32827	threads	Wasm128	on	decode	cpu		google/swiftshader				1.92	0.04	291.25	293.21
+chromium	153.0.8010.12	linux	line-plot	0.25	0	1000	1000	32827	threads	Wasm128	on	present	cpu	2d	google/swiftshader			this package has no GPU presentation	4.72	0.14	255.11	259.97
+chromium	153.0.8010.12	linux	line-plot	0.75	1	1000	1000	97944	threads	Wasm128	on	decode	cpu		google/swiftshader				1.69	0.07	194.92	196.68
+chromium	153.0.8010.12	linux	line-plot	0.75	1	1000	1000	97944	threads	Wasm128	on	present	cpu	2d	google/swiftshader			this package has no GPU presentation	1.38	0.05	203.66	205.10
+chromium	153.0.8010.12	linux	clipart	0.25	2	816	1225	28034	threads	Wasm128	on	decode	cpu		google/swiftshader				1.32	0.04	213.78	215.15
+chromium	153.0.8010.12	linux	clipart	0.25	2	816	1225	28034	threads	Wasm128	on	present	cpu	2d	google/swiftshader			this package has no GPU presentation	9.74	0.05	212.07	221.87
+chromium	153.0.8010.12	linux	clipart	0.75	3	816	1225	83202	threads	Wasm128	on	decode	cpu		google/swiftshader				2.36	60.67	221.18	284.21
+chromium	153.0.8010.12	linux	clipart	0.75	3	816	1225	83202	threads	Wasm128	on	present	cpu	2d	google/swiftshader			this package has no GPU presentation	5.27	0.08	222.89	228.24
+chromium	153.0.8010.12	linux	car	0.25	1	1155	866	33016	threads	Wasm128	off (threads)	decode	cpu		cpu				1.03	15.41	223.88	240.33
+chromium	153.0.8010.12	linux	car	0.75	2	1155	866	98890	threads	Wasm128	off (threads)	decode	cpu		cpu				1.50	10.33	188.40	200.23
+chromium	153.0.8010.12	linux	mountain	0.25	1	1155	866	32887	threads	Wasm128	off (threads)	decode	cpu		cpu				1.55	0.09	438.63	440.27
+chromium	153.0.8010.12	linux	mountain	0.75	2	1155	866	90684	threads	Wasm128	off (threads)	decode	cpu		cpu				10.80	0.07	391.72	402.59
+chromium	153.0.8010.12	linux	dumplings	0.25	1	1155	866	32928	threads	Wasm128	off (threads)	decode	cpu		cpu				3.38	0.11	404.98	408.47
+chromium	153.0.8010.12	linux	dumplings	0.75	2	1155	866	93621	threads	Wasm128	off (threads)	decode	cpu		cpu				5.93	0.07	403.84	409.84
+chromium	153.0.8010.12	linux	artwork	0.25	1	1178	849	32964	threads	Wasm128	off (threads)	decode	cpu		cpu				3.30	0.07	306.11	309.48
+chromium	153.0.8010.12	linux	artwork	0.75	2	1178	849	99407	threads	Wasm128	off (threads)	decode	cpu		cpu				2.71	0.13	189.03	191.87
+chromium	153.0.8010.12	linux	brochure	0.25	1	841	1189	32824	threads	Wasm128	off (threads)	decode	cpu		cpu				1.49	0.06	319.98	321.53
+chromium	153.0.8010.12	linux	brochure	0.75	1	841	1189	86466	threads	Wasm128	off (threads)	decode	cpu		cpu				2.17	0.12	261.09	263.37
+chromium	153.0.8010.12	linux	patent-scan	0.25	0	825	1212	28041	threads	Wasm128	off (threads)	decode	cpu		cpu				3.60	14.19	251.20	268.99
+chromium	153.0.8010.12	linux	patent-scan	0.75	1	825	1212	85887	threads	Wasm128	off (threads)	decode	cpu		cpu				2.54	0.11	277.13	279.78
+chromium	153.0.8010.12	linux	line-plot	0.25	0	1000	1000	32827	threads	Wasm128	off (threads)	decode	cpu		cpu				5.16	0.10	227.62	232.88
+chromium	153.0.8010.12	linux	line-plot	0.75	1	1000	1000	97944	threads	Wasm128	off (threads)	decode	cpu		cpu				1.98	0.09	184.06	186.13
+chromium	153.0.8010.12	linux	clipart	0.25	2	816	1225	28034	threads	Wasm128	off (threads)	decode	cpu		cpu				4.00	0.10	290.75	294.84
+chromium	153.0.8010.12	linux	clipart	0.75	3	816	1225	83202	threads	Wasm128	off (threads)	decode	cpu		cpu				2.26	26.69	255.18	284.13
+chromium	153.0.8010.12	linux	car	0.25	1	1155	866	33016	simd	Wasm128	off (simd)	decode	cpu		cpu				1.00	64.70	935.10	1000.80
+chromium	153.0.8010.12	linux	car	0.75	2	1155	866	98890	simd	Wasm128	off (simd)	decode	cpu		cpu				1.40	59.50	1355.40	1416.30
+chromium	153.0.8010.12	linux	mountain	0.25	1	1155	866	32887	simd	Wasm128	off (simd)	decode	cpu		cpu				3.90	17.40	1119.70	1141.00
+chromium	153.0.8010.12	linux	mountain	0.75	2	1155	866	90684	simd	Wasm128	off (simd)	decode	cpu		cpu				1.80	12.40	1188.20	1202.40
+chromium	153.0.8010.12	linux	dumplings	0.25	1	1155	866	32928	simd	Wasm128	off (simd)	decode	cpu		cpu				15.60	0.10	1346.30	1362.00
+chromium	153.0.8010.12	linux	dumplings	0.75	2	1155	866	93621	simd	Wasm128	off (simd)	decode	cpu		cpu				1.50	0.10	965.90	967.50
+chromium	153.0.8010.12	linux	artwork	0.25	1	1178	849	32964	simd	Wasm128	off (simd)	decode	cpu		cpu				1.50	0.20	756.10	757.80
+chromium	153.0.8010.12	linux	artwork	0.75	2	1178	849	99407	simd	Wasm128	off (simd)	decode	cpu		cpu				1.50	0.10	751.70	753.30
+chromium	153.0.8010.12	linux	brochure	0.25	1	841	1189	32824	simd	Wasm128	off (simd)	decode	cpu		cpu				1.40	0.10	762.50	764.00
+chromium	153.0.8010.12	linux	brochure	0.75	1	841	1189	86466	simd	Wasm128	off (simd)	decode	cpu		cpu				1.50	9.00	799.40	809.90
+chromium	153.0.8010.12	linux	patent-scan	0.25	0	825	1212	28041	simd	Wasm128	off (simd)	decode	cpu		cpu				1.80	59.70	764.10	825.60
+chromium	153.0.8010.12	linux	patent-scan	0.75	1	825	1212	85887	simd	Wasm128	off (simd)	decode	cpu		cpu				1.60	10.80	774.70	787.10
+chromium	153.0.8010.12	linux	line-plot	0.25	0	1000	1000	32827	simd	Wasm128	off (simd)	decode	cpu		cpu				1.60	8.10	767.20	776.90
+chromium	153.0.8010.12	linux	line-plot	0.75	1	1000	1000	97944	simd	Wasm128	off (simd)	decode	cpu		cpu				1.60	0.10	762.40	764.10
+chromium	153.0.8010.12	linux	clipart	0.25	2	816	1225	28034	simd	Wasm128	off (simd)	decode	cpu		cpu				1.40	9.10	805.70	816.20
+chromium	153.0.8010.12	linux	clipart	0.75	3	816	1225	83202	simd	Wasm128	off (simd)	decode	cpu		cpu				2.10	66.10	1155.80	1224.00

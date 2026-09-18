@@ -77,3 +77,14 @@ date	metric	ms
 2026-09-18	first_ms_simd	1171.0
 2026-09-18	total_ms_simd	2071.0
 2026-09-18	solo_ms	805.7
+\\\\\\\        to: lzmrntkm e2a2ecd1 "benchmarks: browser WebGPU on RTX 2080 + native re-sweep after the upload fix" (rebased revision)
+2026-09-18	first_ms	1158.0
+2026-09-18	total_ms	2108.0
+2026-09-18	first_ms_simd	1197.0
+2026-09-18	total_ms_simd	2197.0
+2026-09-18	solo_ms	842.8
+2026-09-18	first_ms	1160.0
+2026-09-18	total_ms	2143.0
+2026-09-18	first_ms_simd	1199.0
+2026-09-18	total_ms_simd	2165.0
+2026-09-18	solo_ms	806.3

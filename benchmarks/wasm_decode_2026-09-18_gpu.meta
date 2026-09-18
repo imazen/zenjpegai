@@ -1,6 +1,11 @@
-commit	2a1ec3e3aff8
+commit	17104b08caa9
 host	dev
-command	WEBGPU_ADAPTER=swiftshader npx playwright test tests/benchmark-gpu.spec.ts --project chromium-webgpu
-launch_args	--enable-unsafe-webgpu --enable-features=Vulkan --use-webgpu-adapter=swiftshader
-adapter	BrowserWebGpu
+command	WEBGPU_ADAPTER=hardware npx playwright test tests/benchmark-gpu.spec.ts --project chromium-webgpu
+launch_args	--enable-unsafe-webgpu --enable-features=Vulkan --ignore-gpu-blocklist --use-angle=vulkan
+adapter	nvidia/turing
+adapter_fallback	false
 date	2026-09-18
+command_swiftshader	WEBGPU_ADAPTER=swiftshader npx playwright test tests/benchmark-gpu.spec.ts --project chromium-webgpu
+adapter_swiftshader	google/swiftshader (fallback)
+note_swiftshader	SwiftShader device is lost at model-2 (bpp75) load: "async map a buffer" device error; CPU fallback rows follow. Pre-existing Dawn/SwiftShader ceiling — the old code trapped earlier at the same stream.
+note_unset_run	A third block of rows (gpu_mode "on" + off rows) was appended by the full-suite run with WEBGPU_ADAPTER unset: Dawn returned SwiftShader, so "on" fell back to path=cpu — honest fallback rows, not GPU throughput.

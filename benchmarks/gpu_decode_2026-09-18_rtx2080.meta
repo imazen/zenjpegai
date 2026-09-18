@@ -1,0 +1,22 @@
+gpu_decode_2026-09-18_rtx2080.tsv
+
+Re-run of the 2026-09-17 RTX 2080 sweep after the upload-path change: every buffer upload now
+goes through unmapped `create_buffer` + `GpuContext::write_buffer` (chunked `queue.write_buffer`,
+16 MiB) instead of `create_buffer_init`/`mapped_at_creation`, which trapped on Dawn's web backend.
+The change is upload-side only — kernels, bind groups and dispatch order are untouched, and the
+`gpu-tests` parity counts are byte-identical to the ones PORTING.md records.
+
+adapter: NVIDIA GeForce RTX 2080 [Vulkan DiscreteGpu; NVIDIA 580.178.04], 8 GiB.
+wgpu: 30.0.1
+host: dev (Ryzen 9 9950X3D, 32 threads, 60 GiB), Ubuntu, kernel 7.0.0-31-generic. Shared box —
+  per the 09-17 meta's caveat, read the curve not a single row (e.g. Bop 1536x1536 measured
+  82.15/76.06 ms wall/device on 09-17 and 62.27/56.23 here, matching the 56.01 ms repeat that
+  meta itself cites; Bop 3072+/4096 ran slower this time under sustained load while the small
+  and mid sizes agree to a few per cent — no regression signal in the sizes the change could
+  conceivably touch, since upload cost is one-time per buffer and does not enter gpu_device_ms).
+command: RAYON_NUM_THREADS=8 nice -n 19 ./target/release/examples/gpu_bench --adapter
+  "NVIDIA GeForce RTX 2080" --rounds 7 --max-size 4096 --out <this file>
+commit: (this workspace's b1bhw change — see the commit that adds this file)
+columns: header comment of gpu/examples/gpu_bench.rs; same conventions as the 09-17 meta
+  (gpu_device_ms = summed tile compute-pass durations from GPU timestamp queries; cpu_mt is the
+  CPU engine at RAYON_NUM_THREADS=8).
