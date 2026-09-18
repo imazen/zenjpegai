@@ -4,13 +4,10 @@ name: Pages demo
 # release assets (bakes them into the published site so visitors never need private-repo
 # access), runs the Playwright suite against the built site, and deploys to GitHub Pages.
 #
-# GitHub Pages is NOT enabled on this repo yet (checked 2026-09-17: `gh api
-# repos/imazen/zenjpegai/pages` -> 404, repo is private). The `deploy` job below is correctly
-# configured but will fail at the `actions/deploy-pages` step until a human does exactly this:
-#   Settings -> Pages -> Build and deployment -> Source: GitHub Actions
-# See web/README.md "GitHub Pages" for what publishing makes public (demo streams, the packed
-# BSD-licensed upstream weights, this wasm build) and why that's a one-time human decision this
-# workflow does not make for you.
+# GitHub Pages is enabled (workflow-deploy source; checked 2026-09-18 — `gh api
+# repos/imazen/zenjpegai/pages` returns the live site). See web/README.md "GitHub Pages" for
+# what publishing makes public (demo streams, the packed BSD-licensed upstream weights, this
+# wasm build).
 on:
   push:
     branches: [main]
