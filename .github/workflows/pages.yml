@@ -67,7 +67,7 @@ jobs:
       - name: build wasm packages (simd + threads)
         run: web/scripts/build-wasm.sh simd threads
 
-      - name: fetch demo-assets-v1 (private repo: this workflow's own token can read its own releases)
+      - name: "fetch demo-assets-v1 (private repo: this workflow's own token can read its own releases)"
         env:
           GH_TOKEN: ${{ github.token }}
         run: node web/scripts/fetch-demo-assets.mjs
