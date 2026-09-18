@@ -10,9 +10,13 @@
 //! reference can need at the decoder is bicubic up-sampling to 4:4:4, `align_corners=True`) and
 //! YUV output for sources that were YUV (`colour_transform_idx = 0`).
 //!
-//! **Not ported:** the user-defined colour transform (`colour_transform_idx = 2`). Upstream's
-//! inverse uses the first row of the inverse matrix for all three output components, which
-//! cannot be what is intended; without a trustworthy oracle such streams are rejected.
+//! **Not ported:** the user-defined colour transform (`colour_transform_idx = 2`). At upstream
+//! b9e573f the path is dead, self-inconsistent code: `pre_processing` *and* `post_processing`
+//! both apply only the first row of the *inverse* matrix to all three components (so the
+//! encoder codes the same mixture in all three planes), and both crash unpatched on
+//! `Image.convert_range_(0, 1)` (the method takes one tuple). Patched, its decode of an
+//! identity-matrix stream is three identical planes. There is no trustworthy oracle; such
+//! streams are rejected (`scripts/ref_vectors/probe_colour_transform2.py`, PORTING.md).
 
 use alloc::vec::Vec;
 

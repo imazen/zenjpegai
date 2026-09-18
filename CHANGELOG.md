@@ -6,6 +6,18 @@
 <!-- Breaking changes that will ship together in the next major (or minor for 0.x) release. -->
 
 ### Added
+- Cube-flag decode coverage: the encoder-set streams `enc_img30_bop_m0_bm1069` and
+  `enc_img30_hop_m3_bm1069` (beta displacement -1069, `use_cube_flags = 1` with false flags,
+  incl. a cleared `cube_group_flag`) now carry reference decoder dumps
+  (`make_reference_streams.sh cubeflags`) and gate `tests/entropy_ref.rs` bit-exact;
+  `tests/decode_ref.rs` decodes the BOP stream end to end.
+- `tools::gain::scaler_from_log` verified bit-identical to the reference's `torch.exp` on every
+  reachable input (`tests/vectors/gain_scaler.bin`, `gen_gain_scaler_vectors.py`): all
+  `gain_vector_log` entries of the eight `VM_common_int` checkpoints times every
+  `beta_displacement_log` the header can signal (-2048..=2047).
+- Investigated `colour_transform_idx = 2` (`scripts/ref_vectors/probe_colour_transform2.py`):
+  dead, self-inconsistent code upstream — the decision is "not ported", such streams stay
+  `Error::Unsupported` (PORTING.md "Reference dead code").
 - CI (`.github/workflows/ci.yml`): fmt, clippy `-D warnings` + tests on ubuntu-latest /
   windows-11-arm / macos-15-intel / macos-latest, `i686-unknown-linux-gnu` via `cross`, a
   no_std check (native + `wasm32-unknown-unknown`) with a dedicated "public API only" lint step,

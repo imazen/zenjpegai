@@ -2,7 +2,7 @@
 # Encode + decode a matrix of configurations with the reference software and dump the decoder's
 # intermediate tensors for the parity tests.
 #
-#   scripts/ref_vectors/make_reference_streams.sh [SET]      SET: smoke (default) | regions | tools | filters | efe | filtertiles | qmap | formats | all
+#   scripts/ref_vectors/make_reference_streams.sh [SET]      SET: smoke (default) | regions | tools | filters | efe | filtertiles | qmap | formats | encoder | cubeflags | all
 #
 # Output: $OUT/<name>/{stream.bits,encoder.log,tensors.bin,manifest.txt,decoded.png,stdout.log}
 # with OUT=/mnt/v/output/zenjpegai/reference/vectors. Existing streams are kept (delete the
@@ -270,5 +270,13 @@ JSON
   enc_fixed enc_img30_bop_m1_b0_qmap $IMG30 1 0 cfg/tools_off.json "$MASKS/qmap_img30.json" cfg/profiles/base.json
   enc_fixed enc_img30_bop_m1_b0_qmap_rvs $IMG30 1 0 cfg/tools_off.json cfg/tools/ResVarScale.json "$MASKS/qmap_img30.json" cfg/profiles/base.json
   # Not generated yet (see PORTING.md "Work queue"): odd picture sizes.
+fi
+if [ "$SET" = cubeflags ] || [ "$SET" = all ]; then
+  # Decoder-side dumps for the encoder set's use_cube_flags = 1 streams (beta -1069; the
+  # streams themselves come from `make_reference_streams.sh encoder`). Non-region, so the
+  # stock reference decoder is a correct oracle for them.
+  for d in enc_img30_bop_m0_bm1069 enc_img30_hop_m3_bm1069; do
+    [ -f "$OUT/$d/manifest.txt" ] || nice -n 19 python "$HERE/dump_decode.py" "$OUT/$d/stream.bits" "$OUT/$d" > "$OUT/$d/dump.log" 2>&1
+  done
 fi
 echo "== done ($(date -u +%H:%M:%S))"

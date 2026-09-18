@@ -137,6 +137,10 @@ vectors! { check:
     img01_efe_f2c0_f3c0_nl => "img01_efe_f2c0_f3c0_nl",
     img01_base_off_bpp050 => "img01_base_off_bpp050",
     img01_base_off_threads8_bpp050 => "img01_base_off_threads8_bpp050",
+    // use_cube_flags = 1: beta displacement -1069 makes some cubes unskippable (the second
+    // stream also exercises a cleared cube_group_flag, on both components).
+    enc_img30_bop_m0_bm1069 => "enc_img30_bop_m0_bm1069",
+    enc_img30_hop_m3_bm1069 => "enc_img30_hop_m3_bm1069",
     // Post-filter streams (the LEF reads the luma scale map; tools_on adds RVS / LSBS).
     img30_base_lef_bpp050 => "img30_base_lef_bpp050",
     img30_base_eicci_bpp050 => "img30_base_eicci_bpp050",

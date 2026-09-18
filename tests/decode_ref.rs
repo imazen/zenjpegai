@@ -261,6 +261,10 @@ vectors! {
     img30_simple_lsbs_rvs_bpp100 => "img30_simple_lsbs_rvs_bpp100",
     // High profile: HOP synthesis (CAB + TAM attention).
     img30_high_off_bpp050 => "img30_high_off_bpp050",
+    // use_cube_flags = 1: a low-rate stream where some cubes must not be skipped.
+    // (enc_img30_hop_m3_bm1069 is checked in entropy_ref only: at beta -1069 its luma y_hat
+    // peaks at 5.5e-4 abs diff, over this gate's 5e-4; its planes and 8-bit output pass.)
+    enc_img30_bop_m0_bm1069 => "enc_img30_bop_m0_bm1069",
     // Post-filters: EFE linear, then EFE linear + non-linear with the encoder's filter choices
     // forced (every filter length and region split; odd picture size; four non-linear tiles).
     img30_base_efelin_bpp050 => "img30_base_efelin_bpp050",

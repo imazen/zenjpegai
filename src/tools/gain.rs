@@ -54,3 +54,57 @@ impl GainUnit {
         residual_q / (self.scaler[ch] + 1e-9f32)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `scaler_from_log` against `torch.exp` on every reachable input.
+    ///
+    /// `tests/vectors/gain_scaler.bin` (made by
+    /// `scripts/ref_vectors/gen_gain_scaler_vectors.py`) holds the reference scaler for
+    /// `gain_vector_log[c] + beta_displacement_log` over every gain entry of the eight
+    /// `VM_common_int` checkpoints and every beta the 12-bit header field can signal
+    /// (-2048..=2047 — the -1069..702 clip is encoder-side only). The reachable sums tile one
+    /// contiguous range; the file stores the sorted gain values, then the f32 bits of the
+    /// reference scaler for each sum in it.
+    #[test]
+    fn scaler_matches_torch_exp_on_every_reachable_input() {
+        let v = include_bytes!("../../tests/vectors/gain_scaler.bin");
+        let (head, rest) = v.split_at(12);
+        let min_log = i32::from_le_bytes(head[0..4].try_into().unwrap());
+        let n_gain = u32::from_le_bytes(head[4..8].try_into().unwrap()) as usize;
+        let n_val = u32::from_le_bytes(head[8..12].try_into().unwrap()) as usize;
+        let (gains, vals) = rest.split_at(n_gain * 2);
+        assert_eq!(vals.len(), n_val * 4);
+        let gains: Vec<i32> = gains
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&b| i16::from_le_bytes(b) as i32)
+            .collect();
+        let want = |scaler_log: i32| -> u32 {
+            let i = (scaler_log - min_log) as usize;
+            u32::from_le_bytes(vals[i * 4..i * 4 + 4].try_into().unwrap())
+        };
+
+        let mut checked = 0usize;
+        for &g in &gains {
+            for beta in -(1 << 11)..=(1 << 11) - 1 {
+                let scaler_log = g + beta;
+                assert!(
+                    (min_log..min_log + n_val as i32).contains(&scaler_log),
+                    "{scaler_log} outside the dumped range"
+                );
+                let got = scaler_from_log(scaler_log).to_bits();
+                assert_eq!(
+                    got,
+                    want(scaler_log),
+                    "scaler_from_log({scaler_log}) (gain {g} + beta {beta})"
+                );
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, n_gain * (1 << 12));
+    }
+}

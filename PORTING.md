@@ -20,8 +20,8 @@ against reference-produced data passes. "stub" and "partial" mean what they say.
 | `tensor` | (PyTorch tensors) | minimal `[C,H,W]` container | - |
 | `model::hsd` | `components/autoencoder_hyper/decoder_scale/basic.py`, `base_layers/conv_quant_layers.py` | ported. Convolutions run through `nn::fast::PackedIntConv` (i16 pairs + `madd`, wrapping i32; exact by construction because integer sums are order-free); the plain scalar loops stay as `forward_reference` | `tests/entropy_ref.rs` (sigma maps equal the reference's); `tests/fast_vs_reference.rs::int_conv_matches_scalar_loops` (every tier, threads on/off, odd channel counts, clamped inputs, accumulator wrap-around) |
 | `model::common` | `core_models/CCS_SGMM/common_modules.py::build_model`, `gain_unit.py::get_gain_vector_log`, `custom_prob_wrapper.py::normalize_z` | ported: z CDFs, HSD weights, gain vector. Hyper-decoder / MCM weights not loaded yet | `tests/entropy_ref.rs` |
-| `tools::gain` | `quantization/gain_unit/gain_unit.py` | ported (decoder side) | `tests/entropy_ref.rs` (dequantised residual floats bit-identical). `scaler_from_log` uses libm `expf` where the reference uses `torch.exp`; not yet checked exhaustively over the whole input range |
-| `tools::skip` | `skip_ls/skip_mode.py` (mask + cube-flag expansion) | ported (decoder side); cube flags exercised only by header round trips so far, no reference stream with `use_cube_flags = 1` yet | `tests/entropy_ref.rs` (threshold mask) |
+| `tools::gain` | `quantization/gain_unit/gain_unit.py` | ported (decoder side) | `tests/entropy_ref.rs` (dequantised residual floats bit-identical). `scaler_from_log` (libm `expf`) is bit-identical to the reference's `torch.exp` on every reachable input: `gain::tests::scaler_matches_torch_exp_on_every_reachable_input` checks all 1.34M pairs over `tests/vectors/gain_scaler.bin` (`scripts/ref_vectors/gen_gain_scaler_vectors.py`) — every `gain_vector_log` entry of the eight `VM_common_int` checkpoints times every `beta_displacement_log` the 12-bit header field can signal (-2048..=2047; the -1069..702 clip is encoder-side only, `QuantizerHeaderBaseFuncs.enc_flag`) |
+| `tools::skip` | `skip_ls/skip_mode.py` (mask + cube-flag expansion) | ported (decoder side) | `tests/entropy_ref.rs` (threshold mask + cube flags, bit-exact): `enc_img30_bop_m0_bm1069` and `enc_img30_hop_m3_bm1069` carry `use_cube_flags = 1` with false flags — the latter on both components, including a cleared `cube_group_flag` (decode dumps: `make_reference_streams.sh cubeflags`). `tests/decode_ref.rs` decodes the BOP stream end to end; the HOP stream's luma `y_hat` peaks at 5.5e-4 (the 5e-4 gate) at that extreme rate, its planes and 8-bit output pass |
 | `tools::log2lin` | `common/log2lin.py::Log2LinConvertion` | ported: the 4352-entry table is computed (`round(2^17 exp(i ln(100/0.11)/4352 + ln 0.11))`) instead of stored | unit test pins the FNV-1a hash of upstream's literal table |
 | `tools::rvs` | `quantization/rvs/res_var_scale.py` (`buildTables`, `analyze`, `quantize_scale`, `dequantize_resi`), constants from `cfg/pipeline.json` | ported (decoder side): block-wise "likely" map, RVS scale tables, GRFS ("cwg") per-channel variants | `tests/entropy_ref.rs` (scale map and residual exact) on RVS+GRFS, RVS-only and GRFS-only streams |
 | `tools::qualmap` | `quality_map/quality_map.py` (`decode`, `quantize_scale`, `dequantize_resi`) | ported (decoder side): ANS-coded delta plane, DPCM reconstruction, log-scale offset and residual step per position, shared by both components | `tests/entropy_ref.rs` + `tests/decode_ref.rs` on 3 quality-map streams (plain, with RVS, with 8 ANS threads); oracle = reference decoder with its header defect patched (below) |
@@ -45,7 +45,7 @@ against reference-produced data passes. "stub" and "partial" mean what they say.
 | `model::analysis` | `components/autoencoder_data/encoder/{bop,hop}_{prim,sec}.py`, `base_layers/utils.py::normalize/padding_layer` | ported, **not called from any encoder yet (there is no encoder)**: BOP and HOP, luma and chroma (12-plane half-resolution input), replicate padding before every stride-2 convolution, TAM / CAB for HOP. `feature_clipping` not ported (no checkpoint has `clip_thres`; the reference runs `clipping_mode = 0`). Single tile only: analysis tiling is not written | `tests/encode_ref.rs` (oracle: `dump_encode.py --enc2`, 560x888): `y` max abs error BOP 4.6e-5 luma / 1.1e-5 chroma, HOP 1.1e-4 / 4.6e-5 (asserted < 5e-4); tiers and thread counts bit-identical |
 | `model::hyper_encoder` | `components/autoencoder_hyper/encoder/basic.py` (`abs_in_hyperprior = 1`, LeakyReLU 0.01), weights `hyper_encoder.*` in `VM_common_int` | ported, not called from any encoder yet | `tests/encode_ref.rs`: unrounded `z` within 3.3e-5 of the reference (asserted < 2e-4); after clamp + round-half-even every `z_hat` symbol equals the reference's on both vectors, both components |
 | `decoder::reconstruct` | `ccs_sgmm_tool.py::forward/decompress`, `common_modules.py::hyper_decode_tile/merge_psi_overlaps_of_tiles/extract_psi_for_mcm/decompress_ar_scale_tile/merge_y_hat_overlaps_of_tiles/extract_y_hat_for_synthesis_tiles/decompress_y_hat_to_image_tile` | ported: dependent and independent regions, synthesis tiling (luma and chroma must be tiled identically, as the reference assumes). Latent post-processing (LSBS) included | `tests/decode_ref.rs`: 16 streams incl. 3 region streams and 6 tool streams (oracle for those: the reference decoder run with a contiguous skip mask, see below) |
-| `decoder::output` | `ccs_sgmm_tool.py::decompress` (`to_format_`), `common/image.py::to_444_/to_RGB_/clip_data_/write_yuv`, `pytorch_ops.py::resize_tensor`, `colorspace.py` (BT.709), `image_io.py::write_png` quantisation | ported: coded → source chroma format (bicubic 4:2:0 / 4:2:2 → 4:4:4 with `align_corners=True`, reproducing PyTorch's compiled kernel including where its build fuses multiply-adds), BT.709 → RGB, YUV output for YUV sources (4:4:4 / 4:2:2 / 4:2:0), 8 and 10 bit, non-displayed border. **Not ported: the user-defined colour transform (`colour_transform_idx = 2`)**: upstream's inverse uses the first row of the inverse matrix for all three components, so there is no trustworthy oracle; such streams are rejected | `tests/nn_vectors.rs::bicubic_align_corners_matches_torch` (bit-identical to PyTorch on 6 shapes); `tests/decode_ref.rs`: 9 format streams (YUV 420/422/444, 10-bit 420/444, odd 203x301, RGB coded 4:2:0 and 4:2:2, display crop) |
+| `decoder::output` | `ccs_sgmm_tool.py::decompress` (`to_format_`), `common/image.py::to_444_/to_RGB_/clip_data_/write_yuv`, `pytorch_ops.py::resize_tensor`, `colorspace.py` (BT.709), `image_io.py::write_png` quantisation | ported: coded → source chroma format (bicubic 4:2:0 / 4:2:2 → 4:4:4 with `align_corners=True`, reproducing PyTorch's compiled kernel including where its build fuses multiply-adds), BT.709 → RGB, YUV output for YUV sources (4:4:4 / 4:2:2 / 4:2:0), 8 and 10 bit, non-displayed border. **Rejected (`Error::Unsupported`): the user-defined colour transform (`colour_transform_idx = 2`)** is dead, self-inconsistent code upstream — see "Reference dead code" below; there is no trustworthy oracle | `tests/nn_vectors.rs::bicubic_align_corners_matches_torch` (bit-identical to PyTorch on 6 shapes); `tests/decode_ref.rs`: 9 format streams (YUV 420/422/444, 10-bit 420/444, odd 203x301, RGB coded 4:2:0 and 4:2:2, display crop) |
 | `filters::efe_linear` | `filters/EFElinear/EFElinear.py`: `decompress`, `SplitApply`, `LumaAidedUpsampler_apply`, `pixelUnshuffleGeneral`, `pixelShuffleGeneral`, `deinteger` | ported for every chroma format the reference can produce: 4:4:4 source coded 4:4:4 / 4:2:2 / 4:2:0 (the latter two with the 4x4 DCT-IF kernels and four coded phases, incl. `DCTIF_only` = no coded filters), 4:2:2 and 4:2:0 sources; filter lengths 1..4, all 8 region splits, odd picture sizes, the second ("up-sampled") picture for the non-linear filter's switch. **Rejected with `Error::Unsupported` (no oracle, the reference fails on them too):** a plane signalled as not filtered (`best_cand_idx = 0`) in a picture coded at the source's chroma resolution; vertical-only subsampling (`*_ver = 2, *_hor = 1`); 4:2:2 source coded 4:2:0. Note that the *decoder* around it still only outputs 4:4:4-coded 4:4:4 pictures (`decoder::output`, and the bicubic `to_format_` between synthesis and filters is not ported), so the subsampled branches are verified in isolation only | `tests/filters_efe_ref.rs`: 17 reference streams, filter run on the reference's own input planes, output within 2e-4 (0..255) of the reference's, measured max 9.2e-5; identical bits on every tier, threaded or not. `tests/decode_ref.rs`: 7 EFE streams through the whole decoder, plus upstream's two `tools_on` streams (all four filters chained: the second picture travels EFE linear → eICCI → EFE non-linear) |
 | `filters::efe_nonlinear` | `filters/EFEnonlinear/EFEnonlinear.py`: `decompress`, `LumaAidedAdaptiveNonlinearFilter_apply`, `apply_OnoffSwitch`, `downsample`, `deinteger` | ported: per-tile two-layer 1x1 network (1 and 4 tiles checked), U-only / V-only / both, on/off masks with values 0, 1, 2 and block sizes 112 / 96, 4:4:4 / 4:2:2 / 4:2:0 sources, odd sizes. Same `Unsupported` formats as EFE linear | `tests/filters_efe_ref.rs`: **bit-identical** to the reference on all 16 streams that enable it (max abs error 0); `tests/decode_ref.rs` as above |
 | `filters::lef` | `filters/LEF/LEFfilter.py` (`decompress`, `adptive_sharpness`), nearest up-sampling as `torch.nn.functional.interpolate` does it (`floor(dst * (in / out))` in f32) | ported: luma only, so every chroma format takes the same path. **Unverified: bit depths other than 8** (the range is taken as `2^bit_depth - 1`; the decoder rejects 10-bit streams before it gets here) | `tests/filters_lef_icci_ref.rs`: fed the reference's own input plane, the output is **bit-identical** to the reference's on 4 streams (`model_id` 1 and 2: two of the four constant rows are exercised), on every tier, threaded or not. `tests/decode_ref.rs::img30_base_lef_bpp050` and `decoder_api_on_filter_streams`: whole decode |
@@ -143,7 +143,9 @@ Whole-process wall time, one encode, checkpoints read from `.pth`: **0.13 s** ag
 reference's **1.5 s** at 560x888. The reference pins torch to one thread by default and gets
 *slower* when allowed more on this box, so its one-thread column is the fair comparison.
 
-Not started (decoder): eICCI on chroma-subsampled pictures, custom colour transform.
+Not started (decoder): eICCI on chroma-subsampled pictures. Decided against porting: the
+user-defined colour transform (`colour_transform_idx = 2`) — dead, self-inconsistent code
+upstream, see "Reference dead code".
 Not started (encoder): the post-filters on the encode side, chroma-subsampled / 10-bit / YUV
 sources, and the rate matcher's likelihood estimator.
 
@@ -317,6 +319,30 @@ downscale a shape that is already latent-sized and crash in `quantize_scale`.
 it the decoder's reconstruction MD5 equals the encoder's on all three quality-map vectors, so that
 patched decoder is the oracle for them (`<vector>/fixed_decoder/`).
 
+## Reference dead code: the user-defined colour transform (`colour_transform_idx = 2`)
+
+The claim that "upstream's inverse uses the first row of the inverse matrix for all three
+components" is confirmed — and it is worse than that. At b9e573f the path cannot run at all:
+`ColourTransformation.pre_processing` and `post_processing` call `Image.convert_range_(0, 1)`
+while `convert_range_` takes a single tuple argument, so the encoder raises `TypeError` before
+writing a stream. `scripts/ref_vectors/probe_colour_transform2.py` patches only that call (the
+tuple every other call site passes) and forces `-colour_processing.colour_transform.
+colour_transform_idx 2`. Then:
+
+- *Both* directions apply `inv_matrix[0, :]` — the first row of the **inverse** matrix — to all
+  three components (`colour_transformation.py` lines 82-84 and 120-122). The forward direction
+  of a user-defined transform should presumably be `clr_tr_matrix` row-wise; as written the
+  encoder codes the same linear mixture in all three planes, so colour is destroyed before
+  compression, and `post_processing` has no inverse to apply anyway.
+- Measured on an identity-matrix stream: the reference encoder's own reconstruction hashes
+  identically on all three components; the reference decoder emits three identical planes
+  (then converts the "wrong format" to RGB with a warning) — 12.45 dB PSNR against the source.
+
+The header syntax itself is fine (`header::ColourTransform::Custom` round-trips the matrix and
+offsets, verified on the probe stream). `decoder::output::finish` rejects such streams as
+`Error::Unsupported`. Decision: **not ported** — there is no self-consistent reference
+behaviour to match.
+
 ## EFE filters: reference behaviour worth knowing
 
 - **The on/off switch looks at the U mask only.** `EFElinear.decompress` builds the second
@@ -397,9 +423,10 @@ their own open items below when they stop.
 3. **Zen codec standards**: zencodec traits, limits + measured memory, `unstable-internals`
    visibility, no_std check, build-time report, CI on all required platforms (status: see the
    entries the standards agent appended below and `.github/workflows/`).
-4. **Decoder leftovers**: eICCI on chroma-subsampled pictures; user-defined colour transform
-   (`colour_transform_idx = 2`; upstream's inverse looks wrong, needs a decision, not a port);
-   `cube flags` stream vector; exhaustive check of `tools::gain::scaler_from_log` vs `torch.exp`.
+4. **Decoder leftovers**: eICCI on chroma-subsampled pictures. (Closed 2026-09-18: cube-flag
+   streams added to `tests/entropy_ref.rs` / `tests/decode_ref.rs`; `scaler_from_log` verified
+   against `torch.exp` on every reachable input; `colour_transform_idx = 2` investigated and
+   decided "do not port" — see "Reference dead code".)
 5. **Speed**: Winograd / int8-VNNI kernels, padding-free transposed convolution, SIMD `exp` for
    HOP's ELU gate; re-run `scripts/bench/decode_end_to_end.sh` after each and commit the TSV.
 
