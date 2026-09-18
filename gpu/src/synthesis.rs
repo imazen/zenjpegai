@@ -19,7 +19,7 @@ use crate::context::GpuContext;
 use crate::error::{GpuError, Result};
 use crate::kernels::{Act, Pointwise, Res};
 use crate::layers::{GpuConv, GpuConvTranspose, GpuDepthwise, GpuLayerNorm, f32_buffer, pack_hwc4};
-use crate::plan::{Graph, Plan, Pool, T};
+use crate::plan::{Graph, Plan, Pool, RETAIN_FACTOR, RETAIN_SLACK, T};
 
 // ---------------------------------------------------------------- checkpoint loading
 
@@ -639,14 +639,25 @@ pub struct Workspace {
     profile: bool,
 }
 
-fn grow(
+/// Keep the buffer at `bytes`: grow when too small, and shrink when it exceeds
+/// `RETAIN_FACTOR * bytes + RETAIN_SLACK` — the same bounded-retention rule as the
+/// activation pool, so a picture-level buffer sized for a large picture does not stay bound
+/// (and resident) for later small ones. Returns `true` when the buffer was replaced; the
+/// caller bumps `Workspace::generation` so plans that bound the old buffer are dropped.
+fn fit(
     slot: &mut Option<wgpu::Buffer>,
     ctx: &GpuContext,
     bytes: u64,
     usage: wgpu::BufferUsages,
     label: &str,
 ) -> Result<bool> {
-    if slot.as_ref().is_some_and(|b| b.size() >= bytes) {
+    let oversized = slot.as_ref().is_some_and(|b| {
+        b.size()
+            > bytes
+                .saturating_mul(RETAIN_FACTOR)
+                .saturating_add(RETAIN_SLACK)
+    });
+    if !oversized && slot.as_ref().is_some_and(|b| b.size() >= bytes) {
         return Ok(false);
     }
     if bytes > ctx.device().limits().max_buffer_size {
@@ -674,6 +685,21 @@ impl Workspace {
     /// splitting the pass perturbs the total. Needs an adapter with timestamp queries.
     pub fn set_profile(&mut self, on: bool) {
         self.profile = on;
+    }
+
+    /// Drop every retained buffer (activation slots and the latent / picture / readback
+    /// buffers); the next run rebuilds them. Bounded retention usually makes this unneeded —
+    /// it is for callers that want the memory back without dropping the workspace, like
+    /// `zenjpegai::nn::fast::release_buffers` on the CPU side.
+    pub fn release_buffers(&mut self) {
+        if let Ok(mut p) = self.pool.lock() {
+            p.release();
+        }
+        self.latents = [None, None];
+        self.rec = None;
+        self.staging = None;
+        self.queries = None;
+        self.generation += 1;
     }
 
     /// Bytes of GPU memory currently held.
@@ -1096,13 +1122,15 @@ impl GpuSynthesis {
             ..Timing::default()
         };
 
-        // Picture-level buffers.
+        // Picture-level buffers. `fit` bounds them like the pool: a workspace that ran a
+        // large picture releases the excess on the next small one instead of keeping the
+        // large buffers bound (their old plans are dropped via `ws.generation`).
         let t0 = now();
         let storage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST;
         let mut changed = false;
         for (i, t) in y_hat.iter().enumerate() {
             let packed = pack_hwc4(&t.data, t.c, lh, lw)?;
-            changed |= grow(
+            changed |= fit(
                 &mut ws.latents[i],
                 ctx,
                 packed.len() as u64 * 4,
@@ -1120,7 +1148,7 @@ impl GpuSynthesis {
                 limit: ctx.max_binding_bytes(),
             });
         }
-        changed |= grow(
+        changed |= fit(
             &mut ws.rec,
             ctx,
             rec_bytes,
@@ -1129,7 +1157,8 @@ impl GpuSynthesis {
         )?;
         // The staging buffer must also fit a padded-stride RGBA copy when the tail stages one
         // (it always does for real pictures, but a degenerate tiny picture can pad up past the
-        // planar size).
+        // planar size). Staging is only ever a copy destination, never bound, so replacing it
+        // does not touch `ws.generation`.
         let stage_bytes = match &tail {
             RunTail::Rgba {
                 stage: true, out, ..
@@ -1140,7 +1169,7 @@ impl GpuSynthesis {
             }
             _ => rec_bytes,
         };
-        grow(
+        fit(
             &mut ws.staging,
             ctx,
             stage_bytes,

@@ -32,18 +32,84 @@ impl T {
     }
 }
 
+/// A retained buffer may exceed what the current plan needs by this factor before
+/// [`Pool::fit`] replaces it with a right-sized one.
+pub(crate) const RETAIN_FACTOR: u64 = 4;
+/// ... or by this many bytes, whichever is larger (keeps small-picture jitter from
+/// reallocating on every decode).
+pub(crate) const RETAIN_SLACK: u64 = 64 << 20;
+
 /// Pooled activation buffers shared by all plans of one context user.
+///
+/// Bounded like the CPU pool (`zenjpegai::nn::fast::release_buffers`): a plan whose needs
+/// are far below what the pool retains shrinks the slots it uses to their required size and
+/// drops the rest, so a small decode after a large picture does not keep the large
+/// picture's buffers alive (on an RTX 2080 one 4096 x 4096 picture parks ~0.5 GiB). The
+/// retained pool stays under `RETAIN_FACTOR * need + RETAIN_SLACK` of the most recent plan.
 #[derive(Default)]
 pub struct Pool {
     slots: Vec<wgpu::Buffer>,
-    /// Bumped whenever a slot had to be replaced by a larger one (cached plans then hold stale,
-    /// still valid, buffers and should be dropped to release them).
+    /// Bumped whenever a slot had to be replaced (cached plans then hold stale, still valid,
+    /// buffers and should be dropped to release them).
     pub generation: u64,
 }
 
 impl Pool {
     pub fn bytes(&self) -> u64 {
         self.slots.iter().map(|b| b.size()).sum()
+    }
+
+    /// Drop every slot; the next [`Graph::finish`] refills the pool.
+    pub fn release(&mut self) {
+        if !self.slots.is_empty() {
+            self.slots.clear();
+            self.generation += 1;
+        }
+    }
+
+    /// One buffer per `slot_bytes` entry, taken from the pool where a slot already fits and
+    /// allocated where it does not. See the struct docs for the eviction rule.
+    fn fit(&mut self, dev: &wgpu::Device, slot_bytes: &[u64]) -> Vec<wgpu::Buffer> {
+        let need: u64 = slot_bytes.iter().sum();
+        // `need == 0` marks a graph that uses no activation tensors at all (the RGBA
+        // presentation tail): it must not flush the pool.
+        let shrink = need > 0
+            && self.bytes()
+                > need
+                    .saturating_mul(RETAIN_FACTOR)
+                    .saturating_add(RETAIN_SLACK);
+        let mut grew = false;
+        for (s, &bytes) in slot_bytes.iter().enumerate() {
+            let replace = match self.slots.get(s) {
+                None => true,
+                Some(b) => b.size() < bytes || (shrink && b.size() > bytes),
+            };
+            if !replace {
+                continue;
+            }
+            let b = dev.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("zenjpegai activation slot"),
+                size: bytes,
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_SRC
+                    | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            if s < self.slots.len() {
+                self.slots[s] = b;
+                grew = true;
+            } else {
+                self.slots.push(b);
+            }
+        }
+        if shrink && self.slots.len() > slot_bytes.len() {
+            self.slots.truncate(slot_bytes.len());
+            grew = true;
+        }
+        if grew {
+            self.generation += 1;
+        }
+        self.slots[..slot_bytes.len()].to_vec()
     }
 }
 
@@ -738,29 +804,7 @@ impl<'a> Graph<'a> {
 
         let buffers: Vec<wgpu::Buffer> = {
             let mut pool = pool.lock().unwrap_or_else(|e| e.into_inner());
-            let mut grew = false;
-            for (s, &bytes) in slot_bytes.iter().enumerate() {
-                if pool.slots.get(s).is_none_or(|b| b.size() < bytes) {
-                    let b = dev.create_buffer(&wgpu::BufferDescriptor {
-                        label: Some("zenjpegai activation slot"),
-                        size: bytes,
-                        usage: wgpu::BufferUsages::STORAGE
-                            | wgpu::BufferUsages::COPY_SRC
-                            | wgpu::BufferUsages::COPY_DST,
-                        mapped_at_creation: false,
-                    });
-                    if s < pool.slots.len() {
-                        pool.slots[s] = b;
-                        grew = true;
-                    } else {
-                        pool.slots.push(b);
-                    }
-                }
-            }
-            if grew {
-                pool.generation += 1;
-            }
-            pool.slots[..slot_bytes.len()].to_vec()
+            pool.fit(dev, &slot_bytes)
         };
 
         let align = dev.limits().min_uniform_buffer_offset_alignment.max(64) as u64;
