@@ -20,25 +20,41 @@ pub fn skip_mask(
     skip_scale_log: &Tensor<i32>,
     cube_flags: Option<&[bool]>,
 ) -> Result<Tensor<bool>> {
+    skip_mask_par(cfg!(feature = "parallel"), skip_scale_log, cube_flags)
+}
+
+/// [`skip_mask`], one task per `(channel, row)` when `parallel` holds.
+pub(crate) fn skip_mask_par(
+    parallel: bool,
+    skip_scale_log: &Tensor<i32>,
+    cube_flags: Option<&[bool]>,
+) -> Result<Tensor<bool>> {
     let (c, h, w) = (skip_scale_log.c, skip_scale_log.h, skip_scale_log.w);
     let mut mask = Tensor::<bool>::zeros(c, h, w)?;
-    for (m, &s) in mask.data.iter_mut().zip(&skip_scale_log.data) {
-        *m = s > THR_SKIP;
-    }
-    if let Some(flags) = cube_flags {
-        let cube_h = h.div_ceil(2).div_ceil(CUBE_SIZE);
-        let cube_w = w.div_ceil(2).div_ceil(CUBE_SIZE);
-        debug_assert_eq!(flags.len(), 4 * cube_h * cube_w);
-        for y in 0..h {
-            for x in 0..w {
-                let phase = (y % 2) * 2 + (x % 2);
-                let flag = flags[(phase * cube_h + y / 2 / CUBE_SIZE) * cube_w + x / 2 / CUBE_SIZE];
-                if !flag {
-                    for ch in 0..c {
-                        mask.data[(ch * h + y) * w + x] = true;
-                    }
+    match cube_flags {
+        None => {
+            crate::decoder::stats::for_each_chunk(parallel, &mut mask.data, h * w, |ch, plane| {
+                for (m, &s) in plane
+                    .iter_mut()
+                    .zip(&skip_scale_log.data[ch * h * w..][..h * w])
+                {
+                    *m = s > THR_SKIP;
                 }
-            }
+            })
+        }
+        Some(flags) => {
+            let cube_h = h.div_ceil(2).div_ceil(CUBE_SIZE);
+            let cube_w = w.div_ceil(2).div_ceil(CUBE_SIZE);
+            debug_assert_eq!(flags.len(), 4 * cube_h * cube_w);
+            crate::decoder::stats::for_each_chunk(parallel, &mut mask.data, w, |i, row| {
+                let (ch, y) = (i / h, i % h);
+                for (x, m) in row.iter_mut().enumerate() {
+                    let phase = (y % 2) * 2 + (x % 2);
+                    let flag =
+                        flags[(phase * cube_h + y / 2 / CUBE_SIZE) * cube_w + x / 2 / CUBE_SIZE];
+                    *m = skip_scale_log.data[(ch * h + y) * w + x] > THR_SKIP || !flag;
+                }
+            });
         }
     }
     Ok(mask)

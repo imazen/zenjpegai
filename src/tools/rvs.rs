@@ -42,10 +42,15 @@ pub(crate) const THRESHOLD_SHIFT: u32 = 4;
 /// `analyze`: per 8x8 block of the log-scale map, `(sum + 32) >> 6` with out-of-picture samples
 /// counted as 1411, clamped to the table range and repeated over the block.
 pub fn likely(scale_log: &Tensor<i32>) -> Result<Tensor<u16>> {
+    likely_par(cfg!(feature = "parallel"), scale_log)
+}
+
+/// [`likely`], one task per channel when `parallel` holds.
+pub(crate) fn likely_par(parallel: bool, scale_log: &Tensor<i32>) -> Result<Tensor<u16>> {
     let (c, h, w) = (scale_log.c, scale_log.h, scale_log.w);
     let mut out = Tensor::<u16>::zeros(c, h, w)?;
     let (bh, bw) = (h.div_ceil(BLOCK), w.div_ceil(BLOCK));
-    for ch in 0..c {
+    crate::decoder::stats::for_each_chunk(parallel, &mut out.data, h * w, |ch, dst| {
         let src = scale_log.plane(ch);
         let mut block = alloc::vec![0i64; bh * bw];
         for by in 0..bh {
@@ -63,13 +68,12 @@ pub fn likely(scale_log: &Tensor<i32>) -> Result<Tensor<u16>> {
                 block[by * bw + bx] = ((sum + 32) >> 6).clamp(0, log2lin::LEN as i64 - 1);
             }
         }
-        let dst = out.plane_mut(ch);
         for y in 0..h {
             for x in 0..w {
                 dst[y * w + x] = block[(y / BLOCK) * bw + x / BLOCK] as u16;
             }
         }
-    }
+    });
     Ok(out)
 }
 
@@ -190,12 +194,23 @@ impl Rvs {
 
     /// `quantize_scale`: add the log-domain table value to every sample.
     pub fn adjust_scale(&self, scale_log: &mut Tensor<i32>, likely: &Tensor<u16>) {
-        for ch in 0..scale_log.c {
+        self.adjust_scale_par(cfg!(feature = "parallel"), scale_log, likely);
+    }
+
+    /// [`Self::adjust_scale`], one task per channel when `parallel` holds.
+    pub(crate) fn adjust_scale_par(
+        &self,
+        parallel: bool,
+        scale_log: &mut Tensor<i32>,
+        likely: &Tensor<u16>,
+    ) {
+        let plane = scale_log.h * scale_log.w;
+        crate::decoder::stats::for_each_chunk(parallel, &mut scale_log.data, plane, |ch, s| {
             let seg = &self.log[self.flags.get(ch).copied().unwrap_or(false) as usize];
-            for (s, &l) in scale_log.plane_mut(ch).iter_mut().zip(likely.plane(ch)) {
+            for (s, &l) in s.iter_mut().zip(likely.plane(ch)) {
                 *s += seg.get(l);
             }
-        }
+        });
     }
 
     /// `dequantize_resi`: `x * table / 2^16` in single precision.

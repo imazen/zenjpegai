@@ -162,29 +162,43 @@ impl ContextModel {
             };
             drop(psi_s);
             // y_hat_s = residual_s + mean, on the half-resolution grid. Positions of the padded
-            // (odd-size) border read a zero residual, like the reference's F.pad.
+            // (odd-size) border read a zero residual, like the reference's F.pad. Two pooled
+            // passes: first the stage (context for the next stage) gets the residual added
+            // in place, then the owning rows of `y_hat` copy it out — the same values in the
+            // same per-element order, just not from one thread.
             let (py, px) = STAGE_POSITIONS[s];
             let mut stage = mean;
-            for ch in 0..c {
-                let (b, lane) = (ch / v, ch % v);
-                for y in 0..hh {
-                    let sy = 2 * y + py;
-                    let row = &mut stage.data[(b * hh + y) * hw * v..][..hw * v];
-                    if sy >= h {
-                        continue;
-                    }
-                    let res_row = &residual.data[(ch * h + sy) * w..][..w];
-                    let out_row = &mut y_hat.data[(ch * h + sy) * w..][..w];
+            fast::for_each_row(eng, &mut stage.data, hw * v, |idx, row| {
+                let (b, y) = (idx / hh, idx % hh);
+                let sy = 2 * y + py;
+                if sy >= h {
+                    return;
+                }
+                let lanes = (c - b * v).min(v);
+                for lane in 0..lanes {
+                    let res_row = &residual.data[((b * v + lane) * h + sy) * w..][..w];
                     for x in 0..hw {
                         let sx = 2 * x + px;
                         if sx < w {
-                            let val = &mut row[x * v + lane];
-                            *val += res_row[sx];
-                            out_row[sx] = *val;
+                            row[x * v + lane] += res_row[sx];
                         }
                     }
                 }
-            }
+            });
+            fast::for_each_row(eng, &mut y_hat.data, w, |idx, out_row| {
+                let (ch, sy) = (idx / h, idx % h);
+                if sy % 2 != py {
+                    return;
+                }
+                let (b, lane) = (ch / v, ch % v);
+                let src = &stage.data[(b * hh + sy / 2) * hw * v..][..hw * v];
+                for x in 0..hw {
+                    let sx = 2 * x + px;
+                    if sx < w {
+                        out_row[sx] = src[x * v + lane];
+                    }
+                }
+            });
             context = Some(match context {
                 None => stage,
                 Some(ctx) => BTensor::cat(&[&ctx, &stage])?,
@@ -402,26 +416,32 @@ impl ContextModel {
     }
 }
 
+/// `STAGE_POSITIONS` inverted: `(py, px)` → stage index.
+const STAGE_LUT: [usize; 4] = [0, 2, 3, 1];
+
 /// Mean of a component without a context model: `psi` quarters up-shuffled to latent
 /// resolution (`Upsample_proc(chunk(psi, 4))`), cropped to `[C, h, w]`.
 pub fn upshuffle_psi(psi: &BTensor, h: usize, w: usize) -> Result<Tensor<f32>> {
+    upshuffle_psi_par(cfg!(feature = "parallel"), psi, h, w)
+}
+
+/// [`upshuffle_psi`], one task per output row when `parallel` holds.
+pub fn upshuffle_psi_par(parallel: bool, psi: &BTensor, h: usize, w: usize) -> Result<Tensor<f32>> {
     if !psi.c.is_multiple_of(4) || psi.h * 2 < h || psi.w * 2 < w {
         return Err(Error::InvalidArgument("upshuffle_psi: shape mismatch"));
     }
     let c = psi.c / 4;
     let v = psi.v;
     let mut out = Tensor::<f32>::zeros(c, h, w)?;
-    for (s, &(py, px)) in STAGE_POSITIONS.iter().enumerate() {
-        for ch in 0..c {
+    crate::decoder::stats::for_each_chunk(parallel, &mut out.data, w, |i, out_row| {
+        let (ch, y) = (i / h, i % h);
+        let py = y % 2;
+        for x in 0..w {
+            let s = STAGE_LUT[py * 2 + x % 2];
             let pch = s * c + ch;
             let (b, lane) = (pch / v, pch % v);
-            for y in (py..h).step_by(2) {
-                let src = &psi.data[(b * psi.h + y / 2) * psi.w * v..][..psi.w * v];
-                for x in (px..w).step_by(2) {
-                    out.data[(ch * h + y) * w + x] = src[(x / 2) * v + lane];
-                }
-            }
+            out_row[x] = psi.data[(b * psi.h + y / 2) * psi.w * v + (x / 2) * v + lane];
         }
-    }
+    });
     Ok(out)
 }

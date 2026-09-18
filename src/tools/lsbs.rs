@@ -25,6 +25,23 @@ pub fn apply(
     residual: &Tensor<f32>,
     likely: &Tensor<u16>,
 ) -> Result<()> {
+    apply_par(
+        cfg!(feature = "parallel"),
+        model_id,
+        y_hat,
+        residual,
+        likely,
+    )
+}
+
+/// [`apply`], chunked over the plane data when `parallel` holds.
+pub(crate) fn apply_par(
+    parallel: bool,
+    model_id: usize,
+    y_hat: &mut Tensor<f32>,
+    residual: &Tensor<f32>,
+    likely: &Tensor<u16>,
+) -> Result<()> {
     let (s0, s1) = SCALE0
         .get(model_id)
         .zip(SCALE1.get(model_id))
@@ -44,12 +61,16 @@ pub fn apply(
         bounds,
         values: pairs,
     };
-    for ((y, &r), &l) in y_hat.data.iter_mut().zip(&residual.data).zip(&likely.data) {
-        let (a, b) = seg.get(l);
-        let mean = *y - r;
-        // Two products and a sum, then an exact power-of-two division, like the reference.
-        let additive = (a * mean + b * r) / 8192.0;
-        *y += additive;
-    }
+    crate::decoder::stats::for_each_chunk(parallel, &mut y_hat.data, 16384, |i, chunk| {
+        let base = i * 16384;
+        for (j, y) in chunk.iter_mut().enumerate() {
+            let (r, l) = (residual.data[base + j], likely.data[base + j]);
+            let (a, b) = seg.get(l);
+            let mean = *y - r;
+            // Two products and a sum, then an exact power-of-two division, like the reference.
+            let additive = (a * mean + b * r) / 8192.0;
+            *y += additive;
+        }
+    });
     Ok(())
 }

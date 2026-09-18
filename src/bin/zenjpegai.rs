@@ -74,6 +74,7 @@ OPTIONS:
     --scalar           no SIMD (for debugging; every tier produces identical pixels)
     --repeat <n>       decode n times and print per-run timing (models stay loaded)
     --time             print timing
+    --stats            print the per-stage decode breakdown (TSV on stderr)
     --pool-mb <n>      cap the recycled-buffer pool at n MiB (default 1024; 0 = no recycling)
     --discard          decode only, write no file (profiling; <out.png> is ignored)
 
@@ -117,6 +118,7 @@ struct Args {
     scalar: bool,
     repeat: usize,
     time: bool,
+    stats: bool,
     discard: bool,
     pool_mb: Option<usize>,
 }
@@ -154,6 +156,7 @@ fn parse_args() -> Result<Args, String> {
         scalar: false,
         repeat: 1,
         time: false,
+        stats: false,
         discard: false,
         pool_mb: None,
     };
@@ -295,6 +298,7 @@ fn parse_args() -> Result<Args, String> {
                 a.time = true;
             }
             "--time" => a.time = true,
+            "--stats" => a.stats = true,
             "--discard" => a.discard = true,
             "--pool-mb" => {
                 a.pool_mb = Some(
@@ -560,9 +564,22 @@ fn run() -> Result<(), String> {
             let mut image = None;
             for run in 0..args.repeat.max(1) {
                 let t = Instant::now();
-                let img = decoder
-                    .decode_picture(&stream)
-                    .map_err(|e| format!("{e:?}"))?;
+                let (img, stats) = if args.stats {
+                    let (img, s) = decoder
+                        .decode_picture_stats(&stream)
+                        .map_err(|e| format!("{e:?}"))?;
+                    (img, Some(s))
+                } else {
+                    (
+                        decoder
+                            .decode_picture(&stream)
+                            .map_err(|e| format!("{e:?}"))?,
+                        None,
+                    )
+                };
+                if let Some(s) = &stats {
+                    print_decode_stats(run, s);
+                }
                 if args.time {
                     let (width, height) = match &img {
                         Picture::Rgb(i) => (i.width, i.height),
@@ -673,6 +690,47 @@ fn run() -> Result<(), String> {
         }
         _ => Err(String::new()),
     }
+}
+
+/// `decode --stats`: one `run<TAB>stage<TAB>ms` row per measured section, on stderr so it
+/// mixes freely with `--time`. Per-component sections carry the component index; their task
+/// times overlap when the pool is in use (they can sum past `chains`).
+fn print_decode_stats(run: usize, s: &zenjpegai::DecodeStats) {
+    let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
+    let row = |name: &str, d: std::time::Duration| {
+        eprintln!("{run}\t{name}\t{:.4}", ms(d));
+    };
+    row("headers", s.headers);
+    row("models", s.models);
+    row("entropy_z_0", s.entropy_z[0]);
+    row("entropy_z_1", s.entropy_z[1]);
+    row("entropy_quality_map", s.entropy_quality_map);
+    row("entropy_body_0", s.entropy_body[0]);
+    row("entropy_body_1", s.entropy_body[1]);
+    row("entropy_scales_0", s.entropy_scales[0]);
+    row("entropy_scales_1", s.entropy_scales[1]);
+    row("entropy_mask_0", s.entropy_mask[0]);
+    row("entropy_mask_1", s.entropy_mask[1]);
+    row("entropy_gather_0", s.entropy_gather[0]);
+    row("entropy_gather_1", s.entropy_gather[1]);
+    row("entropy_residual_0", s.entropy_residual[0]);
+    row("entropy_residual_1", s.entropy_residual[1]);
+    row("entropy_dequantize_0", s.entropy_dequantize[0]);
+    row("entropy_dequantize_1", s.entropy_dequantize[1]);
+    row("latent_0", s.latent[0]);
+    row("latent_1", s.latent[1]);
+    row("latent_hyper_0", s.latent_hyper[0]);
+    row("latent_hyper_1", s.latent_hyper[1]);
+    row("latent_mcm_0", s.latent_mcm[0]);
+    row("latent_mcm_1", s.latent_mcm[1]);
+    row("post_process_0", s.post_process[0]);
+    row("post_process_1", s.post_process[1]);
+    row("chains", s.chains);
+    row("synthesis", s.synthesis);
+    row("chroma_convert", s.chroma_convert);
+    row("filters", s.filters);
+    row("output", s.output);
+    row("total", s.total);
 }
 
 fn main() -> ExitCode {

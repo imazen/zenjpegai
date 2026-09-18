@@ -185,16 +185,26 @@ impl QualityMap {
 
     /// `quantize_scale`: the log-domain offset of every position, added to all channels.
     pub fn adjust_scale(&self, scale_log: &mut Tensor<i32>) -> Result<()> {
+        self.adjust_scale_par(cfg!(feature = "parallel"), scale_log)
+    }
+
+    /// [`Self::adjust_scale`], one task per channel when `parallel` holds.
+    pub(crate) fn adjust_scale_par(
+        &self,
+        parallel: bool,
+        scale_log: &mut Tensor<i32>,
+    ) -> Result<()> {
         if (scale_log.h, scale_log.w) != (self.qp.h, self.qp.w) {
             return Err(Error::InvalidData(
                 "quality map size does not match the latent",
             ));
         }
-        for ch in 0..scale_log.c {
-            for (s, &q) in scale_log.plane_mut(ch).iter_mut().zip(&self.qp.data) {
+        let plane = scale_log.h * scale_log.w;
+        crate::decoder::stats::for_each_chunk(parallel, &mut scale_log.data, plane, |_, s| {
+            for (s, &q) in s.iter_mut().zip(&self.qp.data) {
                 *s += lookup(&SCALE_LOG, q);
             }
-        }
+        });
         Ok(())
     }
 

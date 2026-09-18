@@ -118,6 +118,8 @@ pub struct AnsDecoder<'t> {
     buf: Vec<u8>,
     streams: Vec<Stream>,
     z_preprocess: [u16; 512],
+    /// Multi-threaded calls run their ANS threads on the rayon pool.
+    parallel: bool,
 }
 
 impl<'t> AnsDecoder<'t> {
@@ -145,12 +147,19 @@ impl<'t> AnsDecoder<'t> {
             buf,
             streams,
             z_preprocess: z_decode_preprocess(),
+            parallel: false,
         })
     }
 
     /// Number of ANS threads in this payload.
     pub fn num_threads(&self) -> usize {
         self.streams.len()
+    }
+
+    /// When `parallel` is set, multi-thread calls decode their threads on the rayon pool.
+    /// Output is identical; the threads are independent by construction.
+    pub fn set_parallel(&mut self, parallel: bool) {
+        self.parallel = parallel;
     }
 
     /// True if any thread tried to read in front of its data. Valid streams never do.
@@ -180,10 +189,52 @@ impl<'t> AnsDecoder<'t> {
             self.streams[0] = s;
         } else {
             let n = self.streams.len();
+            #[cfg(feature = "parallel")]
+            if self.parallel {
+                return self.decode_residual_par(sigma_idx, mask, out);
+            }
+            let _ = self.parallel;
             for (i, s) in self.streams.iter_mut().enumerate() {
                 decode_residual_strided(self.tables, &self.buf, s, i, n, sigma_idx, mask, out);
             }
         }
+        if self.overrun() {
+            return Err(Error::InvalidData("ANS stream exhausted"));
+        }
+        Ok(())
+    }
+
+    /// `decodeMultiThread` with its threads on the rayon pool. Each thread decodes its own
+    /// `i, i + n, ...` positions into a compact buffer (identical arithmetic, sequential
+    /// stream state); the writes then scatter into `out` — what the serial strided loop
+    /// produces element for element.
+    #[cfg(feature = "parallel")]
+    fn decode_residual_par(
+        &mut self,
+        sigma_idx: &[u8],
+        mask: &[bool],
+        out: &mut [i16],
+    ) -> Result<()> {
+        use rayon::prelude::*;
+        let (len, n) = (out.len(), self.streams.len());
+        // Thread `i` owns `(len - 1 - i) / n + 1` positions (for `i < len`), all `<= per`.
+        let per = len.div_ceil(n);
+        let mut scratch = alloc::vec![0i16; n * per];
+        let tables = self.tables;
+        let buf = &self.buf;
+        self.streams
+            .par_iter_mut()
+            .zip(scratch.par_chunks_mut(per))
+            .enumerate()
+            .for_each(|(i, (s, tmp))| {
+                decode_residual_compact(tables, buf, s, i, n, sigma_idx, mask, tmp);
+            });
+        // out[i + n * k] = scratch[i * per + k]
+        out.par_chunks_mut(n).enumerate().for_each(|(m, chunk)| {
+            for (i, d) in chunk.iter_mut().enumerate() {
+                *d = scratch[i * per + m];
+            }
+        });
         if self.overrun() {
             return Err(Error::InvalidData("ANS stream exhausted"));
         }
@@ -217,6 +268,8 @@ impl<'t> AnsDecoder<'t> {
                 decode_z_row_single(&transitions, &self.buf, &mut s, row);
                 self.streams[0] = s;
             } else {
+                // Threads write strided positions of one `row`: that can't be shared `&mut`
+                // across tasks, and the hyper-latent is small — serial is fine here.
                 for (i, s) in self.streams.iter_mut().enumerate() {
                     decode_z_row_strided(&transitions, &self.buf, s, i, n, row);
                 }
@@ -318,6 +371,50 @@ fn decode_residual_single(
             y_inbound(tables, s, false, sigma[index], &mut out[index]);
             y_outbound(tables, buf, s, sigma[index], &mut out[index]);
         }
+        s.flush(buf);
+    }
+}
+
+/// [`decode_residual_strided`], writing the thread's symbols compactly: `out[k]` is the
+/// symbol at position `first + n * k`. Same reads, same order — only the writes differ.
+#[allow(clippy::too_many_arguments)]
+fn decode_residual_compact(
+    tables: &ResidualTables,
+    buf: &[u8],
+    s: &mut Stream,
+    first: usize,
+    n: usize,
+    sigma: &[u8],
+    mask: &[bool],
+    out: &mut [i16],
+) {
+    let len = mask.len();
+    let thres = len / (n << 2) * (n << 2);
+    let (mut index, mut k) = (first, 0usize);
+    while index < thres {
+        for j in 0..4 {
+            let i = index + n * j;
+            if mask[i] {
+                y_inbound(tables, s, false, sigma[i], &mut out[k + j]);
+            }
+        }
+        s.flush(buf);
+        for j in 0..4 {
+            let i = index + n * j;
+            if mask[i] {
+                y_outbound(tables, buf, s, sigma[i], &mut out[k + j]);
+            }
+        }
+        index += n * 4;
+        k += 4;
+    }
+    while index < len {
+        if mask[index] {
+            y_inbound(tables, s, false, sigma[index], &mut out[k]);
+            y_outbound(tables, buf, s, sigma[index], &mut out[k]);
+        }
+        index += n;
+        k += 1;
         s.flush(buf);
     }
 }

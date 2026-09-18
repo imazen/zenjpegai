@@ -7,10 +7,11 @@
 use enough::Stop;
 
 use super::entropy::ComponentEntropy;
+use super::stats::{Gate, Probe, Tick, for_each_chunk, join2, par_map, record};
 use crate::error::{Error, Result};
 use crate::header::{PictureHeader, ToolHeader};
 use crate::model::CommonModel;
-use crate::model::mcm::upshuffle_psi;
+use crate::model::mcm::upshuffle_psi_par;
 use crate::model::synthesis::{SynthesisPrimary, SynthesisSecondary};
 use crate::nn::fast::{BTensor, Engine};
 use crate::tensor::Tensor;
@@ -32,8 +33,15 @@ pub struct Latent {
 pub(crate) const HD_MCM_TILE_OVERLAP: usize = 48;
 
 /// `tiling.get_data` + `tiling.assign_data`: copy `src[:, oy.., ox..]` into `dst` at `core`,
-/// clamped the way tensor slicing clamps.
-fn assign(dst: &mut Tensor<f32>, core: Area, src: &Tensor<f32>, (ox, oy): (usize, usize)) {
+/// clamped the way tensor slicing clamps. One task per channel plane when `parallel` holds
+/// (channels are disjoint).
+fn assign_par(
+    parallel: bool,
+    dst: &mut Tensor<f32>,
+    core: Area,
+    src: &Tensor<f32>,
+    (ox, oy): (usize, usize),
+) {
     let h = core
         .height
         .min(src.h.saturating_sub(oy))
@@ -43,13 +51,18 @@ fn assign(dst: &mut Tensor<f32>, core: Area, src: &Tensor<f32>, (ox, oy): (usize
         .min(src.w.saturating_sub(ox))
         .min(dst.w.saturating_sub(core.x));
     let (dw, sw) = (dst.w, src.w);
-    for c in 0..dst.c.min(src.c) {
-        for y in 0..h {
-            let s = &src.plane(c)[(oy + y) * sw + ox..][..w];
-            let d = (core.y + y) * dw + core.x;
-            dst.plane_mut(c)[d..d + w].copy_from_slice(s);
+    let plane = dst.h * dst.w;
+    for_each_chunk(parallel, &mut dst.data, plane, |c, dplane| {
+        if c >= src.c {
+            return;
         }
-    }
+        let splane = src.plane(c);
+        for y in 0..h {
+            let s = &splane[(oy + y) * sw + ox..][..w];
+            let d = (core.y + y) * dw + core.x;
+            dplane[d..d + w].copy_from_slice(s);
+        }
+    });
 }
 
 /// Rows/columns the hyper-decoder crops after its transposed convolution
@@ -83,6 +96,24 @@ pub fn reconstruct_latent_with(
     e: &ComponentEntropy,
     stop: &dyn Stop,
 ) -> Result<Latent> {
+    let gate = Gate::new(stop);
+    reconstruct_latent_timed(eng, hdr, ccs, model, e, &gate, None)
+}
+
+/// [`reconstruct_latent_with`] that feeds `probe` with per-stage timings. Region work is
+/// pooled (`eng.parallel`): the regions' extended windows overlap but only their disjoint
+/// cores are merged — computed concurrently into tiles, then assigned in raster order, so
+/// dependent regions keep the reference's "later wins" merge exactly.
+pub(crate) fn reconstruct_latent_timed(
+    eng: &Engine,
+    hdr: &PictureHeader,
+    ccs: usize,
+    model: &CommonModel,
+    e: &ComponentEntropy,
+    stop: &dyn Stop,
+    probe: Option<&Probe>,
+) -> Result<Latent> {
+    let t_lat = Tick::now();
     let (h, w) = (e.residual.h, e.residual.w);
     let chs = e.residual.c;
     let independent = hdr.regions.is_some_and(|r| r.independent);
@@ -94,10 +125,8 @@ pub fn reconstruct_latent_with(
     let v = eng.tier.block();
     let (pic_h, pic_w) = (hdr.height as usize, hdr.width as usize);
 
-    // 1. psi per region, merged.
-    let mut psi = Tensor::<f32>::zeros(4 * chs, h.div_ceil(2), w.div_ceil(2))?;
-    let mut psi_single = None;
-    for r in 0..n {
+    // 1. psi per region, merged. Each region's hyper-decoder run is independent work.
+    let psi_tile = |r: usize| -> Result<(BTensor, Tensor<f32>)> {
         stop.check()?;
         let (it, zt) = (img.extended[r], zg.extended[r]);
         // The chroma hyper-decoder is told the half-size plane.
@@ -122,36 +151,60 @@ pub fn reconstruct_latent_with(
         let t = model
             .hyper_decoder
             .forward_with(eng, z, out_h, out_w, stop)?;
-        assign(&mut psi, pg.extended[r], &t.to_planar()?, (0, 0));
-        if n == 1 && t.h == psi.h && t.w == psi.w {
+        let planar = t.to_planar_par(eng)?;
+        Ok((t, planar))
+    };
+    let t = Tick::now();
+    let mut psi = Tensor::<f32>::zeros(4 * chs, h.div_ceil(2), w.div_ceil(2))?;
+    let mut psi_single = None;
+    if n == 1 {
+        let (t, planar) = psi_tile(0)?;
+        assign_par(eng.parallel, &mut psi, pg.extended[0], &planar, (0, 0));
+        if t.h == psi.h && t.w == psi.w {
             psi_single = Some(t);
         }
+    } else {
+        let tiles = par_map(eng.parallel, n, |r| psi_tile(r).map(|(_, p)| p))?;
+        for (r, planar) in tiles.iter().enumerate() {
+            assign_par(eng.parallel, &mut psi, pg.extended[r], planar, (0, 0));
+        }
     }
+    record(Probe::field(probe, ccs, |p| &p.hyper), t);
 
     // 2. y_hat per region, merged.
-    let mut y_hat = Tensor::<f32>::zeros(chs, h, w)?;
-    for r in 0..n {
+    let t = Tick::now();
+    let y_tile = |r: usize| -> Result<Tensor<f32>> {
         stop.check()?;
-        let (lt, pt, it) = (lg.extended[r], pg.extended[r], img.extended[r]);
-        let (res_tile, psi_tile);
-        let (res, psi_b) = match psi_single.take() {
+        let (lt, pt) = (lg.extended[r], pg.extended[r]);
+        let (res_tile, psi_tile, psi_b);
+        let (res, psi_r): (&Tensor<f32>, &BTensor) = match psi_single.as_ref() {
             Some(p) => (&e.residual, p),
             None => {
                 res_tile = e.residual.window(lt.x, lt.y, lt.width, lt.height)?;
                 psi_tile = psi.window(pt.x, pt.y, pt.width, pt.height)?;
-                (&res_tile, BTensor::from_planar(&psi_tile, v)?)
+                psi_b = BTensor::from_planar_par(eng, &psi_tile, v)?;
+                (&res_tile, &psi_b)
             }
         };
-        let y = match &model.context {
-            Some(ctx) => ctx.decompress_with(eng, res, &psi_b, stop)?,
+        match &model.context {
+            Some(ctx) => ctx.decompress_with(eng, res, psi_r, stop),
             None => {
-                let mut y = upshuffle_psi(&psi_b, res.h, res.w)?;
-                for (o, &r) in y.data.iter_mut().zip(&res.data) {
-                    *o += r;
-                }
-                y
+                let mut y = upshuffle_psi_par(eng.parallel, psi_r, res.h, res.w)?;
+                for_each_chunk(eng.parallel, &mut y.data, 16384, |i, chunk| {
+                    let base = i * 16384;
+                    let src = &res.data[base..base + chunk.len()];
+                    for (o, &r) in chunk.iter_mut().zip(src) {
+                        *o += r;
+                    }
+                });
+                Ok(y)
             }
-        };
+        }
+    };
+    let ys = par_map(eng.parallel, n, y_tile)?;
+    let mut y_hat = Tensor::<f32>::zeros(chs, h, w)?;
+    for (r, y) in ys.iter().enumerate() {
+        let (lt, it) = (lg.extended[r], img.extended[r]);
         let (core, offset) = if independent {
             (lt, (0, 0))
         } else {
@@ -168,8 +221,10 @@ pub fn reconstruct_latent_with(
             };
             (Area::new(lt.x + left, lt.y + top, cw, ch), (left, top))
         };
-        assign(&mut y_hat, core, &y, offset);
+        assign_par(eng.parallel, &mut y_hat, core, y, offset);
     }
+    record(Probe::field(probe, ccs, |p| &p.mcm), t);
+    record(Probe::field(probe, ccs, |p| &p.latent), t_lat);
     Ok(Latent { psi, y_hat })
 }
 
@@ -182,8 +237,21 @@ pub fn post_process_latent(
     e: &ComponentEntropy,
     latent: &mut Latent,
 ) -> Result<()> {
+    post_process_latent_par(cfg!(feature = "parallel"), hdr, tools, ccs, e, latent)
+}
+
+/// [`post_process_latent`], pooled elementwise work when `parallel` holds.
+pub(crate) fn post_process_latent_par(
+    parallel: bool,
+    hdr: &PictureHeader,
+    tools: &ToolHeader,
+    ccs: usize,
+    e: &ComponentEntropy,
+    latent: &mut Latent,
+) -> Result<()> {
     if tools.lsbs_enabled[ccs] {
-        lsbs::apply(
+        lsbs::apply_par(
+            parallel,
             hdr.model_id as usize,
             &mut latent.y_hat,
             &e.residual,
@@ -223,6 +291,8 @@ pub fn synthesize_with(
     y_hat: [&Tensor<f32>; 2],
     stop: &dyn Stop,
 ) -> Result<Planes> {
+    let gate = Gate::new(stop);
+    let stop = &gate;
     let (h, w) = (hdr.height as usize, hdr.width as usize);
     let out_h = h - hdr.diff_display_height as usize;
     let out_w = w - hdr.diff_display_width as usize;
@@ -267,22 +337,30 @@ pub fn synthesize_with(
         stop.check()?;
         let (img, lat) = (tile.image, tile.latent);
         let whole = lat.width == y_hat[0].w && lat.height == y_hat[0].h;
-        let (by, buv) = if whole {
-            (
-                BTensor::from_planar(y_hat[0], v)?,
-                BTensor::from_planar(y_hat[1], v)?,
-            )
-        } else {
-            let win = |t: &Tensor<f32>| t.window(lat.x, lat.y, lat.width, lat.height);
-            (
-                BTensor::from_planar(&win(y_hat[0])?, v)?,
-                BTensor::from_planar(&win(y_hat[1])?, v)?,
-            )
+        let blocked = |t: &Tensor<f32>| -> Result<BTensor> {
+            let win;
+            let src = if whole {
+                t
+            } else {
+                win = t.window(lat.x, lat.y, lat.width, lat.height)?;
+                &win
+            };
+            BTensor::from_planar_par(eng, src, v)
         };
+        let (by, buv) = join2(eng.parallel, || blocked(y_hat[0]), || blocked(y_hat[1]));
+        let (by, buv) = (by?, buv?);
         let (ox, oy) = tile.core_offset;
         let core = tile.core;
 
-        let ty = luma.forward_with(eng, &by, img.height, img.width, stop)?;
+        // The two transforms share only their inputs: run them side by side so the tail of
+        // one overlaps the ramp-up of the other.
+        let (ty, tuv) = join2(
+            eng.parallel,
+            || luma.forward_with(eng, &by, img.height, img.width, stop),
+            || chroma.forward_with(eng, &by, &buv, img.height, img.width, stop),
+        );
+        let (ty, tuv) = (ty?, tuv?);
+        drop((by, buv));
         let cols = core.width.min(out_w.saturating_sub(core.x));
         if ty.h < oy + core.height || ty.w < ox + core.width {
             return Err(Error::InvalidData("synthesis tile smaller than its core"));
@@ -293,9 +371,6 @@ pub fn synthesize_with(
             rec_y.data[d..d + cols].copy_from_slice(s);
         }
         drop(ty);
-
-        let tuv = chroma.forward_with(eng, &by, &buv, img.height, img.width, stop)?;
-        drop((by, buv));
         if tuv.c != 2 || tuv.h < oy + core.height || tuv.w < ox + core.width {
             return Err(Error::InvalidData("synthesis tile smaller than its core"));
         }

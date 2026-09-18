@@ -117,26 +117,36 @@ fn cubic_taps(dst: usize, in_len: usize, out_len: usize) -> ([usize; 4], [f32; 4
 /// computes it: per output sample, four horizontal 4-tap sums, then one vertical 4-tap sum, each
 /// accumulated left to right in single precision; out-of-range taps repeat the border sample.
 pub fn resize_bicubic(src: &Tensor<f32>, out_h: usize, out_w: usize) -> Result<Tensor<f32>> {
+    resize_bicubic_par(cfg!(feature = "parallel"), src, out_h, out_w)
+}
+
+/// [`resize_bicubic`], one task per output row when `parallel` holds.
+pub(crate) fn resize_bicubic_par(
+    parallel: bool,
+    src: &Tensor<f32>,
+    out_h: usize,
+    out_w: usize,
+) -> Result<Tensor<f32>> {
     if src.h == 0 || src.w == 0 {
         return Err(Error::InvalidArgument("resize: empty input"));
     }
     let mut out = Tensor::<f32>::zeros(src.c, out_h, out_w)?;
     let xs: Vec<([usize; 4], [f32; 4])> = (0..out_w).map(|x| cubic_taps(x, src.w, out_w)).collect();
-    for c in 0..src.c {
-        let plane = src.plane(c);
-        for y in 0..out_h {
-            let (iy, wy) = cubic_taps(y, src.h, out_h);
-            let dst = &mut out.plane_mut(c)[y * out_w..][..out_w];
+    let ys: Vec<([usize; 4], [f32; 4])> = (0..out_h).map(|y| cubic_taps(y, src.h, out_h)).collect();
+    crate::decoder::stats::for_each_chunk(parallel, &mut out.data, out_h * out_w, |c, plane| {
+        let src_plane = src.plane(c);
+        for (y, dst) in plane.chunks_exact_mut(out_w).enumerate() {
+            let (iy, wy) = &ys[y];
             for (d, (ix, wx)) in dst.iter_mut().zip(&xs) {
                 // Four horizontal sums (one per source row), then the vertical sum.
                 let rows: [f32; 4] = core::array::from_fn(|k| {
-                    let row = &plane[iy[k] * src.w..][..src.w];
+                    let row = &src_plane[iy[k] * src.w..][..src.w];
                     dot4([row[ix[0]], row[ix[1]], row[ix[2]], row[ix[3]]], *wx)
                 });
-                *d = dot4(rows, wy);
+                *d = dot4(rows, *wy);
             }
         }
-    }
+    });
     Ok(out)
 }
 
@@ -144,6 +154,15 @@ pub fn resize_bicubic(src: &Tensor<f32>, out_h: usize, out_w: usize) -> Result<T
 /// (`c_ver`, `c_hor`) and leave in the source's (`s_ver`, `s_hor`). The encoder guarantees
 /// `c >= s`, and the reference only implements the conversions to 4:4:4.
 pub fn to_source_format(hdr: &PictureHeader, planes: Planes) -> Result<Planes> {
+    to_source_format_par(cfg!(feature = "parallel"), hdr, planes)
+}
+
+/// [`to_source_format`], pooled resize + both planes at once when `parallel` holds.
+pub(crate) fn to_source_format_par(
+    parallel: bool,
+    hdr: &PictureHeader,
+    planes: Planes,
+) -> Result<Planes> {
     let (c, s) = ((hdr.c_ver, hdr.c_hor), (hdr.s_ver, hdr.s_hor));
     if c == s {
         return Ok(planes);
@@ -154,9 +173,14 @@ pub fn to_source_format(hdr: &PictureHeader, planes: Planes) -> Result<Planes> {
         ));
     }
     let (h, w) = (planes.y.h, planes.y.w);
+    let (u, v) = crate::decoder::stats::join2(
+        parallel,
+        || resize_bicubic_par(parallel, &planes.u, h, w),
+        || resize_bicubic_par(parallel, &planes.v, h, w),
+    );
     Ok(Planes {
-        u: resize_bicubic(&planes.u, h, w)?,
-        v: resize_bicubic(&planes.v, h, w)?,
+        u: u?,
+        v: v?,
         y: planes.y,
     })
 }
@@ -169,6 +193,15 @@ pub fn to_rgb_planes(hdr: &PictureHeader, planes: &Planes) -> Result<RgbPlanes> 
 /// [`to_rgb_planes`] that converts in place: the three input planes become the output planes,
 /// so no second set of full-size planes exists at any point.
 pub fn to_rgb_planes_owned(hdr: &PictureHeader, planes: Planes) -> Result<RgbPlanes> {
+    to_rgb_planes_owned_par(cfg!(feature = "parallel"), hdr, planes)
+}
+
+/// [`to_rgb_planes_owned`], chunked over the planes when `parallel` holds.
+pub(crate) fn to_rgb_planes_owned_par(
+    parallel: bool,
+    hdr: &PictureHeader,
+    planes: Planes,
+) -> Result<RgbPlanes> {
     if hdr.colour_transform != ColourTransform::Bt709 {
         return Err(Error::Unsupported(
             "colour transforms other than BT.709 YCbCr to RGB",
@@ -183,18 +216,20 @@ pub fn to_rgb_planes_owned(hdr: &PictureHeader, planes: Planes) -> Result<RgbPla
     let gu = (KB * KBY / KG) as f32;
     let gv = (KR * KRY / KG) as f32;
     let (mut r, mut g, mut b) = (planes.y.data, planes.u.data, planes.v.data);
-    for ((py, pu), pv) in r.iter_mut().zip(g.iter_mut()).zip(b.iter_mut()) {
+    convert_pixels(parallel, &mut r, &mut g, &mut b, |(y, u, v)| {
         // to_RGB_: [0, 255] -> [0, 1], convert, back to [0, 255]; then clip_data_.
-        let y = convert_range(*py, 255.0, 1.0);
-        let u = convert_range(*pu, 255.0, 1.0) - 0.5;
-        let v = convert_range(*pv, 255.0, 1.0) - 0.5;
+        let y = convert_range(y, 255.0, 1.0);
+        let u = convert_range(u, 255.0, 1.0) - 0.5;
+        let v = convert_range(v, 255.0, 1.0) - 0.5;
         let rv = y + kry * v;
         let gvv = y - gu * u - gv * v;
         let bv = y + kby * u;
-        *py = convert_range(rv, 1.0, 255.0).clamp(0.0, 255.0);
-        *pu = convert_range(gvv, 1.0, 255.0).clamp(0.0, 255.0);
-        *pv = convert_range(bv, 1.0, 255.0).clamp(0.0, 255.0);
-    }
+        (
+            convert_range(rv, 1.0, 255.0).clamp(0.0, 255.0),
+            convert_range(gvv, 1.0, 255.0).clamp(0.0, 255.0),
+            convert_range(bv, 1.0, 255.0).clamp(0.0, 255.0),
+        )
+    });
     Ok(RgbPlanes {
         width: w,
         height: h,
@@ -202,6 +237,34 @@ pub fn to_rgb_planes_owned(hdr: &PictureHeader, planes: Planes) -> Result<RgbPla
         g,
         b,
     })
+}
+
+/// `f(r, g, b)` elementwise over three same-length planes; pooled in chunks when `parallel`.
+fn convert_pixels(
+    parallel: bool,
+    r: &mut [f32],
+    g: &mut [f32],
+    b: &mut [f32],
+    f: impl Fn((f32, f32, f32)) -> (f32, f32, f32) + Sync + Send,
+) {
+    const BLK: usize = 16384;
+    #[cfg(feature = "parallel")]
+    if parallel {
+        use rayon::prelude::*;
+        r.par_chunks_mut(BLK)
+            .zip(g.par_chunks_mut(BLK))
+            .zip(b.par_chunks_mut(BLK))
+            .for_each(|((rc, gc), bc)| {
+                for ((py, pu), pv) in rc.iter_mut().zip(gc).zip(bc) {
+                    (*py, *pu, *pv) = f((*py, *pu, *pv));
+                }
+            });
+        return;
+    }
+    let _ = parallel;
+    for ((py, pu), pv) in r.iter_mut().zip(g.iter_mut()).zip(b.iter_mut()) {
+        (*py, *pu, *pv) = f((*py, *pu, *pv));
+    }
 }
 
 /// Decoded YUV picture (`colour_transform_idx = 0`: the source was YUV and stays YUV), chroma
@@ -238,17 +301,31 @@ pub enum Picture {
 
 /// One plane: clip to the internal range, scale to `[0, 2^depth - 1]`, round half to even.
 pub fn quantize_plane(data: &[f32], bit_depth: u8) -> Vec<u16> {
+    quantize_plane_par(cfg!(feature = "parallel"), data, bit_depth)
+}
+
+/// [`quantize_plane`], chunked over the input when `parallel` holds.
+pub(crate) fn quantize_plane_par(parallel: bool, data: &[f32], bit_depth: u8) -> Vec<u16> {
     let max = ((1u32 << bit_depth) - 1) as f32;
-    data.iter()
-        .map(|&x| {
-            libm::rintf(convert_range(x.clamp(0.0, 255.0), 255.0, max)).clamp(0.0, max) as u16
-        })
-        .collect()
+    let mut out = alloc::vec![0u16; data.len()];
+    crate::decoder::stats::for_each_chunk(parallel, &mut out, 16384, |i, chunk| {
+        let base = i * 16384;
+        for (j, d) in chunk.iter_mut().enumerate() {
+            *d = libm::rintf(convert_range(data[base + j].clamp(0.0, 255.0), 255.0, max))
+                .clamp(0.0, max) as u16;
+        }
+    });
+    out
 }
 
 /// The tail of the decoder for planes already in the source's chroma format (post-filters, if
 /// any, have run): colour transform, clip, quantise to the stream's bit depth.
 pub fn finish(hdr: &PictureHeader, planes: &Planes) -> Result<Picture> {
+    finish_par(cfg!(feature = "parallel"), hdr, planes)
+}
+
+/// [`finish`], pooled colour + quantise work when `parallel` holds.
+pub(crate) fn finish_par(parallel: bool, hdr: &PictureHeader, planes: &Planes) -> Result<Picture> {
     if hdr.bit_depth != 8 && hdr.bit_depth != 10 {
         return Err(Error::InvalidData("bit depth must be 8 or 10"));
     }
@@ -260,28 +337,46 @@ pub fn finish(hdr: &PictureHeader, planes: &Planes) -> Result<Picture> {
                     "RGB output from a chroma-subsampled source",
                 ));
             }
-            Ok(Picture::Rgb(quantize(
-                &to_rgb_planes(hdr, planes)?,
+            Ok(Picture::Rgb(quantize_par(
+                parallel,
+                &to_rgb_planes_owned_par(parallel, hdr, planes.clone())?,
                 hdr.bit_depth,
             )?))
         }
-        ColourTransform::None => Ok(Picture::Yuv(YuvImage {
-            width: planes.y.w,
-            height: planes.y.h,
-            chroma_width: planes.u.w,
-            chroma_height: planes.u.h,
-            bit_depth: hdr.bit_depth,
-            // post_processing: clip_data_(); write: convert range, round half to even, clip.
-            y: quantize_plane(&planes.y.data, hdr.bit_depth),
-            u: quantize_plane(&planes.u.data, hdr.bit_depth),
-            v: quantize_plane(&planes.v.data, hdr.bit_depth),
-        })),
+        ColourTransform::None => {
+            let (y, uv) = crate::decoder::stats::join2(
+                parallel,
+                || quantize_plane_par(parallel, &planes.y.data, hdr.bit_depth),
+                || {
+                    (
+                        quantize_plane_par(parallel, &planes.u.data, hdr.bit_depth),
+                        quantize_plane_par(parallel, &planes.v.data, hdr.bit_depth),
+                    )
+                },
+            );
+            Ok(Picture::Yuv(YuvImage {
+                width: planes.y.w,
+                height: planes.y.h,
+                chroma_width: planes.u.w,
+                chroma_height: planes.u.h,
+                bit_depth: hdr.bit_depth,
+                // post_processing: clip_data_(); write: convert range, round half to even, clip.
+                y,
+                u: uv.0,
+                v: uv.1,
+            }))
+        }
         ColourTransform::Custom { .. } => Err(Error::Unsupported("user-defined colour transform")),
     }
 }
 
 /// `ImageIO.write_png` quantisation: internal range → `[0, 2^depth - 1]`, round half to even.
 pub fn quantize(rgb: &RgbPlanes, bit_depth: u8) -> Result<RgbImage> {
+    quantize_par(cfg!(feature = "parallel"), rgb, bit_depth)
+}
+
+/// [`quantize`], chunked over the pixels when `parallel` holds.
+pub(crate) fn quantize_par(parallel: bool, rgb: &RgbPlanes, bit_depth: u8) -> Result<RgbImage> {
     if bit_depth != 8 && bit_depth != 10 {
         return Err(Error::InvalidArgument("output bit depth must be 8 or 10"));
     }
@@ -291,10 +386,14 @@ pub fn quantize(rgb: &RgbPlanes, bit_depth: u8) -> Result<RgbImage> {
             .round_ties_even()
             .clamp(0.0, max) as u16
     };
-    let mut data = Vec::with_capacity(rgb.r.len() * 3);
-    for i in 0..rgb.r.len() {
-        data.extend_from_slice(&[q(rgb.r[i]), q(rgb.g[i]), q(rgb.b[i])]);
-    }
+    let mut data = alloc::vec![0u16; rgb.r.len() * 3];
+    crate::decoder::stats::for_each_chunk(parallel, &mut data, 16384 * 3, |i, chunk| {
+        let base = i * 16384;
+        for (j, d) in chunk.as_chunks_mut::<3>().0.iter_mut().enumerate() {
+            let p = base + j;
+            d.copy_from_slice(&[q(rgb.r[p]), q(rgb.g[p]), q(rgb.b[p])]);
+        }
+    });
     Ok(RgbImage {
         width: rgb.width,
         height: rgb.height,

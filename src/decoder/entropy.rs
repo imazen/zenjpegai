@@ -12,6 +12,9 @@
 
 use alloc::vec::Vec;
 
+use enough::Stop;
+
+use crate::decoder::stats::{Gate, Probe, Tick, for_each_chunk, par_map, record};
 use crate::error::{Error, Result};
 use crate::header::PictureHeader;
 use crate::mans::{AnsDecoder, AnsTables};
@@ -20,9 +23,9 @@ use crate::model::common::{SIGMA_IDX_MAX, SIGMA_LEVELS, SIGMA_PRECISION, Z_OFFSE
 use crate::tensor::Tensor;
 use crate::tools::gain::GainUnit;
 use crate::tools::qualmap::QualityMap;
-use crate::tools::regions::{Plane, region_grid};
+use crate::tools::regions::{Area, Plane, region_grid};
 use crate::tools::rvs::{self, Rvs};
-use crate::tools::skip::skip_mask;
+use crate::tools::skip::skip_mask_par;
 
 /// Entropy-stage output of one component.
 #[derive(Clone, Debug)]
@@ -110,7 +113,7 @@ pub fn component_scales(
     quality_map: Option<&QualityMap>,
 ) -> Result<ComponentScales> {
     let flags = hdr.components[ccs].grfs_channel_flags.clone();
-    component_scales_with(
+    component_scales_impl(
         hdr,
         ccs,
         model,
@@ -118,6 +121,7 @@ pub fn component_scales(
         quality_map,
         hdr.components[ccs].rvs_enabled,
         GrfsFlags::Signalled(flags.as_deref()),
+        cfg!(feature = "parallel"),
     )
 }
 
@@ -133,23 +137,50 @@ pub fn component_scales_with(
     rvs_enabled: bool,
     grfs: GrfsFlags<'_>,
 ) -> Result<ComponentScales> {
+    component_scales_impl(
+        hdr,
+        ccs,
+        model,
+        z_hat,
+        quality_map,
+        rvs_enabled,
+        grfs,
+        cfg!(feature = "parallel"),
+    )
+}
+
+/// The elementwise sections run on the rayon pool when `parallel` holds; the per-element
+/// arithmetic is unchanged either way.
+#[allow(clippy::too_many_arguments)]
+fn component_scales_impl(
+    hdr: &PictureHeader,
+    ccs: usize,
+    model: &CommonModel,
+    z_hat: &Tensor<i8>,
+    quality_map: Option<&QualityMap>,
+    rvs_enabled: bool,
+    grfs: GrfsFlags<'_>,
+    parallel: bool,
+) -> Result<ComponentScales> {
     let (lh, lw) = hdr.latent_size(ccs);
+    let (lh, lw) = (lh as usize, lw as usize);
     let gain = GainUnit::new(&model.gain_vector_log, hdr.beta_displacement_log[ccs]);
-    let mut skip_scale_log = model
-        .hsd
-        .forward(z_hat, lh as usize, lw as usize, SIGMA_IDX_MAX)?;
-    for (ch, &add) in gain.scaler_log.iter().enumerate() {
+    let mut skip_scale_log = model.hsd.forward(z_hat, lh, lw, SIGMA_IDX_MAX)?;
+    for &add in &gain.scaler_log {
         if !(-(1 << 13)..(1 << 13)).contains(&add) {
             return Err(Error::InvalidData("log-domain scaler out of range"));
         }
-        for v in skip_scale_log.plane_mut(ch) {
+    }
+    for_each_chunk(parallel, &mut skip_scale_log.data, lh * lw, |ch, plane| {
+        let add = gain.scaler_log[ch];
+        for v in plane {
             *v += add;
         }
-    }
+    });
     if let Some(q) = quality_map {
-        q.adjust_scale(&mut skip_scale_log)?;
+        q.adjust_scale_par(parallel, &mut skip_scale_log)?;
     }
-    let likely = rvs::likely(&skip_scale_log)?;
+    let likely = rvs::likely_par(parallel, &skip_scale_log)?;
     // `analyzeCWG` runs on the scale map as it stands before RVS adds anything.
     let grfs_flags = match grfs {
         GrfsFlags::Signalled(f) => f.map(<[bool]>::to_vec),
@@ -168,7 +199,7 @@ pub fn component_scales_with(
     )?;
     let mut scale_log = skip_scale_log.clone();
     if let Some(r) = &rvs {
-        r.adjust_scale(&mut scale_log, &likely);
+        r.adjust_scale_par(parallel, &mut scale_log, &likely);
     }
     Ok(ComponentScales {
         skip_scale_log,
@@ -225,26 +256,76 @@ pub fn decode_component(
     max_channels: Option<u16>,
     stop: &dyn enough::Stop,
 ) -> Result<ComponentEntropy> {
+    let (hz, wz) = hdr.hyper_latent_size(ccs);
+    let z_hat = decode_z(z_dec, model, hz as usize, wz as usize)?;
+    decode_component_body(
+        tables,
+        hdr,
+        ccs,
+        model,
+        z_hat,
+        region_payloads,
+        quality_map,
+        max_channels,
+        cfg!(feature = "parallel"),
+        None,
+        stop,
+    )
+}
+
+/// Everything of [`decode_component`] after the shared z substream. Both components' bodies
+/// touch disjoint data — the caller may run them on the pool — and inside a body the
+/// regions, the ANS threads of each region, and the elementwise passes are all
+/// independent. `parallel` decides whether that independence reaches the rayon pool; the
+/// output bits are identical either way.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn decode_component_body(
+    tables: &AnsTables,
+    hdr: &PictureHeader,
+    ccs: usize,
+    model: &CommonModel,
+    z_hat: Tensor<i8>,
+    region_payloads: &[Option<&[u8]>],
+    quality_map: Option<&QualityMap>,
+    max_channels: Option<u16>,
+    parallel: bool,
+    probe: Option<&Probe>,
+    stop: &dyn enough::Stop,
+) -> Result<ComponentEntropy> {
+    // Region and ANS-thread tasks check through the gate so a counting `Stop` stays exact.
+    let gate = Gate::new(stop);
+    let stop = &gate;
     stop.check()?;
+    let t_body = Tick::now();
     let comp = &hdr.components[ccs];
     let chs = model.chs;
     let (lh, lw) = hdr.latent_size(ccs);
     let (lh, lw) = (lh as usize, lw as usize);
-    let (hz, wz) = hdr.hyper_latent_size(ccs);
-
-    let z_hat = decode_z(z_dec, model, hz as usize, wz as usize)?;
-    stop.check()?;
 
     // _decode_scale + the quantiser's log-domain additions; shared with the encoder.
-    let scales = component_scales(hdr, ccs, model, &z_hat, quality_map)?;
+    let t = Tick::now();
+    let scales = component_scales_impl(
+        hdr,
+        ccs,
+        model,
+        &z_hat,
+        quality_map,
+        comp.rvs_enabled,
+        GrfsFlags::Signalled(comp.grfs_channel_flags.as_deref()),
+        parallel,
+    )?;
+    record(Probe::field(probe, ccs, |p| &p.scales), t);
     let ComponentScales {
         skip_scale_log,
         scale_log,
         ..
     } = &scales;
-    let mask = skip_mask(skip_scale_log, comp.cube_flags.as_deref())?;
+    let t = Tick::now();
+    let mask = skip_mask_par(parallel, skip_scale_log, comp.cube_flags.as_deref())?;
+    record(Probe::field(probe, ccs, |p| &p.mask), t);
 
-    // decode_y: region by region, channel chunk by channel chunk.
+    // decode_y: region by region, channel chunk by channel chunk. Regions carry their own
+    // ANS payload — they decode independently, so with several regions each becomes a task.
     let num_chs = (comp.num_chs as usize).min(chs);
     // Progressive decode (`num_decode_chs`): stop after the first channels. The chunking is
     // computed from the reduced count, like the reference does; a chunk may still end past it.
@@ -256,65 +337,95 @@ pub fn decode_component(
             "residual region count does not match the header",
         ));
     }
+    let ctx = ResidualCtx {
+        tables,
+        scale_log,
+        mask: &mask,
+        lh,
+        lw,
+        num_chs,
+        num_decode,
+        num_threads,
+        probe,
+        ccs,
+    };
     let mut residual_q = Tensor::<i16>::zeros(chs, lh, lw)?;
-    let mut sigma: Vec<u8> = Vec::new();
-    let mut coded: Vec<bool> = Vec::new();
-    let mut symbols: Vec<i16> = Vec::new();
-    for (area, payload) in grid.core.iter().zip(region_payloads) {
-        // An absent region (dropped independent substream) decodes to zeros.
-        let Some(payload) = payload else { continue };
+    if grid.core.len() == 1 {
+        // One region spans the whole plane: decode straight into it, no tile copy.
+        let area = grid.core[0];
         let (rh, rw) = (
             area.height.min(lh - area.y.min(lh)),
             area.width.min(lw - area.x.min(lw)),
         );
-        if rh == 0 || rw == 0 || num_decode == 0 {
-            continue;
+        if let (Some(payload), true) = (region_payloads[0], rh != 0 && rw != 0 && num_decode != 0) {
+            decode_region_into(
+                &ctx,
+                &mut residual_q.data,
+                lh * lw,
+                lw,
+                area,
+                area,
+                rh,
+                rw,
+                payload,
+                parallel,
+                stop,
+            )?;
         }
-        let threads = crate::container::split_threads(payload, num_threads)?;
-        let mut dec = tables.decoder(&threads)?;
-        let step = channel_step(rh, rw, num_decode, num_threads);
-        for c0 in (0..num_decode).step_by(step) {
-            stop.check()?;
-            let c1 = (c0 + step).min(num_chs);
-            let n = (c1 - c0) * rh * rw;
-            sigma.clear();
-            coded.clear();
-            sigma.reserve(n);
-            coded.reserve(n);
-            for ch in c0..c1 {
-                for y in area.y..area.y + rh {
-                    let row = (ch * lh + y) * lw + area.x;
-                    sigma.extend(
-                        scale_log.data[row..row + rw]
-                            .iter()
-                            .map(|&s| distribution_index(s)),
-                    );
-                    coded.extend_from_slice(&mask.data[row..row + rw]);
+    } else {
+        // One `[chs, rh, rw]` tile per region, decoded in parallel, then merged channel by
+        // channel (disjoint writes).
+        let tiles = par_map(parallel, grid.core.len(), |r| {
+            let area = grid.core[r];
+            let Some(payload) = region_payloads[r] else {
+                return Ok(None);
+            };
+            let (rh, rw) = (
+                area.height.min(lh - area.y.min(lh)),
+                area.width.min(lw - area.x.min(lw)),
+            );
+            if rh == 0 || rw == 0 || num_decode == 0 {
+                return Ok(None);
+            }
+            let mut tile = alloc::vec![0i16; chs * rh * rw];
+            decode_region_into(
+                &ctx,
+                &mut tile,
+                rh * rw,
+                rw,
+                Area::new(0, 0, rw, rh),
+                area,
+                rh,
+                rw,
+                payload,
+                parallel,
+                stop,
+            )?;
+            Ok(Some((tile, rh, rw)))
+        })?;
+        for_each_chunk(parallel, &mut residual_q.data, lh * lw, |ch, plane| {
+            for (r, tile) in tiles.iter().enumerate() {
+                let Some((tile, rh, rw)) = tile else { continue };
+                let area = &grid.core[r];
+                for y in 0..*rh {
+                    let d = (area.y + y) * lw + area.x;
+                    plane[d..d + rw].copy_from_slice(&tile[(ch * rh + y) * rw..][..*rw]);
                 }
             }
-            symbols.clear();
-            symbols.resize(n, 0);
-            dec.decode_residual(&sigma, &coded, &mut symbols)?;
-            let mut it = symbols.iter();
-            for ch in c0..c1 {
-                for y in area.y..area.y + rh {
-                    let row = (ch * lh + y) * lw + area.x;
-                    for d in &mut residual_q.data[row..row + rw] {
-                        *d = *it.next().unwrap_or(&0);
-                    }
-                }
-            }
-        }
+        });
     }
 
     stop.check()?;
-    let residual = dequantize_residual(&scales, quality_map, &residual_q)?;
+    let t = Tick::now();
+    let residual = dequantize_residual_impl(parallel, &scales, quality_map, &residual_q)?;
+    record(Probe::field(probe, ccs, |p| &p.dequantize), t);
     let ComponentScales {
         skip_scale_log,
         scale_log,
         likely,
         ..
     } = scales;
+    record(Probe::field(probe, ccs, |p| &p.entropy_body), t_body);
 
     Ok(ComponentEntropy {
         z_hat,
@@ -327,19 +438,122 @@ pub fn decode_component(
     })
 }
 
+/// Everything a region's residual decode needs that is shared with its siblings.
+struct ResidualCtx<'a> {
+    tables: &'a AnsTables,
+    scale_log: &'a Tensor<i32>,
+    mask: &'a Tensor<bool>,
+    /// Global plane dims (the `scale_log`/`mask` rows the gather reads).
+    lh: usize,
+    lw: usize,
+    num_chs: usize,
+    num_decode: usize,
+    num_threads: usize,
+    probe: Option<&'a Probe>,
+    ccs: usize,
+}
+
+/// One region's residual: gather `sigma`/`coded` for its `num_chs` channels at the region's
+/// place in the global planes (`gather`), then the sequential `decode_sgm` channel chunks
+/// (ANS state; internally threaded when the payload is multi-thread), and scatter the symbols
+/// into `dst` at `scatter` — indexed `dst[ch * plane_stride + (scatter.y + y) * row_stride +
+/// scatter.x + x]`, so the same routine fills a per-region tile (`plane_stride = rh*rw`,
+/// `row_stride = rw`, `scatter = (0,0)`) or a region's rectangle of the whole plane.
+#[allow(clippy::too_many_arguments)]
+fn decode_region_into(
+    ctx: &ResidualCtx<'_>,
+    dst: &mut [i16],
+    plane_stride: usize,
+    row_stride: usize,
+    scatter: Area,
+    gather: Area,
+    rh: usize,
+    rw: usize,
+    payload: &[u8],
+    inner_par: bool,
+    stop: &dyn enough::Stop,
+) -> Result<()> {
+    let threads = crate::container::split_threads(payload, ctx.num_threads)?;
+    let mut dec = ctx.tables.decoder(&threads)?;
+    dec.set_parallel(inner_par);
+    let step = channel_step(rh, rw, ctx.num_decode, ctx.num_threads);
+    let (lh, lw) = (ctx.lh, ctx.lw);
+    let (gy, gx) = (gather.y, gather.x);
+    let t = Tick::now();
+    // `sigma`/`coded` for every coded channel of the region, region-local `[ch][y][x]`.
+    let mut sigma = alloc::vec![0u8; ctx.num_chs * rh * rw];
+    let mut coded = alloc::vec![false; ctx.num_chs * rh * rw];
+    for_each_chunk(inner_par, &mut sigma, rh * rw, |ch, block| {
+        for (y, drow) in block.chunks_exact_mut(rw).enumerate() {
+            let src = (ch * lh + gy + y) * lw + gx;
+            for (d, &s) in drow.iter_mut().zip(&ctx.scale_log.data[src..src + rw]) {
+                *d = distribution_index(s);
+            }
+        }
+    });
+    for_each_chunk(inner_par, &mut coded, rh * rw, |ch, block| {
+        for (y, drow) in block.chunks_exact_mut(rw).enumerate() {
+            let src = (ch * lh + gy + y) * lw + gx;
+            drow.copy_from_slice(&ctx.mask.data[src..src + rw]);
+        }
+    });
+    record(Probe::field(ctx.probe, ctx.ccs, |p| &p.gather), t);
+
+    let t = Tick::now();
+    let (sy, sx) = (scatter.y, scatter.x);
+    let mut symbols: Vec<i16> = Vec::new();
+    for c0 in (0..ctx.num_decode).step_by(step) {
+        stop.check()?;
+        let c1 = (c0 + step).min(ctx.num_chs);
+        let n = (c1 - c0) * rh * rw;
+        symbols.clear();
+        symbols.resize(n, 0);
+        dec.decode_residual(
+            &sigma[c0 * rh * rw..][..n],
+            &coded[c0 * rh * rw..][..n],
+            &mut symbols,
+        )?;
+        // Scatter, one channel block per task: `symbols` rows are contiguous per (ch, y).
+        for_each_chunk(
+            inner_par,
+            &mut dst[c0 * plane_stride..c1 * plane_stride],
+            plane_stride,
+            |i, block| {
+                for y in 0..rh {
+                    let s = (i * rh + y) * rw;
+                    let d = (sy + y) * row_stride + sx;
+                    block[d..d + rw].copy_from_slice(&symbols[s..s + rw]);
+                }
+            },
+        );
+    }
+    record(Probe::field(ctx.probe, ctx.ccs, |p| &p.residual), t);
+    Ok(())
+}
+
 /// `quantizer.dequantize_resi` over a whole component.
 pub fn dequantize_residual(
     scales: &ComponentScales,
     quality_map: Option<&QualityMap>,
     residual_q: &Tensor<i16>,
 ) -> Result<Tensor<f32>> {
+    dequantize_residual_impl(cfg!(feature = "parallel"), scales, quality_map, residual_q)
+}
+
+/// [`dequantize_residual`], one task per channel when `parallel` holds.
+fn dequantize_residual_impl(
+    parallel: bool,
+    scales: &ComponentScales,
+    quality_map: Option<&QualityMap>,
+    residual_q: &Tensor<i16>,
+) -> Result<Tensor<f32>> {
     let (c, h, w) = (residual_q.c, residual_q.h, residual_q.w);
     let mut residual = Tensor::<f32>::zeros(c, h, w)?;
-    for ch in 0..c {
+    for_each_chunk(parallel, &mut residual.data, h * w, |ch, plane| {
         let src = residual_q.plane(ch);
-        for (i, (d, &q)) in residual.plane_mut(ch).iter_mut().zip(src).enumerate() {
+        for (i, (d, &q)) in plane.iter_mut().zip(src).enumerate() {
             *d = scales.dequantize(quality_map, ch, i, q as f32);
         }
-    }
+    });
     Ok(residual)
 }

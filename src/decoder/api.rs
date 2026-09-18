@@ -3,13 +3,14 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use enough::Stop;
 use whereat::{At, at};
 
-use super::entropy::ComponentEntropy;
 use super::limits::{Limits, MemoryEstimate};
-use super::output::{Picture, RgbImage, finish, to_source_format};
-use super::reconstruct::{post_process_latent, reconstruct_latent_with, synthesize_with};
-use super::{Headers, decode_entropy_stage_progressive, read_headers};
+use super::output::{Picture, RgbImage, finish_par, to_source_format_par};
+use super::reconstruct;
+use super::stats::{Gate, Probe, Tick, record};
+use super::{DecodeStats, Headers, decode_components, read_headers};
 use crate::container::Codestream;
 use crate::error::Error;
 use crate::filters::{self, FilterContext};
@@ -177,7 +178,17 @@ impl Decoder {
     /// Decode a codestream to whatever it holds: RGB, or YUV planes in the source's chroma
     /// subsampling (4:4:4, 4:2:2 or 4:2:0), 8 or 10 bits per sample.
     pub fn decode_picture(&self, stream: &[u8]) -> Result<Picture, At<Error>> {
-        self.decode_inner(stream, &enough::Unstoppable)
+        self.decode_inner(stream, None, &enough::Unstoppable)
+            .map(|(p, _)| p)
+    }
+
+    /// [`Decoder::decode_picture`] that also reports how long each pipeline stage took
+    /// (see [`DecodeStats`]). The decode itself is identical either way; the timers add
+    /// under a millisecond.
+    pub fn decode_picture_stats(&self, stream: &[u8]) -> Result<(Picture, DecodeStats), At<Error>> {
+        let probe = Probe::new();
+        let (picture, _) = self.decode_inner(stream, Some(&probe), &enough::Unstoppable)?;
+        Ok((picture, probe.finish()))
     }
 
     /// [`Decoder::decode_picture`] with cooperative cancellation (see [`Decoder::decode_with`]).
@@ -186,7 +197,7 @@ impl Decoder {
         stream: &[u8],
         stop: &dyn enough::Stop,
     ) -> Result<Picture, At<Error>> {
-        self.decode_inner(stream, stop)
+        self.decode_inner(stream, None, stop).map(|(p, _)| p)
     }
 
     /// [`Decoder::decode`] with cooperative cancellation.
@@ -199,7 +210,7 @@ impl Decoder {
         stream: &[u8],
         stop: &dyn enough::Stop,
     ) -> Result<RgbImage, At<Error>> {
-        match self.decode_inner(stream, stop)? {
+        match self.decode_inner(stream, None, stop)?.0 {
             Picture::Rgb(image) => Ok(image),
             Picture::Yuv(_) => Err(at!(Error::Unsupported(
                 "the stream decodes to YUV planes: use decode_picture"
@@ -216,7 +227,18 @@ impl Decoder {
         crate::nn::fast::release_buffers();
     }
 
-    fn decode_inner(&self, stream: &[u8], stop: &dyn enough::Stop) -> Result<Picture, At<Error>> {
+    fn decode_inner(
+        &self,
+        stream: &[u8],
+        probe: Option<&Probe>,
+        stop: &dyn enough::Stop,
+    ) -> Result<(Picture, ()), At<Error>> {
+        let t_total = Tick::now();
+        // Checks from pooled tasks funnel through the gate: a counting `Stop` sees the same
+        // check sequence a serial decode would produce.
+        let gate = Gate::new(stop);
+        let stop = &gate;
+        let t = Tick::now();
         stop.check().map_err(|r| at!(Error::from(r)))?;
         self.limits.check_input(stream.len()).map_err(|e| at!(e))?;
         let cs = Codestream::parse(stream).map_err(|e| at!(e))?;
@@ -231,38 +253,36 @@ impl Decoder {
                 crate::nn::fast::set_pool_limit(room);
             }
         }
+        record(probe.map(|p| &p.headers), t);
+        let t = Tick::now();
         let set = self
             .model_set(hdr.model_id as usize, op)
             .map_err(|e| at!(e))?;
+        record(probe.map(|p| &p.models), t);
         let eng = &self.engine;
 
-        let ent = decode_entropy_stage_progressive(
+        // Entropy decode, latent reconstruction and LSBS run as two per-component chains
+        // (luma ‖ chroma): chroma's entropy decode overlaps luma's reconstruction. Only the
+        // luma scale map survives the stage, and only when the post-filters read it.
+        let t = Tick::now();
+        let filters_on = headers.tools.any_post_filter();
+        let (ly, luv, luma_scale_log) = decode_components(
             &self.tables,
             &cs,
             hdr,
+            &headers.tools,
+            eng,
             [&set.common[0], &set.common[1]],
             self.max_channels,
+            filters_on,
+            probe,
             stop,
         )
         .map_err(|e| at!(e))?;
-        let [mut ent_y, mut ent_uv] = ent;
-        // Reconstruction reads the hyper-latent and the residual (LSBS also the `likely` map),
-        // the LEF reads the luma scale map; the rest of the entropy stage's output is dead.
-        let filters = headers.tools.any_post_filter();
-        shed_entropy(&mut ent_y, filters).map_err(|e| at!(e))?;
-        shed_entropy(&mut ent_uv, false).map_err(|e| at!(e))?;
-        let mut ly = reconstruct_latent_with(eng, hdr, 0, &set.common[0], &ent_y, stop)
-            .map_err(|e| at!(e))?;
-        post_process_latent(hdr, &headers.tools, 0, &ent_y, &mut ly).map_err(|e| at!(e))?;
-        ly.psi = crate::tensor::Tensor::zeros(0, 0, 0).map_err(|e| at!(e))?;
-        let luma_scale_log = ent_y.scale_log;
-        drop((ent_y.z_hat, ent_y.residual, ent_y.likely));
-        let mut luv = reconstruct_latent_with(eng, hdr, 1, &set.common[1], &ent_uv, stop)
-            .map_err(|e| at!(e))?;
-        post_process_latent(hdr, &headers.tools, 1, &ent_uv, &mut luv).map_err(|e| at!(e))?;
-        luv.psi = crate::tensor::Tensor::zeros(0, 0, 0).map_err(|e| at!(e))?;
-        drop(ent_uv);
-        let planes = synthesize_with(
+        record(probe.map(|p| &p.chains), t);
+
+        let t = Tick::now();
+        let planes = reconstruct::synthesize_with(
             eng,
             hdr,
             &set.luma,
@@ -272,9 +292,13 @@ impl Decoder {
         )
         .map_err(|e| at!(e))?;
         drop((ly, luv));
+        record(probe.map(|p| &p.synthesis), t);
         // Coded chroma format -> source chroma format, then the post-filters, then colour.
-        let planes = to_source_format(hdr, planes).map_err(|e| at!(e))?;
-        let planes = if headers.tools.any_post_filter() {
+        let t = Tick::now();
+        let planes = to_source_format_par(eng.parallel, hdr, planes).map_err(|e| at!(e))?;
+        record(probe.map(|p| &p.chroma), t);
+        let t = Tick::now();
+        let planes = if filters_on {
             let ctx = FilterContext {
                 eng,
                 hdr,
@@ -289,18 +313,13 @@ impl Decoder {
         } else {
             planes
         };
+        drop(luma_scale_log);
+        record(probe.map(|p| &p.filters), t);
+        let t = Tick::now();
         stop.check().map_err(|r| at!(Error::from(r)))?;
-        finish(hdr, &planes).map_err(|e| at!(e))
+        let picture = finish_par(eng.parallel, hdr, &planes).map_err(|e| at!(e))?;
+        record(probe.map(|p| &p.output), t);
+        record(probe.map(|p| &p.total), t_total);
+        Ok((picture, ()))
     }
-}
-
-/// Free the entropy-stage tensors nothing downstream reads.
-fn shed_entropy(e: &mut ComponentEntropy, keep_scale_log: bool) -> Result<(), Error> {
-    e.skip_scale_log = crate::tensor::Tensor::zeros(0, 0, 0)?;
-    e.mask = crate::tensor::Tensor::zeros(0, 0, 0)?;
-    e.residual_q = crate::tensor::Tensor::zeros(0, 0, 0)?;
-    if !keep_scale_log {
-        e.scale_log = crate::tensor::Tensor::zeros(0, 0, 0)?;
-    }
-    Ok(())
 }
