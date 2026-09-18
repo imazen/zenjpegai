@@ -176,6 +176,8 @@ impl<'a> Checkpoint<'a> {
                 "tensor `{name}`: shape/stride rank mismatch"
             )));
         }
+        // Without the `pth` feature `Backing` has one variant, and clippy asks for a `let`.
+        #[allow(clippy::infallible_destructuring_match)]
         let storage = match &self.backing {
             #[cfg(feature = "pth")]
             Backing::Torch { archive, prefix } => archive
