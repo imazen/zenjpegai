@@ -46,6 +46,7 @@ OPTIONS:
     --diff-display <w,h>  encode: do not display the last w columns / h rows
     --rvs --grfs       encode: residual variance scaling / channel gain flags
     --lsbs             encode: latent scaling before synthesis (a decoder-side tool)
+    --lef              encode: signal the luma edge post-filter (LEF_chIdx is derived)
     --ans-threads <n>  encode: ANS threads per substream (1, 2, 4, 8 or 16)
     --regions <mode>   encode: region partitioning, `dependent` or `independent` (large
                        pictures only; the grid follows the picture size)
@@ -84,6 +85,7 @@ struct Args {
     rvs: bool,
     grfs: bool,
     lsbs: bool,
+    lef: bool,
     ans_threads: u8,
     regions: Option<zenjpegai::encoder::RegionMode>,
     quality_map: Option<PathBuf>,
@@ -113,6 +115,7 @@ fn parse_args() -> Result<Args, String> {
         rvs: false,
         grfs: false,
         lsbs: false,
+        lef: false,
         ans_threads: 1,
         regions: None,
         quality_map: None,
@@ -166,6 +169,7 @@ fn parse_args() -> Result<Args, String> {
             "--rvs" => a.rvs = true,
             "--grfs" => a.grfs = true,
             "--lsbs" => a.lsbs = true,
+            "--lef" => a.lef = true,
             "--ans-threads" => {
                 a.ans_threads = value("--ans-threads")?
                     .parse()
@@ -346,6 +350,7 @@ fn run() -> Result<(), String> {
                 rvs: args.rvs,
                 grfs: args.grfs,
                 lsbs: args.lsbs,
+                lef: args.lef,
                 num_threads_z: args.ans_threads,
                 num_threads_r: args.ans_threads,
                 regions: args.regions,

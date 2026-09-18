@@ -284,6 +284,14 @@ const VECTORS_TOOLS: &[ToolVector] = &[
         |p| EncodeParams { lsbs: true, ..p },
     ),
     (
+        "enc_img30_bop_m1_b0_lef",
+        IMG30,
+        1,
+        OperatingPoint::Bop,
+        0,
+        |p| EncodeParams { lef: true, ..p },
+    ),
+    (
         "enc_img30_bop_m1_b0_qmap",
         IMG30,
         1,
@@ -704,6 +712,64 @@ fn reference_decoder_accepts_our_streams() {
         );
         assert!(worst <= 1, "{vector}: reference decode differs by {worst}");
     }
+}
+
+/// `LEF.analyze`: the reference channel is the channel of the luma `scale_log` with the
+/// highest mean. Checked against the reference encoder's own choice on the fixed-model LEF
+/// vector (dumped by `dump_encode.py --lef` as `lef.ch_idx`, with `lef.avg_sig` holding the
+/// per-channel means it chose from), and against the `LEF_chIdx` signalled on the
+/// rate-matched LEF streams (their scale map comes from the decoder dump — the entropy stage
+/// is integer-exact, so it is the map the reference encoder's `analyze` saw).
+#[test]
+fn lef_channel_matches_reference() {
+    use zenjpegai::encoder::filters::lef::reference_channel;
+    let mut ran = 0;
+
+    let dir = vector_dir("enc_img30_bop_m1_b0_lef");
+    if dir.join("enc2/enc_manifest.txt").is_file() {
+        let dump = load_encoder_dump(&dir.join("enc2"));
+        let s = &dump["y.scale_log"];
+        let scale_log = Tensor::from_vec(s.shape[1], s.shape[2], s.shape[3], s.i32()).unwrap();
+        let want = dump["lef.ch_idx"].i32()[0];
+        let got = reference_channel(&scale_log).unwrap();
+        assert_eq!(got as i32, want, "enc_img30_bop_m1_b0_lef: LEF_chIdx");
+        // The means the argmax sees are torch's (`scale_log.float()` then `mean`): the planes
+        // are small enough that the f32 sums are exact, so they must agree bit for bit.
+        let n = (scale_log.h * scale_log.w) as f32;
+        for (ch, &w) in dump["lef.avg_sig"].f32().iter().enumerate() {
+            let m = scale_log.plane(ch).iter().map(|&v| v as f32).sum::<f32>() / n;
+            assert_eq!(m.to_bits(), w.to_bits(), "lef.avg_sig[{ch}]");
+        }
+        ran += 1;
+    }
+
+    for name in [
+        "img30_base_lef_bpp050",
+        "img30_base_on_bpp025",
+        "img30_base_on_bpp100",
+        "img01_base_eiccitiles_lef_bpp050",
+    ] {
+        let dir = vector_dir(name);
+        if !dir.join("manifest.txt").is_file() {
+            continue;
+        }
+        let stream = std::fs::read(dir.join("stream.bits")).unwrap();
+        let headers = zenjpegai::decoder::read_headers(
+            &zenjpegai::container::Codestream::parse(&stream).unwrap(),
+        )
+        .unwrap();
+        let want = headers
+            .tools
+            .lef_channel
+            .expect("{name}: stream without LEF");
+        let dump = common::load_dump(&dir);
+        let s = &dump["y.scale_log"];
+        let scale_log = Tensor::from_vec(s.shape[1], s.shape[2], s.shape[3], s.i32()).unwrap();
+        let got = reference_channel(&scale_log).unwrap();
+        assert_eq!(got, want, "{name}: LEF_chIdx");
+        ran += 1;
+    }
+    assert!(ran > 0, "no LEF vectors on disk");
 }
 
 /// Rate matching: the model and displacement `--bpp` settles on, against the reference

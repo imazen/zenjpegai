@@ -27,6 +27,11 @@
   stream is conformant; the 4:2:0 one deliberately carries `icci_enable_flag` in a position
   the grammar does not have, so the dump scripts patch the reference decoder at runtime
   (`--patch-icci420`) and the tests rebuild the header — PORTING.md has the details.
+- Encoder: the LEF post-filter's share (`EncodeParams::lef`, `zenjpegai encode --lef`) — the
+  reference channel `LEF_chIdx` is derived from the luma scale map as `LEF.analyze` does it
+  (`encoder::filters::lef`; the filter itself stays decoder-side, the reference runs it after
+  the rate loop). The new fixed-model vector `enc_img30_bop_m1_b0_lef` encodes byte-identical
+  to the reference's, and the chosen channel matches the reference on all five LEF streams.
 - Cube-flag decode coverage: the encoder-set streams `enc_img30_bop_m0_bm1069` and
   `enc_img30_hop_m3_bm1069` (beta displacement -1069, `use_cube_flags = 1` with false flags,
   incl. a cleared `cube_group_flag`) now carry reference decoder dumps

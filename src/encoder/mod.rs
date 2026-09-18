@@ -8,15 +8,18 @@
 //!
 //! What is ported: a fixed model and operating point, one analysis tile, one region, one ANS
 //! thread per substream, tools off; RGB or planar-YUV sources at 4:4:4 / 4:2:2 / 4:2:0, coded
-//! at any of them, 8- and 10-bit. What is not: analysis tiling (pictures above ~1 MP),
-//! regions, rate matching (`--bpp`), RVS / GRFS / LSBS / quality maps / post-filters. See
-//! `PORTING.md`.
+//! at any of them, 8- and 10-bit. What is not: the EFE / eICCI post-filters (the LEF is
+//! signalled, `EncodeParams::lef`). See `PORTING.md`.
 
 // The per-channel loops index several parallel arrays with one counter, like the reference's
 // tensor expressions; an iterator chain over one of them would hide that.
 #![allow(clippy::needless_range_loop)]
 
 mod colour;
+#[cfg(feature = "unstable-internals")]
+pub mod filters;
+#[cfg(not(feature = "unstable-internals"))]
+pub(crate) mod filters;
 mod rate;
 mod resample;
 mod tiles;
@@ -101,6 +104,11 @@ pub struct EncodeParams {
     /// Non-displayed columns / rows on the right / bottom (`diff_display_img_width` /
     /// `_height`): coded but cropped on output.
     pub diff_display: (u8, u8),
+    /// LEF, the luma edge post-filter (`cfg/tools/LEF.json`). The encoder's share of it is the
+    /// reference channel `LEF_chIdx`, signalled in the tool header; the filter itself is
+    /// decoder-side only (`crate::filters::lef`) — the reference applies it to the
+    /// reconstruction once, after the rate loop (`coding_engine.py::compress`).
+    pub lef: bool,
 }
 
 /// How a region's residual reaches the codestream
@@ -148,6 +156,7 @@ impl Default for EncodeParams {
             c_ver: None,
             c_hor: None,
             diff_display: (0, 0),
+            lef: false,
         }
     }
 }
@@ -847,6 +856,12 @@ impl Encoder {
         out.substream(Marker::Pih, &hdr.write()?)?;
         let tools = ToolHeader {
             lsbs_enabled: [params.lsbs; 2],
+            // `LEF.compress` -> `analyze`: the channel of the luma scale map with the highest
+            // mean. The filter itself runs on the decoder; nothing else about it is coded.
+            lef_channel: params
+                .lef
+                .then(|| filters::lef::reference_channel(&components[0].scales.scale_log))
+                .transpose()?,
             ..ToolHeader::default()
         };
         out.substream(Marker::Ton, &tools.write(&hdr)?)?;

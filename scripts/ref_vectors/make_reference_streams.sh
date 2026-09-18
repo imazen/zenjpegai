@@ -269,7 +269,7 @@ if [ "$SET" = encoder ] || [ "$SET" = all ]; then
     if [ -f "$dir/enc2/enc_manifest.txt" ]; then echo "== $name: exists"; return; fi
     mkdir -p "$dir/enc2"
     echo "== $name: encoding + dumping analysis side, fixed model $tool beta_disp $beta"
-    nice -n 19 python "$HERE/dump_encode.py" "$dir/enc2" --enc2 -- "data/test/$image" "$dir/stream.bits" \
+    nice -n 19 python "$HERE/dump_encode.py" "$dir/enc2" --enc2 --lef -- "data/test/$image" "$dir/stream.bits" \
         --cfg "$@" -target_device cpu -model.bitrate_matcher.enabled 0 \
         -model.bitrate_matcher.target_tool_idx "$tool" -model.bitrate_matcher.target_beta_disp_Y "$beta" \
         > "$dir/encoder.log" 2>&1
@@ -293,6 +293,7 @@ if [ "$SET" = encoder ] || [ "$SET" = all ]; then
   enc_fixed enc_img30_bop_m1_b0_rvsonly $IMG30 1 0 cfg/tools_off.json "$HERE/cfg/rvs_only.json" cfg/profiles/base.json
   enc_fixed enc_img30_bop_m1_b0_grfsonly $IMG30 1 0 cfg/tools_off.json "$HERE/cfg/grfs_only.json" cfg/profiles/base.json
   enc_fixed enc_img30_bop_m1_b0_lsbs $IMG30 1 0 cfg/tools_off.json cfg/tools/LSBS.json cfg/profiles/base.json
+  enc_fixed enc_img30_bop_m1_b0_lef $IMG30 1 0 cfg/tools_off.json cfg/tools/LEF.json cfg/profiles/base.json
   enc_fixed enc_img01_bop_m1_b0_depregions $IMG01 1 0 cfg/tools_off.json cfg/tools/DependentRegions.json cfg/profiles/base.json
   enc_fixed enc_img01_bop_m1_b0_indregions $IMG01 1 0 cfg/tools_off.json cfg/tools/IndependentRegions.json cfg/profiles/base.json
   # Quality map: the same ROI mask the `qmap` set uses (drawn here so the sets are independent).

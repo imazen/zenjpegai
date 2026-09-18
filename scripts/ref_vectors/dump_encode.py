@@ -3,10 +3,12 @@
 
 Run inside the reference venv, from the reference checkout:
 
-    python ~/work/zen/zenjpegai/scripts/ref_vectors/dump_encode.py OUT_DIR [--enc2] -- <encoder args...>
+    python ~/work/zen/zenjpegai/scripts/ref_vectors/dump_encode.py OUT_DIR [--enc2] [--lef] -- <encoder args...>
 
 With `--enc2` (use a separate OUT_DIR such as `<vector>/enc2`) the dump also holds the latent `y`,
 `psi`, the cube flags and every analysis / hyper-encoder call's input and output.
+With `--lef` the dump additionally holds `lef.ch_idx` (the channel the LEF's `analyze` chose,
+scalar) and `lef.avg_sig` (the per-channel means it chose from), if the stream enables the LEF.
 
 where <encoder args> are exactly what `python -m src.reco.coders.encoder` takes (input image,
 output .bits, --cfg ..., overrides). OUT_DIR receives `enc_tensors.bin` + `enc_manifest.txt` in the
@@ -64,6 +66,25 @@ def install_enc2_hooks(calls):
     register_module_forward_hook(hook)
 
 
+def install_lef_hook(calls):
+    """`--lef`: record the LEF's channel choice (`LEF.analyze`) and the per-channel means of the
+    luma `scale_log` it chooses from, as `lef.ch_idx` / `lef.avg_sig`. Nothing is recorded for a
+    stream that does not enable the filter (`analyze` is only called from `LEF.compress`)."""
+    from src.codec.coding_tools.filters.LEF.LEFfilter import LEF
+
+    orig = LEF.analyze
+
+    def analyze(self, decisions):
+        idx = orig(self, decisions)
+        scale_log = decisions.get("scale_log", None)
+        calls.append(("lef.ch_idx", torch.tensor([idx], dtype=torch.int32)))
+        if isinstance(scale_log, torch.Tensor):
+            calls.append(("lef.avg_sig", torch.mean(scale_log.float(), dim=[2, 3]).detach().cpu()))
+        return idx
+
+    LEF.analyze = analyze
+
+
 def main():
     sep = sys.argv.index("--")
     out_dir, enc_args = sys.argv[1], sys.argv[sep + 1:]
@@ -71,6 +92,9 @@ def main():
     enc2_calls = []
     if enc2:
         install_enc2_hooks(enc2_calls)
+    lef_calls = []
+    if "--lef" in sys.argv[2:sep]:
+        install_lef_hook(lef_calls)
     os.makedirs(out_dir, exist_ok=True)
     base_parser = enc_mod.def_base_parser()
     coder = RecoEncoder(base_parser, enc_mod.def_encoder_parser_decorator(base_parser))
@@ -111,7 +135,7 @@ def main():
                 lines.append(f"{comp}.{name} {tag} {t.dim()} {dims} {offset} {len(raw)}")
                 blob.write(raw)
                 offset += len(raw)
-        for name, t in enc2_calls:
+        for name, t in enc2_calls + lef_calls:
             t = t.cpu().contiguous()
             tag, npdt = DTYPES[t.dtype]
             raw = t.numpy().astype(npdt, copy=False).tobytes()
