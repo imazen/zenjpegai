@@ -8,6 +8,11 @@
 //! predicts a mean from the `s`-th quarter of `psi` and from every stage reconstructed so far;
 //! the stage's latent is `residual + mean`.
 
+// The stage loops walk a channel index across several parallel arrays (a blocked mean, a planar
+// latent, a planar mask, a per-channel scaler); an iterator chain over one of them would hide
+// that correspondence.
+#![allow(clippy::needless_range_loop)]
+
 use alloc::format;
 use alloc::vec::Vec;
 
@@ -186,6 +191,189 @@ impl ContextModel {
             });
         }
         Ok(y_hat)
+    }
+}
+
+/// Skip mode's spatial cube edge, in down-shuffled (half resolution) latent samples.
+pub const CUBE_SIZE: usize = 8;
+
+/// `quant_dequant` for the gain unit alone: `round_ties_even(clamp(x * scaler))`, then
+/// `q / (scaler + 1e-9)`. `coded == false` forces the symbol to zero (skip mode).
+#[inline]
+pub fn quantise(x: f32, scaler: f32, coded: bool) -> (i16, f32) {
+    // quantize_resi, then mask2, then the int16 clamp, then round half to even.
+    let q = if coded {
+        (x * scaler).clamp(-32768.0, 32767.0).round_ties_even()
+    } else {
+        0.0
+    };
+    (q as i16, q / (scaler + 1e-9f32))
+}
+
+/// Encoder-side output of one component's residual quantisation.
+#[derive(Clone, Debug)]
+pub struct Compressed {
+    pub residual_q: Tensor<i16>,
+    /// Dequantised residual: what the decoder recovers.
+    pub residual: Tensor<f32>,
+    /// Skip-mode cube flags, `[phase][cube_y][cube_x]` with phases in raster order
+    /// ((0,0), (0,1), (1,0), (1,1)); `true` = the cube may be skipped. Exactly the layout
+    /// [`crate::header::ComponentHeader::cube_flags`] and [`crate::tools::skip::skip_mask`] use.
+    pub cube_flag: Vec<bool>,
+}
+
+/// Maximum of `err` over each `CUBE_SIZE x CUBE_SIZE` block of every channel, thresholded:
+/// `gen_skip_cubeflag`'s 3-D max-pool over (all channels, 8, 8). `err` is `[C, h, w]` on the
+/// down-shuffled grid; the result is `[cube_h][cube_w]`, `true` = the cube may be skipped.
+fn cube_flags_of(err: &Tensor<f32>, thr: f32) -> Vec<bool> {
+    let (cube_h, cube_w) = (err.h.div_ceil(CUBE_SIZE), err.w.div_ceil(CUBE_SIZE));
+    let mut flags = alloc::vec![true; cube_h * cube_w];
+    for ch in 0..err.c {
+        let plane = err.plane(ch);
+        for y in 0..err.h {
+            let row = &plane[y * err.w..][..err.w];
+            let fy = (y / CUBE_SIZE) * cube_w;
+            for (x, &e) in row.iter().enumerate() {
+                if e > thr {
+                    flags[fy + x / CUBE_SIZE] = false;
+                }
+            }
+        }
+    }
+    flags
+}
+
+/// `_mask_redundant_padding_*`: the row / column that only exists because an odd-sized latent was
+/// padded to even carries no information; stages 1 and 3 own the padded row, 1 and 2 the padded
+/// column.
+#[inline]
+fn is_padding(stage: usize, h: usize, w: usize, hh: usize, hw: usize, y: usize, x: usize) -> bool {
+    (h % 2 == 1 && matches!(stage, 1 | 3) && y + 1 == hh)
+        || (w % 2 == 1 && matches!(stage, 1 | 2) && x + 1 == hw)
+}
+
+impl ContextModel {
+    /// `Context.forward` / `pred` in the encoder direction: quantise `y - mean` stage by stage,
+    /// deriving each stage's skip-mode cube flags from its own reconstruction error and
+    /// re-quantising with the cubes it must not skip.
+    ///
+    /// `scaler` is the gain unit's per-channel linear scaler; RVS and the quality map are not
+    /// ported on this side yet (they multiply per position, see
+    /// [`crate::decoder::entropy::ComponentScales::quantize`]).
+    #[allow(clippy::too_many_arguments)]
+    pub fn compress(
+        &self,
+        eng: &Engine,
+        y: &Tensor<f32>,
+        psi: &BTensor,
+        scaler: &[f32],
+        mask: &Tensor<bool>,
+        cube_thr: f32,
+        stop: &dyn enough::Stop,
+    ) -> Result<Compressed> {
+        let (c, h, w) = (self.chs, y.h, y.w);
+        let (hh, hw) = (h.div_ceil(2), w.div_ceil(2));
+        if y.c != c
+            || mask.c != c
+            || mask.h != h
+            || mask.w != w
+            || psi.c != 4 * c
+            || psi.h != hh
+            || psi.w != hw
+            || scaler.len() < c
+        {
+            return Err(Error::InvalidArgument(
+                "context model: y / psi / mask shape mismatch",
+            ));
+        }
+        let v = psi.v;
+        let mut residual_q = Tensor::<i16>::zeros(c, h, w)?;
+        let mut residual = Tensor::<f32>::zeros(c, h, w)?;
+        let (cube_h, cube_w) = (hh.div_ceil(CUBE_SIZE), hw.div_ceil(CUBE_SIZE));
+        let mut cube_flag = alloc::vec![true; 4 * cube_h * cube_w];
+        let mut err = Tensor::<f32>::zeros(c, hh, hw)?;
+        let mut diff = Tensor::<f32>::zeros(c, hh, hw)?;
+        let mut coded = Tensor::<bool>::zeros(c, hh, hw)?;
+
+        let mut context: Option<BTensor> = None;
+        for (s, phase) in self.phases.iter().enumerate() {
+            stop.check()?;
+            let psi_s = psi.slice_channels(s * c, (s + 1) * c)?;
+            let mut stage = match (&phase.context, &context) {
+                (Some((pointwise, grouped)), Some(ctx)) => {
+                    let t = grouped.forward(eng, &pointwise.forward(eng, ctx)?)?;
+                    phase.fusion.forward(eng, &BTensor::cat(&[&t, &psi_s])?)?
+                }
+                _ => phase.fusion.forward(eng, &psi_s)?,
+            };
+            let (py, px) = STAGE_POSITIONS[s];
+
+            // Pass 1: quantise with the sigma-threshold mask only, and record the error the
+            // cube flags are decided on (zeroed on the padded row / column).
+            for ch in 0..c {
+                let (b, lane) = (ch / v, ch % v);
+                for yy in 0..hh {
+                    let sy = 2 * yy + py;
+                    let row = &stage.data[(b * hh + yy) * hw * v..][..hw * v];
+                    for xx in 0..hw {
+                        let sx = 2 * xx + px;
+                        // F.pad(y, ..) fills the padded row / column with zero, and the padded
+                        // positions of the mask with false.
+                        let inside = sy < h && sx < w;
+                        let m = inside && mask.data[(ch * h + sy) * w + sx];
+                        let d = if inside {
+                            y.data[(ch * h + sy) * w + sx] - row[xx * v + lane]
+                        } else {
+                            -row[xx * v + lane]
+                        };
+                        let i = (ch * hh + yy) * hw + xx;
+                        diff.data[i] = d;
+                        coded.data[i] = m;
+                        let (_, dq) = quantise(d, scaler[ch], m);
+                        err.data[i] = if is_padding(s, h, w, hh, hw, yy, xx) {
+                            0.0
+                        } else {
+                            (dq - d).abs()
+                        };
+                    }
+                }
+            }
+            let flags = cube_flags_of(&err, cube_thr);
+            // Stage -> raster phase channel: (0,0), (1,1), (0,1), (1,0) -> 0, 3, 1, 2.
+            let out_phase = py * 2 + px;
+            cube_flag[out_phase * cube_h * cube_w..][..cube_h * cube_w].copy_from_slice(&flags);
+
+            // Pass 2: the cubes that must not be skipped join the mask.
+            for ch in 0..c {
+                let (b, lane) = (ch / v, ch % v);
+                for yy in 0..hh {
+                    let sy = 2 * yy + py;
+                    let row = &mut stage.data[(b * hh + yy) * hw * v..][..hw * v];
+                    for xx in 0..hw {
+                        let sx = 2 * xx + px;
+                        let i = (ch * hh + yy) * hw + xx;
+                        let cube = flags[(yy / CUBE_SIZE) * cube_w + xx / CUBE_SIZE];
+                        let code = (coded.data[i] || !cube) && !is_padding(s, h, w, hh, hw, yy, xx);
+                        let (q, dq) = quantise(diff.data[i], scaler[ch], code);
+                        let val = &mut row[xx * v + lane];
+                        *val += dq;
+                        if sy < h && sx < w {
+                            residual_q.data[(ch * h + sy) * w + sx] = q;
+                            residual.data[(ch * h + sy) * w + sx] = dq;
+                        }
+                    }
+                }
+            }
+            context = Some(match context {
+                None => stage,
+                Some(ctx) => BTensor::cat(&[&ctx, &stage])?,
+            });
+        }
+        Ok(Compressed {
+            residual_q,
+            residual,
+            cube_flag,
+        })
     }
 }
 

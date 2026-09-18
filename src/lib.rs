@@ -15,6 +15,8 @@ pub mod bitio;
 pub mod codec;
 pub mod container;
 pub mod decoder;
+#[cfg(feature = "std")]
+pub mod encoder;
 mod error;
 pub mod filters;
 pub mod header;
@@ -29,4 +31,6 @@ pub mod weights;
 pub use decoder::Decoder;
 pub use decoder::limits::{Limits, MemoryEstimate, estimate_memory};
 pub use decoder::output::{Picture, RgbImage, YuvImage};
+#[cfg(feature = "std")]
+pub use encoder::{EncodeParams, Encoder};
 pub use error::Error;

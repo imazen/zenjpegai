@@ -44,15 +44,103 @@ pub struct ComponentEntropy {
     pub residual: Tensor<f32>,
 }
 
+/// The scale maps of one component, and the quantiser state derived with them.
+///
+/// Ports `CommonEncDecModules.encoder_get_scales` / the first half of `decode_y`; both
+/// directions must derive these identically, so both call [`component_scales`].
+pub struct ComponentScales {
+    /// Sigma indices (Q7) driving skip mode: hyper-scale decoder plus the gain unit (plus the
+    /// quality map).
+    pub skip_scale_log: Tensor<i32>,
+    /// Sigma indices driving the entropy coder: [`Self::skip_scale_log`] plus RVS / GRFS.
+    pub scale_log: Tensor<i32>,
+    /// Block-wise mean of `skip_scale_log` as a [`crate::tools::log2lin`] index.
+    pub likely: Tensor<u16>,
+    pub gain: GainUnit,
+    pub rvs: Option<Rvs>,
+}
+
+impl ComponentScales {
+    /// `quantizer.dequantize_resi`: the tools in reverse order (RVS, quality map, gain unit).
+    #[inline]
+    pub fn dequantize(&self, quality_map: Option<&QualityMap>, ch: usize, i: usize, q: f32) -> f32 {
+        let mut x = q;
+        if let Some(r) = &self.rvs {
+            x = r.dequantize(ch, self.likely.plane(ch)[i], x);
+        }
+        if let Some(m) = quality_map {
+            x = m.dequantize(i, x);
+        }
+        self.gain.dequantize(ch, x)
+    }
+
+    /// `quantizer.quantize_resi`: the tools in forward order (gain unit, quality map, RVS).
+    ///
+    /// Only the gain unit is ported on the encoder side so far; the others return `None`.
+    #[inline]
+    pub fn quantize(&self, quality_map: Option<&QualityMap>, ch: usize, x: f32) -> Option<f32> {
+        if self.rvs.is_some() || quality_map.is_some() {
+            return None;
+        }
+        Some(x * self.gain.scaler[ch])
+    }
+}
+
+/// `_decode_scale` + `encoder_get_scales`: hyper-scale decoder, gain unit, quality map, the
+/// block-wise `likely` map, then RVS / GRFS. Identical in both directions.
+pub fn component_scales(
+    hdr: &PictureHeader,
+    ccs: usize,
+    model: &CommonModel,
+    z_hat: &Tensor<i8>,
+    quality_map: Option<&QualityMap>,
+) -> Result<ComponentScales> {
+    let comp = &hdr.components[ccs];
+    let (lh, lw) = hdr.latent_size(ccs);
+    let gain = GainUnit::new(&model.gain_vector_log, hdr.beta_displacement_log[ccs]);
+    let mut skip_scale_log = model
+        .hsd
+        .forward(z_hat, lh as usize, lw as usize, SIGMA_IDX_MAX)?;
+    for (ch, &add) in gain.scaler_log.iter().enumerate() {
+        if !(-(1 << 13)..(1 << 13)).contains(&add) {
+            return Err(Error::InvalidData("log-domain scaler out of range"));
+        }
+        for v in skip_scale_log.plane_mut(ch) {
+            *v += add;
+        }
+    }
+    if let Some(q) = quality_map {
+        q.adjust_scale(&mut skip_scale_log)?;
+    }
+    let likely = rvs::likely(&skip_scale_log)?;
+    let rvs = Rvs::new(
+        hdr.model_id as usize,
+        model.chs,
+        comp.rvs_enabled,
+        comp.grfs_channel_flags.as_deref(),
+    )?;
+    let mut scale_log = skip_scale_log.clone();
+    if let Some(r) = &rvs {
+        r.adjust_scale(&mut scale_log, &likely);
+    }
+    Ok(ComponentScales {
+        skip_scale_log,
+        scale_log,
+        likely,
+        gain,
+        rvs,
+    })
+}
+
 /// `GMProbModel.build_indexes`: sigma index (Q7) → distribution number, round to nearest.
 #[inline]
-fn distribution_index(scale_log: i32) -> u8 {
+pub fn distribution_index(scale_log: i32) -> u8 {
     let half = 1 << (SIGMA_PRECISION - 1);
     ((scale_log + half) >> SIGMA_PRECISION).clamp(0, SIGMA_LEVELS - 1) as u8
 }
 
 /// `_cal_step_size`: channels per `decode_sgm` call for a region of `lh * lw` positions.
-fn channel_step(lh: usize, lw: usize, num_chs: usize, num_threads: usize) -> usize {
+pub fn channel_step(lh: usize, lw: usize, num_chs: usize, num_threads: usize) -> usize {
     let delta = num_threads * 4;
     (1..=num_chs)
         .find(|item| (lh * lw * item).is_multiple_of(delta))
@@ -99,34 +187,14 @@ pub fn decode_component(
     let z_hat = decode_z(z_dec, model, hz as usize, wz as usize)?;
     stop.check()?;
 
-    // _decode_scale: hyper-scale decoder, then the quantiser's log-domain additions (gain unit).
-    let gain = GainUnit::new(&model.gain_vector_log, hdr.beta_displacement_log[ccs]);
-    let mut skip_scale_log = model.hsd.forward(&z_hat, lh, lw, SIGMA_IDX_MAX)?;
-    for (ch, &add) in gain.scaler_log.iter().enumerate() {
-        if !(-(1 << 13)..(1 << 13)).contains(&add) {
-            return Err(Error::InvalidData("log-domain scaler out of range"));
-        }
-        for v in skip_scale_log.plane_mut(ch) {
-            *v += add;
-        }
-    }
-    // quantizer.analyze + quantize_scale(incl rvs): the block-wise "likely" map is always built
-    // (LSBS reads it too); RVS / GRFS shift the scales the residual was coded with.
-    if let Some(q) = quality_map {
-        q.adjust_scale(&mut skip_scale_log)?;
-    }
-    let likely = rvs::likely(&skip_scale_log)?;
-    let rvs = Rvs::new(
-        hdr.model_id as usize,
-        chs,
-        comp.rvs_enabled,
-        comp.grfs_channel_flags.as_deref(),
-    )?;
-    let mut scale_log = skip_scale_log.clone();
-    if let Some(r) = &rvs {
-        r.adjust_scale(&mut scale_log, &likely);
-    }
-    let mask = skip_mask(&skip_scale_log, comp.cube_flags.as_deref())?;
+    // _decode_scale + the quantiser's log-domain additions; shared with the encoder.
+    let scales = component_scales(hdr, ccs, model, &z_hat, quality_map)?;
+    let ComponentScales {
+        skip_scale_log,
+        scale_log,
+        ..
+    } = &scales;
+    let mask = skip_mask(skip_scale_log, comp.cube_flags.as_deref())?;
 
     // decode_y: region by region, channel chunk by channel chunk.
     let num_chs = (comp.num_chs as usize).min(chs);
@@ -192,28 +260,13 @@ pub fn decode_component(
     }
 
     stop.check()?;
-    let mut residual = Tensor::<f32>::zeros(chs, lh, lw)?;
-    // dequantize_resi runs the tools in reverse: RVS, then the quality map, then the gain unit.
-    for ch in 0..chs {
-        let src = residual_q.plane(ch);
-        let lk = likely.plane(ch);
-        for (i, ((d, &q), &l)) in residual
-            .plane_mut(ch)
-            .iter_mut()
-            .zip(src)
-            .zip(lk)
-            .enumerate()
-        {
-            let mut x = q as f32;
-            if let Some(r) = &rvs {
-                x = r.dequantize(ch, l, x);
-            }
-            if let Some(m) = quality_map {
-                x = m.dequantize(i, x);
-            }
-            *d = gain.dequantize(ch, x);
-        }
-    }
+    let residual = dequantize_residual(&scales, quality_map, &residual_q)?;
+    let ComponentScales {
+        skip_scale_log,
+        scale_log,
+        likely,
+        ..
+    } = scales;
 
     Ok(ComponentEntropy {
         z_hat,
@@ -224,4 +277,21 @@ pub fn decode_component(
         residual_q,
         residual,
     })
+}
+
+/// `quantizer.dequantize_resi` over a whole component.
+pub fn dequantize_residual(
+    scales: &ComponentScales,
+    quality_map: Option<&QualityMap>,
+    residual_q: &Tensor<i16>,
+) -> Result<Tensor<f32>> {
+    let (c, h, w) = (residual_q.c, residual_q.h, residual_q.w);
+    let mut residual = Tensor::<f32>::zeros(c, h, w)?;
+    for ch in 0..c {
+        let src = residual_q.plane(ch);
+        for (i, (d, &q)) in residual.plane_mut(ch).iter_mut().zip(src).enumerate() {
+            *d = scales.dequantize(quality_map, ch, i, q as f32);
+        }
+    }
+    Ok(residual)
 }

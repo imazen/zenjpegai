@@ -1,4 +1,5 @@
-//! Command line front end: `zenjpegai decode in.bits out.png`, `zenjpegai info in.bits`.
+//! Command line front end: `zenjpegai encode in.png out.bits`, `zenjpegai decode in.bits
+//! out.png`, `zenjpegai info in.bits`.
 
 #![forbid(unsafe_code)]
 
@@ -17,12 +18,13 @@ const UPSTREAM_NOTICE: &str = concat!(
     "repacked without modification by zenjpegai.\n\n",
     include_str!("../../upstream-notices/LICENSE")
 );
-use zenjpegai::{Decoder, Picture};
+use zenjpegai::{Decoder, EncodeParams, Encoder, Picture};
 
 const USAGE: &str = "\
 zenjpegai - JPEG AI (ISO/IEC 6048) codec
 
 USAGE:
+    zenjpegai encode <in.png> <out.bits> [--model <0..3>] [--beta-disp <n>] [--op <sop|bop|hop>]
     zenjpegai decode <in.bits> <out.png | out.yuv> [options]
     zenjpegai info <in.bits>
     zenjpegai pack-models --models <dir> --out <file.zjb> [--model <0..3>]... [--op <sop|bop|hop>]...
@@ -32,7 +34,9 @@ USAGE:
 OPTIONS:
     --models <path>    directory of upstream checkpoints (the reference software's models/), or a
                        packed bundle written by `pack-models`; default: $ZENJPEGAI_MODELS
-    --op <sop|bop|hop> synthesis transform (default: the stream's first listed one)
+    --op <sop|bop|hop> encode: the operating point to code for (default: bop). decode: the
+                       synthesis transform to use (default: the stream's first listed one)
+    --beta-disp <n>    encode: quantiser displacement, -1069..702 (default 0; lower = lower rate)
     --max-channels <y,uv>  progressive decode: read only the first latent channels
     --single-thread    do not use the thread pool
     --scalar           no SIMD (for debugging; every tier produces identical pixels)
@@ -58,6 +62,7 @@ struct Args {
     model_ids: Vec<usize>,
     out: Option<PathBuf>,
     only: Option<String>,
+    beta_disp: i32,
     single_thread: bool,
     scalar: bool,
     repeat: usize,
@@ -76,6 +81,7 @@ fn parse_args() -> Result<Args, String> {
         model_ids: Vec::new(),
         out: None,
         only: None,
+        beta_disp: 0,
         single_thread: false,
         scalar: false,
         repeat: 1,
@@ -115,6 +121,11 @@ fn parse_args() -> Result<Args, String> {
                 a.only = Some(v);
             }
             "--out" => a.out = Some(PathBuf::from(value("--out")?)),
+            "--beta-disp" => {
+                a.beta_disp = value("--beta-disp")?
+                    .parse()
+                    .map_err(|e| format!("--beta-disp: {e}"))?;
+            }
             "--max-channels" => {
                 let v = value("--max-channels")?;
                 let (y, uv) = v.split_once(',').ok_or("--max-channels wants <y,uv>")?;
@@ -226,6 +237,60 @@ fn run() -> Result<(), String> {
                 .preload(&stream)
                 .map_err(|e| format!("{e:?}"))?;
             eprintln!("models loaded: {:.1} ms", t.elapsed().as_secs_f64() * 1e3);
+            Ok(())
+        }
+        ["encode", input, output] => {
+            let models = args
+                .models
+                .ok_or("no checkpoint directory: pass --models or set ZENJPEGAI_MODELS")?;
+            if models.is_file() {
+                return Err(
+                    "the encoder needs the checkpoint directory, not a packed bundle \
+                            (bundles hold decoder tensors only)"
+                        .into(),
+                );
+            }
+            let tier = if args.scalar {
+                Tier::Scalar
+            } else {
+                Tier::detect()
+            };
+            let engine = Engine::with(tier, !args.single_thread && cfg!(feature = "parallel"));
+            let png = std::fs::read(input).map_err(|e| format!("{input}: {e}"))?;
+            let image = zenjpegai::encoder::read_png_rgb8(&png).map_err(|e| format!("{e:?}"))?;
+            let params = EncodeParams {
+                model_id: args.model_ids.first().copied().unwrap_or(1) as u8,
+                beta_displacement_log: [args.beta_disp; 2],
+                op: args.op.unwrap_or(OperatingPoint::Bop),
+            };
+            let encoder = Encoder::with_engine(models, engine);
+            let mut stream = Vec::new();
+            for run in 0..args.repeat.max(1) {
+                let t = Instant::now();
+                stream = encoder
+                    .encode(&image, params)
+                    .map_err(|e| format!("{e:?}"))?;
+                if args.time {
+                    eprintln!(
+                        "encode {run}: {:.1} ms ({}x{}, {:?}{})",
+                        t.elapsed().as_secs_f64() * 1e3,
+                        image.width,
+                        image.height,
+                        engine.tier,
+                        if run == 0 {
+                            ", includes model load"
+                        } else {
+                            ""
+                        },
+                    );
+                }
+            }
+            std::fs::write(output, &stream).map_err(|e| format!("{output}: {e}"))?;
+            eprintln!(
+                "{output}: {} bytes ({:.4} bpp)",
+                stream.len(),
+                stream.len() as f64 * 8.0 / (image.width * image.height) as f64
+            );
             Ok(())
         }
         ["decode", input, output] => {

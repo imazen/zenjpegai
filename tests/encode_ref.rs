@@ -135,3 +135,328 @@ fn analysis_tiers_agree_bit_for_bit() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Gate 2 / 3: the whole encoder against the reference encoder's own decisions, then the stream
+// through both decoders.
+
+use std::path::Path;
+use zenjpegai::encoder::{EncodeParams, Encoder, preprocess_rgb, read_png_rgb8};
+
+/// (`vector`, source image, `model_id`, operating point, `beta_displacement_log`) of every
+/// fixed-model encode `make_reference_streams.sh encoder` produces.
+const VECTORS: &[(&str, &str, u8, OperatingPoint, i32)] = &[
+    (
+        "enc_img30_bop_m1_b0",
+        "00030_TE_560x888_8bit_sRGB.png",
+        1,
+        OperatingPoint::Bop,
+        0,
+    ),
+    (
+        "enc_img30_hop_m2_b0",
+        "00030_TE_560x888_8bit_sRGB.png",
+        2,
+        OperatingPoint::Hop,
+        0,
+    ),
+    (
+        "enc_img30_bop_m1_bm300",
+        "00030_TE_560x888_8bit_sRGB.png",
+        1,
+        OperatingPoint::Bop,
+        -300,
+    ),
+    (
+        "enc_img30_sop_m0_bm300",
+        "00030_TE_560x888_8bit_sRGB.png",
+        0,
+        OperatingPoint::Sop,
+        -300,
+    ),
+    (
+        "enc_img30_bop_m3_b400",
+        "00030_TE_560x888_8bit_sRGB.png",
+        3,
+        OperatingPoint::Bop,
+        400,
+    ),
+    (
+        "enc_img30_bop_m0_bm1069",
+        "00030_TE_560x888_8bit_sRGB.png",
+        0,
+        OperatingPoint::Bop,
+        -1069,
+    ),
+    (
+        "enc_img30_hop_m3_bm1069",
+        "00030_TE_560x888_8bit_sRGB.png",
+        3,
+        OperatingPoint::Hop,
+        -1069,
+    ),
+];
+
+fn source(image: &str) -> zenjpegai::RgbImage {
+    let path = ref_root().join("data/test").join(image);
+    let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    read_png_rgb8(&bytes).unwrap()
+}
+
+fn present(vector: &str) -> bool {
+    vector_dir(vector).join("enc2/enc_manifest.txt").is_file()
+}
+
+/// Colour pre-processing: bit-exact against the reference's own analysis-transform inputs.
+#[test]
+fn colour_preprocessing_matches_reference() {
+    let mut ran = 0;
+    for &(vector, image, ..) in VECTORS {
+        if !present(vector) {
+            continue;
+        }
+        let dump = load_encoder_dump(&vector_dir(vector).join("enc2"));
+        let input = preprocess_rgb(&source(image)).unwrap();
+        for (name, got) in [
+            ("analysis_y.0.in", &input.luma),
+            ("analysis_uv.0.in", &input.chroma),
+        ] {
+            let want = dump[name].f32();
+            assert_eq!(want.len(), got.data.len(), "{vector} {name}: length");
+            let differing = want
+                .iter()
+                .zip(&got.data)
+                .filter(|(a, b)| a.to_bits() != b.to_bits())
+                .count();
+            assert_eq!(differing, 0, "{vector} {name}: {differing} samples differ");
+        }
+        ran += 1;
+    }
+    assert!(ran > 0, "no encoder vectors on disk");
+}
+
+/// Compare one encode's decisions with the reference encoder's own.
+///
+/// The integer stage (`z_hat`, both scale maps, the skip mask, the cube flags) must be
+/// identical. `residual_quant` cannot be: the mean a symbol is measured against comes out of
+/// the hyper-decoder and, for luma, the context model, both float networks whose sums this
+/// crate orders differently from oneDNN (`psi` differs by up to 9e-7, `y_hat` by 8e-5 —
+/// `PORTING.md`). A symbol whose unrounded value sits within that of a `.5` boundary lands on
+/// the other side. Measured worst case over the seven vectors: see `PORTING.md`.
+fn compare_decisions(vector: &str, traces: &[zenjpegai::encoder::ComponentTrace; 2]) -> [usize; 2] {
+    let dump = load_encoder_dump(&vector_dir(vector).join("enc2"));
+    let mut moved = [0usize; 2];
+    for (ccs, name) in ["y", "uv"].into_iter().enumerate() {
+        let t = &traces[ccs];
+        let eq_i32 = |field: &str, got: &[i32]| {
+            let want = dump[&format!("{name}.{field}")].i32();
+            assert_eq!(want.len(), got.len(), "{vector} {name}.{field}: length");
+            let bad = want.iter().zip(got).filter(|(a, b)| a != b).count();
+            assert_eq!(bad, 0, "{vector} {name}.{field}: {bad} values differ");
+        };
+        let z: Vec<i32> = t.z_hat.data.iter().map(|&v| v as i32).collect();
+        eq_i32("z_hat", &z);
+        eq_i32("skip_scale_log", &t.skip_scale_log.data);
+        eq_i32("scale_log", &t.scale_log.data);
+        let want_flags = &dump[&format!("{name}.cube_flag")].bytes;
+        assert_eq!(
+            want_flags.len(),
+            t.cube_flag.len(),
+            "{vector} {name}: flags"
+        );
+        let bad = want_flags
+            .iter()
+            .zip(&t.cube_flag)
+            .filter(|&(&a, &b)| (a != 0) != b)
+            .count();
+        assert_eq!(bad, 0, "{vector} {name}.cube_flag: {bad} flags differ");
+
+        let want = dump[&format!("{name}.residual_quant")].i32();
+        let mut worst = 0i32;
+        let mut n = 0usize;
+        for (&a, &b) in want.iter().zip(&t.residual_q.data) {
+            let d = a - b as i32;
+            if d != 0 {
+                n += 1;
+                worst = worst.max(d.abs());
+            }
+        }
+        assert!(
+            worst <= 1,
+            "{vector} {name}.residual_quant: a symbol moved by {worst}, not a rounding boundary"
+        );
+        assert!(
+            n * 4000 <= want.len(),
+            "{vector} {name}.residual_quant: {n} of {} symbols moved (bound 1 in 4000)",
+            want.len()
+        );
+        moved[ccs] = n;
+    }
+    moved
+}
+
+/// Gate 2: fed the reference encoder's own latents, the integer stage is identical and only
+/// rounding-boundary residual symbols move.
+#[test]
+fn decisions_match_reference_given_its_latents() {
+    let mut ran = 0;
+    for &(vector, _, model_id, op, beta) in VECTORS {
+        if !present(vector) {
+            continue;
+        }
+        let dump = load_encoder_dump(&vector_dir(vector).join("enc2"));
+        let (yl, yc) = (tensor(&dump["y.y"]), tensor(&dump["uv.y"]));
+        let shape = dump["analysis_y.0.in"].shape.clone();
+        let enc = Encoder::new(ref_root().join("models"));
+        let params = EncodeParams {
+            model_id,
+            beta_displacement_log: [beta, beta],
+            op,
+        };
+        let (stream, traces) = enc
+            .encode_latents([&yl, &yc], shape[3], shape[2], params)
+            .unwrap();
+        let moved = compare_decisions(vector, &traces);
+        let reference = std::fs::read(vector_dir(vector).join("stream.bits")).unwrap();
+        println!(
+            "{vector}: reference latents in -> {} bytes vs {} ({:+.3} %), symbols moved {} / {}",
+            stream.len(),
+            reference.len(),
+            (stream.len() as f64 / reference.len() as f64 - 1.0) * 100.0,
+            moved[0],
+            moved[1],
+        );
+        assert!(
+            (stream.len() as f64 / reference.len() as f64 - 1.0).abs() < 0.005,
+            "{vector}: stream size differs from the reference by more than 0.5 %"
+        );
+        if moved == [0, 0] {
+            assert_eq!(
+                stream, reference,
+                "{vector}: same decisions must give the same bytes"
+            );
+        }
+        ran += 1;
+    }
+    assert!(ran > 0, "no encoder vectors on disk");
+}
+
+/// Gate 3: a whole encode from the PNG. The stream must be the reference's size to within
+/// 0.5 %, and decode to the same picture through our own decoder.
+#[test]
+fn encoder_end_to_end_matches_reference() {
+    let mut ran = 0;
+    for &(vector, image, model_id, op, beta) in VECTORS {
+        if !present(vector) {
+            continue;
+        }
+        let params = EncodeParams {
+            model_id,
+            beta_displacement_log: [beta, beta],
+            op,
+        };
+        let enc = Encoder::new(ref_root().join("models"));
+        let (stream, traces) = enc.encode_traced(&source(image), params).unwrap();
+        let moved = compare_decisions(vector, &traces);
+        let reference = std::fs::read(vector_dir(vector).join("stream.bits")).unwrap();
+        let ratio = stream.len() as f64 / reference.len() as f64;
+        println!(
+            "{vector}: {} bytes, reference {} ({:+.3} %), symbols moved {} / {}",
+            stream.len(),
+            reference.len(),
+            (ratio - 1.0) * 100.0,
+            moved[0],
+            moved[1],
+        );
+        assert!(
+            (ratio - 1.0).abs() < 0.005,
+            "{vector}: stream size differs from the reference by more than 0.5 %"
+        );
+        if moved == [0, 0] {
+            assert_eq!(
+                stream, reference,
+                "{vector}: same decisions must give the same bytes"
+            );
+        }
+        // Our stream must decode, and land on the reference stream's picture.
+        let dec = zenjpegai::Decoder::new(ref_root().join("models"));
+        let ours = dec.decode(&stream).unwrap();
+        let theirs = dec.decode(&reference).unwrap();
+        assert_eq!((ours.width, ours.height), (theirs.width, theirs.height));
+        let worst = ours
+            .data
+            .iter()
+            .zip(&theirs.data)
+            .map(|(a, b)| (*a as i32 - *b as i32).abs())
+            .max()
+            .unwrap();
+        let differing = ours
+            .data
+            .iter()
+            .zip(&theirs.data)
+            .filter(|(a, b)| a != b)
+            .count();
+        println!(
+            "   vs a decode of the reference stream: {differing} of {} samples differ, worst {worst}",
+            ours.data.len()
+        );
+        ran += 1;
+    }
+    assert!(ran > 0, "no encoder vectors on disk");
+}
+
+/// The reference decoder must accept our streams and produce the same picture.
+#[test]
+#[ignore = "runs the reference decoder (Python); enable with --ignored"]
+fn reference_decoder_accepts_our_streams() {
+    for &(vector, image, model_id, op, beta) in VECTORS {
+        if !present(vector) {
+            continue;
+        }
+        let params = EncodeParams {
+            model_id,
+            beta_displacement_log: [beta, beta],
+            op,
+        };
+        let enc = Encoder::new(ref_root().join("models"));
+        let stream = enc.encode(&source(image), params).unwrap();
+        let dir = std::env::temp_dir();
+        let _ = dir;
+        let scratch = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/refdec");
+        std::fs::create_dir_all(&scratch).unwrap();
+        let bits = scratch.join(format!("{vector}.bits"));
+        let png = scratch.join(format!("{vector}.png"));
+        std::fs::write(&bits, &stream).unwrap();
+        let status = std::process::Command::new("bash")
+            .arg("-lc")
+            .arg(format!(
+                ". {}/.venv/bin/activate && cd {} && python -m src.reco.coders.decoder {} {} -target_device cpu",
+                ref_root().display(),
+                ref_root().display(),
+                bits.display(),
+                png.display()
+            ))
+            .status()
+            .unwrap();
+        assert!(status.success(), "{vector}: the reference decoder failed");
+        let theirs = read_png_rgb8(&std::fs::read(&png).unwrap()).unwrap();
+        let ours = zenjpegai::Decoder::new(ref_root().join("models"))
+            .decode(&stream)
+            .unwrap();
+        let worst = ours
+            .data
+            .iter()
+            .zip(&theirs.data)
+            .map(|(a, b)| (*a as i32 - *b as i32).abs())
+            .max()
+            .unwrap();
+        let differing = ours
+            .data
+            .iter()
+            .zip(&theirs.data)
+            .filter(|(a, b)| a != b)
+            .count();
+        println!("{vector}: reference decode differs in {differing} samples, worst {worst}");
+        assert!(worst <= 1, "{vector}: reference decode differs by {worst}");
+    }
+}

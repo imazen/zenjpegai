@@ -240,8 +240,15 @@ if [ "$SET" = encoder ] || [ "$SET" = all ]; then
   }
   enc_fixed enc_img30_bop_m1_b0 $IMG30 1 0 cfg/tools_off.json cfg/profiles/base.json
   enc_fixed enc_img30_hop_m2_b0 $IMG30 2 0 cfg/tools_off.json cfg/profiles/high.json
-  # Not generated yet (next steps of the encoder port, see PORTING.md "Work queue"): the other
-  # models, beta displacements (e.g. -300, -100, 150, 400: low rates exercise the cube flags) and
-  # the 2096x1400 picture (analysis tiling).
+  # Low rates: the reconstruction error inside a cube exceeds skip_cube_thr, so cube flags go
+  # false and `use_cube_flags` is signalled (the only way to exercise that path).
+  enc_fixed enc_img30_bop_m1_bm300 $IMG30 1 -300 cfg/tools_off.json cfg/profiles/base.json
+  enc_fixed enc_img30_sop_m0_bm300 $IMG30 0 -300 cfg/tools_off.json cfg/profiles/simple.json
+  enc_fixed enc_img30_bop_m3_b400 $IMG30 3 400 cfg/tools_off.json cfg/profiles/base.json
+  # -1069 is the low end of BDL_clipping_range (`cfg`: [-1069, 702]).
+  enc_fixed enc_img30_bop_m0_bm1069 $IMG30 0 -1069 cfg/tools_off.json cfg/profiles/base.json
+  enc_fixed enc_img30_hop_m3_bm1069 $IMG30 3 -1069 cfg/tools_off.json cfg/profiles/high.json
+  # Not generated yet (next steps of the encoder port, see PORTING.md "Work queue"):
+  # the 2096x1400 picture (analysis tiling) and odd picture sizes.
 fi
 echo "== done ($(date -u +%H:%M:%S))"
