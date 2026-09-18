@@ -727,6 +727,40 @@ impl<'a> Graph<'a> {
         Ok(())
     }
 
+    /// Planar `f32` picture buffer to packed `u16` output samples ([`kernels::emit_output`]):
+    /// `dst` receives `spec.words() * 4` bytes.
+    pub(crate) fn emit_output(
+        &mut self,
+        rec: &wgpu::Buffer,
+        spec: crate::synthesis::OutSpec,
+        dst: &wgpu::Buffer,
+    ) {
+        let (row, dispatch) = grid1(spec.words() as usize, 1);
+        self.push(
+            "emit_output",
+            kernels::emit_output,
+            &[
+                spec.words() as u32,
+                row,
+                spec.n,
+                spec.mode,
+                spec.maxv(),
+                spec.out_w,
+                spec.out_h,
+                spec.pic_w,
+                spec.pic_h,
+                spec.sv,
+                spec.sh,
+                spec.cw,
+                spec.ch,
+                spec.n_y,
+                spec.n_c,
+            ],
+            vec![Bind::Buffer(rec.clone()), Bind::Buffer(dst.clone())],
+            dispatch,
+        );
+    }
+
     /// Planar YUV picture buffer to an `rgba8unorm` storage texture view.
     pub fn yuv_to_rgba(
         &mut self,

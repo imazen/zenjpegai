@@ -36,7 +36,7 @@ use zenjpegai::header::{OperatingPoint, PictureHeader, SynthesisTiling};
 use zenjpegai::model::ModelDir;
 use zenjpegai::nn::fast::Engine;
 use zenjpegai::tensor::Tensor;
-use zenjpegai_gpu::{ContextOptions, GpuContext, GpuDecoder, GpuSynthesis, Workspace};
+use zenjpegai_gpu::{ContextOptions, GpuContext, GpuDecoder, GpuOut, GpuSynthesis, Workspace};
 
 fn median(v: &mut [f64]) -> f64 {
     v.sort_by(|a, b| a.total_cmp(b));
@@ -395,8 +395,11 @@ fn main() {
         let (mut tiles, mut dispatches) = (0, 0);
         for _ in 0..a.rounds {
             let t = Instant::now();
-            let d = gpu.decode_to_gpu(&stream).expect("gpu decode");
-            let (_, _, timing) = pollster::block_on(gpu.finish(d)).expect("gpu finish");
+            // The quantized tail: output-format conversion on the GPU, packed u16 readback.
+            let d = gpu
+                .decode_to_gpu_with(&stream, GpuOut::Quantized)
+                .expect("gpu decode");
+            let (_, timing) = pollster::block_on(gpu.finish_picture(d)).expect("gpu finish");
             wall.push(ms(t));
             if let Some(ns) = timing.gpu_ns {
                 dev.push(ns as f64 / 1e6);

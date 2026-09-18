@@ -8,16 +8,16 @@ use zenjpegai::decoder::output;
 use zenjpegai::decoder::reconstruct::{Planes, post_process_latent, reconstruct_latent};
 use zenjpegai::decoder::{Headers, decode_entropy_stage, read_headers};
 use zenjpegai::filters::{self, FilterContext};
-use zenjpegai::header::{OperatingPoint, PictureHeader};
+use zenjpegai::header::{ColourTransform, OperatingPoint, PictureHeader};
 use zenjpegai::mans::AnsTables;
 use zenjpegai::model::{self, CommonModel, ModelSource};
 use zenjpegai::nn::fast::Engine;
 use zenjpegai::tensor::Tensor;
-use zenjpegai::{Picture, RgbImage};
+use zenjpegai::{Picture, RgbImage, YuvImage};
 
 use crate::context::GpuContext;
 use crate::error::{GpuError, Result};
-use crate::synthesis::{GpuPicture, GpuSynthesis, RunTail, Timing, Workspace, now, since};
+use crate::synthesis::{GpuPicture, GpuSynthesis, OutSpec, RunTail, Timing, Workspace, now, since};
 
 struct ModelSet {
     common: [CommonModel; 2],
@@ -85,6 +85,13 @@ pub enum GpuOut {
     /// `Rgba` plus a copy of the RGBA texture into the staging buffer, so `read_rgba` is one
     /// map and no additional submission.
     RgbaReadback,
+    /// Convert to the stream's output format on the GPU (the same arithmetic
+    /// `zenjpegai::decoder::output::finish` runs on the CPU) and stage the packed `u16`
+    /// samples — half the bytes of the `f32` planes. Streams the GPU conversion does not cover
+    /// (post-filters, coded chroma ≠ source, custom transform) fall back to `Planes`.
+    /// `GpuDecoder::finish_picture` reads the result; `finish` keeps working too (it re-copies
+    /// the planes into the staging buffer itself).
+    Quantized,
 }
 
 /// The `rgba8unorm` texture descriptor shared by the decode tail and `to_rgba_texture`.
@@ -105,6 +112,63 @@ pub(crate) fn rgba_texture(ctx: &GpuContext, h: usize, w: usize) -> wgpu::Textur
             | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
     })
+}
+
+/// The GPU output conversion [`GpuOut::Quantized`] asks for, or `None` when it cannot produce
+/// what `zenjpegai::decoder::output::finish` would: post-filters run on the CPU planes, coded
+/// chroma in a different subsampling than the source needs bicubic upsampling first, and the
+/// custom colour transform is unsupported everywhere.
+fn quantized_spec(headers: &Headers) -> Option<OutSpec> {
+    let h = &headers.picture;
+    if headers.tools.any_post_filter() || (h.bit_depth != 8 && h.bit_depth != 10) {
+        return None;
+    }
+    let out_w = h.width - h.diff_display_width as u32;
+    let out_h = h.height - h.diff_display_height as u32;
+    let (pic_w, pic_h) = (h.width, h.height);
+    match h.colour_transform {
+        // to_rgb_planes on 4:4:4 planes (an RGB source is never subsampled).
+        ColourTransform::Bt709 if (h.s_ver, h.s_hor, h.c_ver, h.c_hor) == (1, 1, 1, 1) => {
+            let n_y = out_w * out_h;
+            Some(OutSpec {
+                mode: 1,
+                bit_depth: h.bit_depth,
+                out_w,
+                out_h,
+                pic_w,
+                pic_h,
+                sv: 1,
+                sh: 1,
+                cw: 0,
+                ch: 0,
+                n_y,
+                n_c: 0,
+                n: 3 * n_y,
+            })
+        }
+        // Planar YUV at the source's subsampling = the coded subsampling (c == s).
+        ColourTransform::None if h.c_ver == h.s_ver && h.c_hor == h.s_hor => {
+            let (sv, sh) = (h.c_ver as u32, h.c_hor as u32);
+            let (cw, ch) = (out_w.div_ceil(sh), out_h.div_ceil(sv));
+            let (n_y, n_c) = (out_w * out_h, cw * ch);
+            Some(OutSpec {
+                mode: 0,
+                bit_depth: h.bit_depth,
+                out_w,
+                out_h,
+                pic_w,
+                pic_h,
+                sv,
+                sh,
+                cw,
+                ch,
+                n_y,
+                n_c,
+                n: n_y + 2 * n_c,
+            })
+        }
+        _ => None,
+    }
 }
 
 /// `rec[:, :out_h:sv, :out_w:sh]` like `zenjpegai::decoder::reconstruct::synthesize`.
@@ -294,7 +358,12 @@ impl GpuDecoder {
                 out: (*dh, *dw),
                 stage: out == GpuOut::RgbaReadback,
             },
-            None => RunTail::Planes,
+            None => match out {
+                GpuOut::Quantized => quantized_spec(&headers)
+                    .map(RunTail::Output)
+                    .unwrap_or(RunTail::Planes),
+                _ => RunTail::Planes,
+            },
         };
         let picture =
             set.synthesis
@@ -347,10 +416,47 @@ impl GpuDecoder {
         ))
     }
 
+    /// [`finish`](Self::finish) for a decode staged with [`GpuOut::Quantized`]: the picture was
+    /// converted to its output format on the GPU, so this maps the packed `u16` buffer (half
+    /// the `f32` planes' bytes) instead of the planes. When the decode had to fall back to
+    /// `Planes` (post-filters, chroma resampling, custom transform) this runs the CPU path.
+    /// Does not return the pre-filter planes — use [`finish`](Self::finish) for those.
+    pub async fn finish_picture(&self, mut decoded: GpuDecoded) -> Result<(Picture, Timing)> {
+        if decoded.picture.staged_output().is_some() {
+            let (spec, data) = decoded.picture.read_output().await?;
+            let picture = match spec.mode {
+                1 => Picture::Rgb(RgbImage {
+                    width: spec.out_w as usize,
+                    height: spec.out_h as usize,
+                    bit_depth: spec.bit_depth,
+                    data,
+                }),
+                _ => {
+                    let (ny, nc) = (spec.n_y as usize, spec.n_c as usize);
+                    Picture::Yuv(YuvImage {
+                        width: spec.out_w as usize,
+                        height: spec.out_h as usize,
+                        chroma_width: spec.cw as usize,
+                        chroma_height: spec.ch as usize,
+                        bit_depth: spec.bit_depth,
+                        y: data[..ny].to_vec(),
+                        u: data[ny..ny + nc].to_vec(),
+                        v: data[ny + nc..ny + 2 * nc].to_vec(),
+                    })
+                }
+            };
+            return Ok((picture, decoded.picture.timing));
+        }
+        let (picture, _, timing) = self.finish(decoded).await?;
+        Ok((picture, timing))
+    }
+
     /// Codestream to whatever it holds (RGB or YUV planes), like `Decoder::decode_picture`.
+    /// Converts to the output format on the GPU where it can ([`GpuOut::Quantized`]) and reads
+    /// back the packed samples; other streams read the `f32` planes and finish on the CPU.
     pub async fn decode_picture_async(&self, stream: &[u8]) -> Result<Picture> {
-        let decoded = self.decode_to_gpu(stream)?;
-        Ok(self.finish(decoded).await?.0)
+        let decoded = self.decode_to_gpu_with(stream, GpuOut::Quantized)?;
+        Ok(self.finish_picture(decoded).await?.0)
     }
 
     /// Codestream to interleaved RGB.

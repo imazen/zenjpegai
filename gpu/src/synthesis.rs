@@ -633,6 +633,9 @@ pub struct Workspace {
     pool: Arc<Mutex<Pool>>,
     latents: [Option<wgpu::Buffer>; 2],
     rec: Option<wgpu::Buffer>,
+    /// The GPU-side output conversion's packed buffer (`RunTail::Output`), before it is copied
+    /// into `staging`.
+    out: Option<wgpu::Buffer>,
     staging: Option<wgpu::Buffer>,
     queries: Option<Queries>,
     generation: u64,
@@ -697,6 +700,7 @@ impl Workspace {
         }
         self.latents = [None, None];
         self.rec = None;
+        self.out = None;
         self.staging = None;
         self.queries = None;
         self.generation += 1;
@@ -708,7 +712,7 @@ impl Workspace {
         pool + self
             .latents
             .iter()
-            .chain([&self.rec, &self.staging])
+            .chain([&self.rec, &self.out, &self.staging])
             .flatten()
             .map(|b| b.size())
             .sum::<u64>()
@@ -774,6 +778,47 @@ pub(crate) enum RunTail<'a> {
         out: (usize, usize),
         stage: bool,
     },
+    /// Convert the picture to the stream's output samples on the GPU
+    /// ([`kernels::emit_output`]) and stage the packed `u16` pairs for `read_output` —
+    /// `2 * out_w * out_h` bytes for 8-bit RGB instead of `12 * h * w` of `f32` planes.
+    Output(OutSpec),
+}
+
+/// Geometry of the GPU-side output conversion ([`RunTail::Output`]): everything the
+/// `emit_output` kernel and the unpacking reader need, precomputed from the picture header.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct OutSpec {
+    /// 1 = interleaved RGB (BT.709 source), 0 = planar YUV concatenated (YUV source).
+    pub mode: u32,
+    /// Bits per sample of the output (`maxv = 2^bit_depth - 1`).
+    pub bit_depth: u8,
+    /// Displayed size (`coded - diff_display`).
+    pub out_w: u32,
+    pub out_h: u32,
+    /// `rec` plane size (coded).
+    pub pic_w: u32,
+    pub pic_h: u32,
+    /// Coded chroma subsampling step (YUV mode; the gather in `rec`).
+    pub sv: u32,
+    pub sh: u32,
+    /// Chroma plane size in the output (YUV mode).
+    pub cw: u32,
+    pub ch: u32,
+    /// Sample counts: luma, one chroma plane, total.
+    pub n_y: u32,
+    pub n_c: u32,
+    pub n: u32,
+}
+
+impl OutSpec {
+    /// `u32` words the staging buffer holds.
+    pub fn words(&self) -> u64 {
+        (self.n as u64).div_ceil(2)
+    }
+
+    pub(crate) fn maxv(&self) -> u32 {
+        (1u32 << self.bit_depth) - 1
+    }
 }
 
 /// What the run's tail left in the staging buffer.
@@ -788,6 +833,8 @@ enum Staged {
         h: usize,
         w: usize,
     },
+    /// Packed `u16` output samples ([`OutSpec`] describes the layout).
+    Output(OutSpec),
 }
 
 /// A synthesised picture still on the GPU: planar `f32` YUV `[3, height, width]` in `[0, 255]`
@@ -903,6 +950,37 @@ impl GpuPicture {
         drop(view);
         self.staging.unmap();
         Ok(out)
+    }
+
+    /// Read back the packed `u16` output the run staged with `RunTail::Output` — each staged
+    /// `u32` is two samples, low half first (little-endian). Returns the conversion's
+    /// [`OutSpec`] with the samples. Also fills `timing.gpu_ns`.
+    pub(crate) async fn read_output(&mut self) -> Result<(OutSpec, Vec<u16>)> {
+        let Staged::Output(spec) = self.staged else {
+            return Err(GpuError::Shape(
+                "no staged output readback (the run needs RunTail::Output)".into(),
+            ));
+        };
+        let bytes = spec.words() * 4;
+        self.map_staging(bytes).await?;
+        let data = {
+            let view = self
+                .staging
+                .slice(0..bytes)
+                .get_mapped_range()
+                .map_err(|e| GpuError::Device(e.to_string()))?;
+            bytemuck::cast_slice::<u8, u16>(&view)[..spec.n as usize].to_vec()
+        };
+        self.staging.unmap();
+        Ok((spec, data))
+    }
+
+    /// The output conversion this run staged, if it was a [`RunTail::Output`] run.
+    pub(crate) fn staged_output(&self) -> Option<OutSpec> {
+        match self.staged {
+            Staged::Output(s) => Some(s),
+            _ => None,
+        }
     }
 
     /// Device time of each dispatch, in submission order, after a run of a workspace with
@@ -1357,6 +1435,22 @@ impl GpuSynthesis {
                         w: out.1,
                     };
                 }
+            }
+            RunTail::Output(spec) => {
+                fit(
+                    &mut ws.out,
+                    ctx,
+                    spec.words() * 4,
+                    wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                    "zenjpegai output",
+                )?;
+                let out = ws.out.as_ref().unwrap();
+                // The conversion pass has no intermediate tensors: the pool is untouched.
+                let mut g = Graph::new(ctx);
+                g.emit_output(rec, *spec, out);
+                g.finish(&ws.pool)?.encode(&mut enc, None);
+                enc.copy_buffer_to_buffer(out, 0, staging, 0, spec.words() * 4);
+                staged = Staged::Output(*spec);
             }
         }
         ctx.queue().submit([enc.finish()]);

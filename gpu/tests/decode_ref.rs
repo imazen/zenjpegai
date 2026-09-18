@@ -9,7 +9,7 @@ mod common;
 use common::{context_arc, load_dump_f32, max_abs, models_dir, vector_dir};
 use zenjpegai::Decoder;
 use zenjpegai::container::Codestream;
-use zenjpegai::decoder::output::{RgbPlanes, quantize};
+use zenjpegai::decoder::output::{RgbPlanes, quantize, quantize_plane};
 use zenjpegai::decoder::reconstruct::{
     Planes, post_process_latent, reconstruct_latent, synthesize,
 };
@@ -135,10 +135,29 @@ fn check(name: &str) {
         ours.data.len()
     );
 
+    // `decode` takes the quantized readback (`GpuOut::Quantized`): the BT.709 conversion and
+    // rounding ran on the GPU. Its quantisation of the same GPU planes can move a tie by one
+    // step vs the CPU output stage — the recorded bound, measured here per stream.
+    let fast = dec.decode(&stream).unwrap();
+    let (q_differing, q_worst) = count(&fast.data, &ours.data);
+    assert!(
+        q_worst <= 1,
+        "{name}: a GPU-quantised sample differs from the CPU output by {q_worst}"
+    );
+    assert!(
+        q_differing * 5000 < ours.data.len(),
+        "{name}: {q_differing} of {} GPU-quantised samples differ from the CPU output",
+        ours.data.len()
+    );
+    println!(
+        "{name}: GPU-quantised readback vs CPU output: {q_differing} of {} differ, worst {q_worst}",
+        ours.data.len()
+    );
+
     // A second decode reuses plans and buffers and must reproduce the first bit for bit.
     let again = dec.decode(&stream).unwrap();
     assert_eq!(
-        again.data, ours.data,
+        again.data, fast.data,
         "{name}: warm decode differs from the cold one"
     );
 }
@@ -210,4 +229,96 @@ fn gpu_rgba_presentation_matches_cpu_output() {
     );
     let blitted = pollster::block_on(zenjpegai_gpu::read_rgba8(&ctx, &target)).unwrap();
     assert!(blitted == rgba, "blit is not an exact copy");
+}
+
+/// The quantized readback for YUV streams (`GpuOut::Quantized`, `mode` 0): chroma is gathered
+/// with the coded subsampling and quantised on the GPU, at the stream's bit depth. Compared
+/// both to the reference dump's `out.*` planes quantised like `write_png` does, and to the
+/// CPU output stage run on the same GPU planes (`finish`).
+#[test]
+fn gpu_quantized_yuv() {
+    for name in [
+        "img30yuv420_base_off_bpp050",
+        "img30yuv422_base_off_bpp050",
+        "img30yuv444_base_off_bpp050",
+        "img30yuv444b10_base_off_bpp050",
+        "img30cropyuv420_base_off_bpp075",
+    ] {
+        let dir = vector_dir(name);
+        let stream = std::fs::read(dir.join("stream.bits")).unwrap();
+        let cs = Codestream::parse(&stream).unwrap();
+        let hdr = read_headers(&cs).unwrap().picture;
+        let dump = load_dump_f32(&dir, &["out.a", "out.b", "out.c"]);
+
+        let dec = GpuDecoder::new(context_arc(), Box::new(ModelDir::new(models_dir())));
+        // CPU output stage on the GPU planes.
+        let (want, _, _) =
+            pollster::block_on(dec.finish(dec.decode_to_gpu(&stream).unwrap())).unwrap();
+        let zenjpegai::Picture::Yuv(want) = want else {
+            panic!("{name}: expected a YUV picture");
+        };
+        // The quantized path (`decode_picture` runs `GpuOut::Quantized`).
+        let got = pollster::block_on(dec.decode_picture_async(&stream)).unwrap();
+        let zenjpegai::Picture::Yuv(got) = got else {
+            panic!("{name}: expected a YUV picture");
+        };
+        assert_eq!(
+            (
+                got.width,
+                got.height,
+                got.chroma_width,
+                got.chroma_height,
+                got.bit_depth
+            ),
+            (
+                want.width,
+                want.height,
+                want.chroma_width,
+                want.chroma_height,
+                want.bit_depth
+            ),
+            "{name}: plane dims"
+        );
+        for (key, plane, ours) in [
+            ("out.a", "y", &got.y),
+            ("out.b", "u", &got.u),
+            ("out.c", "v", &got.v),
+        ] {
+            let theirs = quantize_plane(&dump[key], hdr.bit_depth);
+            assert_eq!(theirs.len(), ours.len(), "{name} {plane}: sample count");
+            let mut differing = 0usize;
+            let mut worst = 0i32;
+            let mut vs_cpu = 0usize;
+            let want_plane = match plane {
+                "y" => &want.y,
+                "u" => &want.u,
+                _ => &want.v,
+            };
+            for ((&a, &b), &c) in ours.iter().zip(&theirs).zip(want_plane) {
+                differing += (a != b) as usize;
+                worst = worst.max((a as i32 - b as i32).abs());
+                vs_cpu += (a != c) as usize;
+            }
+            println!(
+                "{name} {plane}: {differing} of {} {}-bit samples differ from the reference \
+                 (worst {worst}), {vs_cpu} vs CPU output",
+                ours.len(),
+                hdr.bit_depth
+            );
+            assert!(
+                worst <= 1,
+                "{name} {plane}: a sample differs from the reference by {worst}"
+            );
+            assert!(
+                differing * 5000 < ours.len(),
+                "{name} {plane}: {differing} of {} differ from the reference",
+                ours.len()
+            );
+            assert!(
+                vs_cpu * 5000 < ours.len(),
+                "{name} {plane}: {vs_cpu} of {} differ from the CPU output",
+                ours.len()
+            );
+        }
+    }
 }

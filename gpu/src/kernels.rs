@@ -607,6 +607,72 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{
     )
 }
 
+/// The CPU output stage (`zenjpegai::decoder::output::finish`) on the GPU: the planar `f32`
+/// picture `emit` wrote becomes the packed `u16` samples the `Picture` types hold, two per
+/// `u32` (low half first — a little-endian `&[u16]` view of the words is the sample stream).
+/// `mode` 0 = planar YUV: luma at display size, then `u` and `v` planes gathered with the coded
+/// subsampling step into `cw x ch`, concatenated. `mode` 1 = interleaved RGB (BT.709, the same
+/// arithmetic and order as `to_rgb_planes` + `quantize`). Rounding is round half to even spelled
+/// out — the `round` builtin's tie rule is not the same on every driver.
+/// Params: `words row n mode maxv out_w out_h pic_w pic_h sv sh cw ch n_y n_c`.
+pub fn emit_output() -> String {
+    format!(
+        "{params}
+@group(0) @binding(1) var<storage, read> rec: array<f32>;
+@group(0) @binding(2) var<storage, read_write> dst: array<u32>;
+const KRY: f32 = 1.5748; const KBY: f32 = 1.8556;
+const GU: f32 = {gu:?}; const GV: f32 = {gv:?};
+// `ImageIO.write_png`: internal range -> [0, maxv], round half to even, clip.
+fn quant(x: f32) -> u32 {{
+  let s = (clamp(x, 0.0, 255.0) / 255.0) * f32(p.maxv);
+  let f = floor(s);
+  let r = s - f;
+  let up = r > 0.5 || (r == 0.5 && f % 2.0 == 1.0);
+  return u32(clamp(f + select(0.0, 1.0, up), 0.0, f32(p.maxv)));
+}}
+fn sample(at: u32) -> u32 {{
+  // The padding sample of an odd tail reads a real location and is discarded.
+  let i = min(at, p.n - 1u);
+  let psz = p.pic_w * p.pic_h;
+  if (p.mode == 1u) {{
+    let px = i / 3u;
+    let ch = i % 3u;
+    let s = (px / p.out_w) * p.pic_w + px % p.out_w;
+    let y = rec[s] / 255.0;
+    let u = rec[psz + s] / 255.0 - 0.5;
+    let v = rec[2u * psz + s] / 255.0 - 0.5;
+    let val = select(select(y + KBY * u, y - GU * u - GV * v, ch == 1u), y + KRY * v, ch == 0u);
+    // to_RGB_ ends in convert_range(., 1, 255) + clip; quant() converts [0,255] -> [0,maxv].
+    return quant(clamp(val * 255.0, 0.0, 255.0));
+  }}
+  var v: f32;
+  if (i < p.n_y) {{
+    v = rec[(i / p.out_w) * p.pic_w + i % p.out_w];
+  }} else {{
+    let j = i - p.n_y;
+    let s = j % p.n_c;
+    v = rec[(1u + j / p.n_c) * psz + (s / p.cw) * p.sv * p.pic_w + (s % p.cw) * p.sh];
+  }}
+  return quant(v);
+}}
+@compute @workgroup_size({WG1}, 1, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{
+  let w = gid.y * p.row + gid.x;
+  if (gid.x >= p.row || w >= p.words) {{ return; }}
+  let a = sample(2u * w);
+  let b = sample(2u * w + 1u);
+  dst[w] = a | (b << 16u);
+}}
+",
+        params = params(&[
+            "words", "row", "n", "mode", "maxv", "out_w", "out_h", "pic_w", "pic_h", "sv", "sh",
+            "cw", "ch", "n_y", "n_c"
+        ]),
+        gu = (0.0722f64 * 1.8556 / 0.7152) as f32,
+        gv = (0.2126f64 * 1.5748 / 0.7152) as f32,
+    )
+}
+
 /// Planar YUV `[3, h, w]` in `[0, 255]` (4:4:4) to an `rgba8unorm` storage texture, BT.709, with
 /// the same operation order as the CPU output stage. For presentation without a readback.
 /// Params: `w h pic_w pic_h`.
