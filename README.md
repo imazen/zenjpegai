@@ -17,13 +17,14 @@ and planar-YUV (4:4:4 / 4:2:2 / 4:2:0, 8/10 bit) sources, the same coding tools 
 analysis tiling above 1 MP, fixed-model and target-bpp rate control with the reference's
 `ECLibLH` likelihood measure or the coded stream (`RateEstimate`), resource limits and a
 memory estimate (`EncodeLimits`, `estimate_encode_memory`); it reproduces the reference
-encoder's streams byte for byte on 14 of 18 fixed-model vectors (same length on the rest)
+encoder's streams byte for byte on 21 of 27 reference encodes (same length on the rest)
 and the `tools_on` tool set (`--tools-on`, or the individual `--rvs`/`--grfs`/`--lsbs`/
 `--lef`/`--efe-linear`/`--eicci`/`--efe-nonlinear` flags) with the post-filter decisions
 the reference's searches would make — modulo MKL `lstsq` nondeterminism that costs the
-reference up to 0.12 dB (`PORTING.md`). Not ported: the hyperopt displacement search,
-the user-defined colour transform (the reference's own implementation is inconsistent —
-see `PORTING.md`), eICCI on subsampled pictures. Anything unsupported is rejected with `Error::Unsupported`; nothing is silently
+reference up to 0.12 dB (`PORTING.md`). Not ported: `num_chs` below the model's channel
+count, the hyperopt UV displacement search, the user-defined colour transform (the
+reference's own implementation is inconsistent — see `PORTING.md`), eICCI on subsampled
+pictures. Anything unsupported is rejected with `Error::Unsupported`; nothing is silently
 approximated. The entropy stage is bit-exact; the reconstructed 8-bit picture differs from the
 reference decoder's in about 0.005 % of samples, each by one step (convolution summation
 order). Also here: a WebAssembly build with a browser polyfill and demo (`web/`, live at
@@ -48,25 +49,27 @@ ZENJPEGAI_MODELS=path/to/models target/release/zenjpegai decode picture.bits pic
 ## Speed
 
 Decode time on a Ryzen 9 9950X3D, same streams, same machine, no `-C target-cpu=native`
-(`scripts/bench/decode_end_to_end.sh`, raw data in `benchmarks/decode_end_to_end_2026-09-18_d2native.tsv`).
-Reference = upstream `b9e573f` on PyTorch 1.10.2 CPU as shipped, which pins PyTorch to one thread;
-its number is its own `TOTAL` (model load excluded). zenjpegai numbers are steady state with models
-loaded; "process" is one whole command-line run including start-up, model load and PNG output.
+(`scripts/bench/decode_end_to_end.sh`, raw data in `benchmarks/decode_end_to_end_2026-09-18_r2.tsv`).
+Reference = upstream `b9e573f` on PyTorch 1.10.2 CPU; its number is its own `TOTAL`
+(model load excluded, median of 3). zenjpegai numbers are steady state with models loaded
+(min of 3); "process" is one whole command-line run including start-up, model load and
+PNG output.
 
-| stream | reference | zenjpegai, 1 thread | zenjpegai, threaded | reference process | zenjpegai process |
-| --- | --- | --- | --- | --- | --- |
-| 560x888, simple profile (SOP), 0.50 bpp | 132 ms | 53 ms | 18 ms | 950 ms | 107 ms |
-| 560x888, base profile (BOP), 0.12 bpp | 212 ms | 84 ms | 24 ms | 1023 ms | 110 ms |
-| 560x888, base profile (BOP), 0.50 bpp | 211 ms | 83 ms | 27 ms | 1034 ms | 115 ms |
-| 560x888, base profile (BOP), 1.00 bpp | 214 ms | 88 ms | 25 ms | 1037 ms | 140 ms |
-| 560x888, high profile (HOP), 0.50 bpp | 2279 ms | 1151 ms | 376 ms | 3118 ms | 706 ms |
-| 2096x1400, base profile (BOP), 0.50 bpp | 1227 ms | 528 ms | 190 ms | 2172 ms | 807 ms |
+| stream | ref, 1 thread | ref, 8 threads | zen, 1 thread | zen, 8 threads | ref process | zen process |
+| --- | --- | --- | --- | --- | --- | --- |
+| 560x888, simple profile (SOP), 0.50 bpp | 146 ms | 110 ms | 52 ms | 17 ms | 1183 ms | 108 ms |
+| 560x888, base profile (BOP), 0.12 bpp | 226 ms | 136 ms | 84 ms | 25 ms | 1204 ms | 116 ms |
+| 560x888, base profile (BOP), 0.50 bpp | 230 ms | 128 ms | 81 ms | 23 ms | 1192 ms | 118 ms |
+| 560x888, base profile (BOP), 1.00 bpp | 217 ms | 124 ms | 82 ms | 26 ms | 1120 ms | 145 ms |
+| 560x888, high profile (HOP), 0.50 bpp | 2313 ms | 660 ms | 1064 ms | 304 ms | 1645 ms | 441 ms |
+| 2096x1400, base profile (BOP), 0.50 bpp | 1228 ms | 512 ms | 496 ms | 157 ms | 1585 ms | 599 ms |
 
-So: ~2x to 2.5x faster on one thread, 6x to 7x with threads — and the margin grows
-under machine load, because the convolution accumulators no longer spill to the
-stack (see `benchmarks/conv_kernels_2026-09-18.md`). Letting the reference use all 32
-hardware threads did not help it on this box (its best single run was never better than 0.9x of
-its one-thread time, and the median was 2x to 6x worse); those rows are in the TSV.
+So: ~2.2x to 2.8x faster than the reference on one thread. Threads help the reference
+too (up to ~3.5x on HOP), but zenjpegai's eight-thread decode still beats its
+eight-thread decode by 2.2x to 6.3x — and the margin grows under machine load, because
+the convolution accumulators no longer spill to the stack (see
+`benchmarks/conv_kernels_2026-09-18.md`). Process wall — what a batch pipeline feels —
+is 4x to 11x faster end to end.
 Two picture sizes is a thin sample: no tiny pictures, nothing above 3 MP yet.
 
 Encode, all tools on (`--tools-on`; `benchmarks/encode_tools_on_2026-09-18.tsv`): the
@@ -80,6 +83,29 @@ In the browser (Chromium 153, RTX 2080 via Dawn/Vulkan, ~1 MP demo corpus, media
 `benchmarks/wasm_decode_2026-09-18_gpu.tsv`): the WebGPU package decodes a warm stream in
 ~55 ms vs ~104 ms on the threaded CPU package and ~700 ms on the single-threaded SIMD one,
 so `auto` uses the GPU when a hardware adapter exists (details: `web/README.md` §7).
+
+## Running the checks
+
+```
+cargo test --lib --tests                                    # public API only; no reference data needed
+cargo clippy --all-targets --all-features -- -D warnings
+ZENJPEGAI_REF=~/work/zen/jpeg-ai-reference-software \
+  cargo test --lib --tests --all-features                   # full parity gates vs the reference dumps
+cargo test --lib --tests --all-features tiers_and_threads   # every SIMD tier x thread count bit-identical
+```
+
+Reference-oracle commands (need the upstream checkout and vectors — setup in
+[`CONTRIBUTING.md`](CONTRIBUTING.md)):
+
+```
+scripts/bench/decode_end_to_end.sh > benchmarks/decode_end_to_end_$(date +%F).tsv
+scripts/bench/encode_end_to_end.sh > benchmarks/encode_end_to_end_$(date +%F).tsv
+HOST_LABEL=dev scripts/wasm/parity.sh > benchmarks/wasm_parity_$(date +%F).tsv   # wasm vs native vs reference
+cd web && npm ci && npm run build && npx playwright test    # browser suite (demo assets via scripts/fetch-demo-assets.mjs)
+```
+
+Status detail, the honest table of what is and is not ported, and every measured parity
+bound: [`PORTING.md`](PORTING.md). How to work here: [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## What JPEG AI is
 

@@ -18,7 +18,8 @@ convolutional networks whose weights come from upstream's PyTorch checkpoints.
 3. Reference vectors (streams + tensor dumps from the reference, not in git):
    `scripts/ref_vectors/make_reference_streams.sh all` writes them to
    `/mnt/v/output/zenjpegai/reference/vectors` (override `ZENJPEGAI_VECTORS`). Sets: `smoke
-   regions tools filters efe filtertiles qmap formats`. Minutes each.
+   regions tools filters efe efesolves filtertiles qmap formats icci420 encoder cubeflags
+   rate toolson` (or `all`). Minutes each.
 
 ## Everyday commands
 
@@ -56,7 +57,7 @@ hygiene".
 | post-filters | `src/filters/` | bounded float error |
 | chroma format, colour, bit depth | `src/decoder/output.rs` | bicubic resampler bit-identical to PyTorch |
 | one-call API, CLI | `src/decoder/api.rs`, `src/bin/zenjpegai.rs` | - |
-| encoder (colour, analysis, quantisation, tiling, rate matching, regions, tools, stream assembly) | `src/encoder/`, `src/model/{analysis,hyper_encoder}.rs`, `ContextModel::compress`, the encode side of `tools::{rvs,qualmap}` | every integer decision exactly; thirteen of seventeen reference encodes byte-identical, the other four the reference's length (`tests/encode_ref.rs`) |
+| encoder (colour, analysis, quantisation, tiling, rate matching, regions, tools incl. the four post-filters, stream assembly) | `src/encoder/`, `src/model/{analysis,hyper_encoder}.rs`, `ContextModel::compress`, the encode side of `tools::{rvs,qualmap}` | every integer decision exactly; twenty-one of twenty-seven reference encodes byte-identical, the other six the reference's length (`tests/encode_ref.rs`) |
 | SIMD engine (all float networks run on it) | `src/nn/fast/` | every tier / thread count bit-identical to `src/nn/reference.rs` |
 | browser build, GPU backend | `wasm/`, `web/`, `gpu/` | see their READMEs |
 
