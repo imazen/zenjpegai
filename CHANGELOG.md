@@ -167,6 +167,19 @@
   bit-identical across wasm tiers and thread counts; `benchmarks/wasm_kernel_2026-09-18.md` has
   the instruction counts and the rejected variants (B=2/6, paired taps, ntaps==9 unroll,
   iterator positions).
+- Native decode speed pass (d2native), same machine-code method as the wasm pass: generated
+  AVX-512 showed the V4 tile `B = 28` spilled all 28 accumulators to the stack every
+  `(input-channel, tap)` iteration — ~27 dead `vmovaps` stores per 28 FMAs. Retuned to
+  `B = 24` (spill-free), replaced the B=8/4/1 tail cascade with one overlapping full-width
+  block, unrolled the common tap counts (`ntaps` 1/4/9), made the int8 HSD conv keep its
+  accumulators in registers across all input pairs (was a store+load per pair) at `B = 24`,
+  gave the depthwise 3x3 a constant-trip tap loop, made `pad_par` write-once, and merged the
+  two border scratch fetches into one. Single-thread decode: ~40 % faster (560x888 BOP
+  138 -> 83 ms, HOP 2346 -> 1323 ms, 2096x1400 BOP 1041 -> 618 ms, interleaved A/B);
+  ~30-35 % at 8 threads. Bit-identical output on every tier and thread count;
+  `benchmarks/conv_kernels_2026-09-18.md`, `decode_end_to_end_2026-09-18_d2native{,_base}.tsv`.
+  VNNI (`vpdpwssd`) examined and not used: archmage/magetypes expose no safe op for the
+  packed layout.
 - `wasm/` crate (`zenjpegai-wasm`, wasm-bindgen: `addModels` / `info` / `decode`, single-thread SIMD128 build and a rayon `threads` build) and `web/scripts/build-wasm.sh`; `pkg-simd` is 389 KB (131 KB brotli). Polyfill, tests and demo are not written yet (`web/README.md`).
 - `Limits` (pixels, dimensions, input bytes, estimated memory; safe defaults 120 MP / 4 GiB), judged on the picture header before any model load or picture-sized allocation; `estimate_memory` / `Decoder::estimate_memory` (model calibrated on heaptrack measurements, `benchmarks/memory_2026-09-17.*`); `Decoder::preload`; `nn::fast::set_pool_limit` and `zenjpegai --pool-mb / --discard / preload`.
 - Decode memory: feature maps are freed as soon as the next layer has them, synthesis tiles go straight into the cropped / subsampled output planes, entropy-stage tensors are shed after use. Measured peak heap (heaptrack, decode only, default 1 GiB buffer pool): 560x888 SOP 83.7 to 64.7 MB, BOP 145.0 to 116.0 MB, HOP 1260 to 1190 MB, 2096x1400 BOP 389.5 to 309.1 MB; without buffer recycling (`--pool-mb 0`) 39.5 / 64.6 / 442.2 / 145.7 MB. Pixels identical, no slowdown (`benchmarks/memory_2026-09-17.*`, `decode_before_after_2026-09-17.tsv`).

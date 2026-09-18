@@ -1,0 +1,9 @@
+command: THREADS="1 8" RUNS=3 scripts/bench/decode_end_to_end.sh   (no -C target-cpu=native; runtime dispatch)
+source: baseline for the d2native conv pass — working copy at the base commit, before the
+        V4 tile retune (B=28, cascade tails, per-pair int stores). Compare against
+        decode_end_to_end_2026-09-18_d2native.tsv; the interleaved A/B table is in
+        benchmarks/conv_kernels_2026-09-18.md
+host: dev workstation, AMD Ryzen 9 9950X3D (16c/32T), Linux 7.0, rustc 1.98.1
+date: 2026-09-18
+notes: shared box, moderate load. zenjpegai mins here match the earlier
+       decode_end_to_end_2026-09-18.tsv within noise.

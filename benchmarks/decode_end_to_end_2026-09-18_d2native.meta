@@ -1,0 +1,11 @@
+command: THREADS="1 8" RUNS=3 scripts/bench/decode_end_to_end.sh   (no -C target-cpu=native; runtime dispatch)
+source: d2native workspace — native conv speed pass (V4 tile B=24 + overlap tail, const-NT tap
+        specialization, register-resident int conv, write-once pad_par); see
+        benchmarks/conv_kernels_2026-09-18.md for the machine-code analysis and the
+        interleaved A/B table vs decode_end_to_end_2026-09-18_d2native_base.tsv
+host: dev workstation, AMD Ryzen 9 9950X3D (16c/32T), Linux 7.0, rustc 1.98.1
+date: 2026-09-18
+notes: the box oscillated between idle and load ~40 during this run (other sessions);
+       per-row mins are inflated for BOTH decoders. zenjpegai 8-thread rows carry runs
+       4-6 appended from a later, quieter window (same binary). For the clean
+       before/after delta see the interleaved table in benchmarks/conv_kernels_2026-09-18.md.

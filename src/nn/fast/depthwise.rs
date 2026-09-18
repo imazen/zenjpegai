@@ -52,6 +52,17 @@ fn dw_row<F: SimdF32<V>, const V: usize>(t: F::Token, job: &mut DwRowJob<'_>) {
         *d = &s.as_chunks::<V>().0[..out.len()];
     }
     let ntaps = job.ntaps;
+    if ntaps == MAX_TAPS {
+        // The common 3x3 case gets a constant trip count: no per-tap exit tests.
+        for (x, o) in out.iter_mut().enumerate() {
+            let mut acc = bias;
+            for k in 0..MAX_TAPS {
+                acc = wv[k].mul_add(F::load(t, &rows[k][x]), acc);
+            }
+            acc.store(o);
+        }
+        return;
+    }
     for (x, o) in out.iter_mut().enumerate() {
         let mut acc = bias;
         for k in 0..ntaps {

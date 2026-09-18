@@ -46,21 +46,23 @@ ZENJPEGAI_MODELS=path/to/models target/release/zenjpegai decode picture.bits pic
 ## Speed
 
 Decode time on a Ryzen 9 9950X3D, same streams, same machine, no `-C target-cpu=native`
-(`scripts/bench/decode_end_to_end.sh`, raw data in `benchmarks/decode_end_to_end_2026-09-17b.tsv`).
+(`scripts/bench/decode_end_to_end.sh`, raw data in `benchmarks/decode_end_to_end_2026-09-18_d2native.tsv`).
 Reference = upstream `b9e573f` on PyTorch 1.10.2 CPU as shipped, which pins PyTorch to one thread;
 its number is its own `TOTAL` (model load excluded). zenjpegai numbers are steady state with models
 loaded; "process" is one whole command-line run including start-up, model load and PNG output.
 
 | stream | reference | zenjpegai, 1 thread | zenjpegai, threaded | reference process | zenjpegai process |
 | --- | --- | --- | --- | --- | --- |
-| 560x888, simple profile (SOP), 0.50 bpp | 132 ms | 56 ms | 21 ms | 950 ms | 109 ms |
-| 560x888, base profile (BOP), 0.12 bpp | 212 ms | 93 ms | 25 ms | 1023 ms | 117 ms |
-| 560x888, base profile (BOP), 0.50 bpp | 211 ms | 93 ms | 27 ms | 1034 ms | 121 ms |
-| 560x888, base profile (BOP), 1.00 bpp | 214 ms | 95 ms | 27 ms | 1037 ms | 156 ms |
-| 560x888, high profile (HOP), 0.50 bpp | 2279 ms | 1231 ms | 308 ms | 3118 ms | 437 ms |
-| 2096x1400, base profile (BOP), 0.50 bpp | 1227 ms | 533 ms | 151 ms | 2172 ms | 600 ms |
+| 560x888, simple profile (SOP), 0.50 bpp | 132 ms | 53 ms | 18 ms | 950 ms | 107 ms |
+| 560x888, base profile (BOP), 0.12 bpp | 212 ms | 84 ms | 24 ms | 1023 ms | 110 ms |
+| 560x888, base profile (BOP), 0.50 bpp | 211 ms | 83 ms | 27 ms | 1034 ms | 115 ms |
+| 560x888, base profile (BOP), 1.00 bpp | 214 ms | 88 ms | 25 ms | 1037 ms | 140 ms |
+| 560x888, high profile (HOP), 0.50 bpp | 2279 ms | 1151 ms | 376 ms | 3118 ms | 706 ms |
+| 2096x1400, base profile (BOP), 0.50 bpp | 1227 ms | 528 ms | 190 ms | 2172 ms | 807 ms |
 
-So: 1.9x to 2.4x faster on one thread, 6x to 8x with threads. Letting the reference use all 32
+So: ~2x to 2.5x faster on one thread, 6x to 7x with threads — and the margin grows
+under machine load, because the convolution accumulators no longer spill to the
+stack (see `benchmarks/conv_kernels_2026-09-18.md`). Letting the reference use all 32
 hardware threads did not help it on this box (its best single run was never better than 0.9x of
 its one-thread time, and the median was 2x to 6x worse); those rows are in the TSV.
 Two picture sizes is a thin sample: no tiny pictures, nothing above 3 MP yet.

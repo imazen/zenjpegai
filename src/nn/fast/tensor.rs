@@ -266,7 +266,8 @@ impl BTensor {
         Ok(out)
     }
 
-    /// [`Self::pad`], one task per row.
+    /// [`Self::pad`], one task per row. Every output cell is written exactly once — pad cells
+    /// are filled, input cells copied — so the pooled scratch buffer needs no pre-zeroing.
     pub fn pad_par(
         &self,
         eng: &Engine,
@@ -276,7 +277,7 @@ impl BTensor {
         right: usize,
     ) -> Result<Self> {
         let (ph, pw) = (self.h + top + bottom, self.w + left + right);
-        let mut out = Self::zeros(self.c, ph, pw, self.v)?;
+        let mut out = Self::scratch(self.c, ph, pw, self.v)?;
         let v = self.v;
         if pw == 0 {
             return Ok(out);
@@ -285,7 +286,11 @@ impl BTensor {
             let (b, y) = (idx / ph, idx % ph);
             if y >= top && y < top + self.h {
                 let src = &self.data[(b * self.h + y - top) * self.w * v..][..self.w * v];
+                row[..left * v].fill(0.0);
                 row[left * v..][..self.w * v].copy_from_slice(src);
+                row[(left + self.w) * v..].fill(0.0);
+            } else {
+                row.fill(0.0);
             }
         });
         Ok(out)

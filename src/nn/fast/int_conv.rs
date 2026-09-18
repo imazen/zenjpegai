@@ -168,27 +168,117 @@ struct IntRowJob<'a> {
     bias: &'a [i32],
 }
 
+/// `B` output positions accumulated over every `(channel pair, tap)`: the accumulators stay
+/// in registers across the whole loop — each starts at the bias and is stored once — so an
+/// output position's value passes through memory exactly once, at the store.
 #[inline(always)]
+#[allow(clippy::too_many_arguments)]
 fn int_block<F: SimdMadd<V, V2>, const V: usize, const V2: usize, const B: usize>(
     t: F::Token,
     out: &mut [[i32; V]],
-    rows: &[&[[i16; 2]]],
-    j: usize,
+    taps: &[(usize, usize)],
+    pairs: usize,
+    ph: usize,
+    pw: usize,
+    xp: &[[i16; 2]],
     w: &[[i16; V2]],
+    bias: F::Acc,
+    j: usize,
 ) {
-    let mut acc = [F::acc_load(t, &out[0]); B];
-    for b in 1..B {
-        acc[b] = F::acc_load(t, &out[b]);
-    }
-    for (r, wv) in rows.iter().zip(w) {
-        let r = &r[j..j + B];
-        let wv = F::weights(t, wv);
-        for b in 0..B {
-            acc[b] = F::acc_add(acc[b], wv.madd(F::pair(t, r[b][0], r[b][1])));
-        }
+    let mut acc = [bias; B];
+    let ntaps = taps.len();
+    match ntaps {
+        1 => int_taps::<F, V, V2, B, 1>(
+            t,
+            &mut acc,
+            taps.try_into().unwrap(),
+            pairs,
+            ph,
+            pw,
+            xp,
+            w,
+            j,
+        ),
+        9 => int_taps::<F, V, V2, B, 9>(
+            t,
+            &mut acc,
+            taps.try_into().unwrap(),
+            pairs,
+            ph,
+            pw,
+            xp,
+            w,
+            j,
+        ),
+        _ => int_taps_dyn::<F, V, V2, B>(t, &mut acc, taps, pairs, ph, pw, xp, w, j),
     }
     for b in 0..B {
         F::acc_store(acc[b], &mut out[b]);
+    }
+}
+
+/// The `(pair, tap)` sweep of [`int_block`], fixed tap count: the tap loop unrolls fully, so
+/// each weight vector offset and tap entry is a constant.
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn int_taps<
+    F: SimdMadd<V, V2>,
+    const V: usize,
+    const V2: usize,
+    const B: usize,
+    const NT: usize,
+>(
+    t: F::Token,
+    acc: &mut [F::Acc; B],
+    taps: &[(usize, usize); NT],
+    pairs: usize,
+    ph: usize,
+    pw: usize,
+    xp: &[[i16; 2]],
+    w: &[[i16; V2]],
+    j: usize,
+) {
+    for p in 0..pairs {
+        let wp: &[[i16; V2]; NT] = w[p * NT..][..NT].try_into().unwrap();
+        for k in 0..NT {
+            let (y, dx) = taps[k];
+            let r = &xp[(p * ph + y) * pw + dx + j..];
+            // Always true (the padded input is wide enough); lets the optimizer drop the
+            // `r[b]` bounds checks. The accumulators are indexed, not iterated — `iter_mut`
+            // would force the array to memory.
+            assert!(r.len() >= B);
+            let wv = F::weights(t, &wp[k]);
+            for b in 0..B {
+                acc[b] = F::acc_add(acc[b], wv.madd(F::pair(t, r[b][0], r[b][1])));
+            }
+        }
+    }
+}
+
+/// [`int_taps`] with a runtime tap count.
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn int_taps_dyn<F: SimdMadd<V, V2>, const V: usize, const V2: usize, const B: usize>(
+    t: F::Token,
+    acc: &mut [F::Acc; B],
+    taps: &[(usize, usize)],
+    pairs: usize,
+    ph: usize,
+    pw: usize,
+    xp: &[[i16; 2]],
+    w: &[[i16; V2]],
+    j: usize,
+) {
+    let ntaps = taps.len();
+    for p in 0..pairs {
+        for (wv, &(y, dx)) in w[p * ntaps..][..ntaps].iter().zip(taps) {
+            let r = &xp[(p * ph + y) * pw + dx + j..];
+            assert!(r.len() >= B);
+            let wv = F::weights(t, wv);
+            for b in 0..B {
+                acc[b] = F::acc_add(acc[b], wv.madd(F::pair(t, r[b][0], r[b][1])));
+            }
+        }
     }
 }
 
@@ -197,39 +287,53 @@ fn int_row<F: SimdMadd<V, V2>, const V: usize, const V2: usize, const B: usize>(
     t: F::Token,
     job: &mut IntRowJob<'_>,
 ) {
+    // Copy the `&'a` inputs and scalars out of `job` so the `out` chunk view can hold the
+    // only borrow on it.
+    let (taps, pairs, ph, pw) = (job.taps, job.pairs, job.ph, job.pw);
     let (out, _) = job.out.as_chunks_mut::<V>();
     let (xp, _) = job.xp.as_chunks::<2>();
     let (w, _) = job.w.as_chunks::<V2>();
     let n = out.len();
     let mut bias = [0i32; V];
     bias.copy_from_slice(&job.bias[..V]);
-    for o in out.iter_mut() {
-        *o = bias;
+    let bias = F::acc_load(t, &bias);
+    let mut j = 0;
+    while j + B <= n {
+        int_block::<F, V, V2, B>(t, &mut out[j..], taps, pairs, ph, pw, xp, w, bias, j);
+        j += B;
     }
-    let ntaps = job.taps.len();
-    for p in 0..job.pairs {
-        let wp = &w[p * ntaps..][..ntaps];
-        let mut rows: [&[[i16; 2]]; 9] = [&[]; 9];
-        for (r, &(y, dx)) in rows.iter_mut().zip(job.taps) {
-            *r = &xp[(p * job.ph + y) * job.pw + dx..][..n];
-        }
-        let rows = &rows[..ntaps];
-        let mut j = 0;
-        while j + B <= n {
-            int_block::<F, V, V2, B>(t, &mut out[j..], rows, j, wp);
-            j += B;
-        }
-        while j < n {
-            int_block::<F, V, V2, 1>(t, &mut out[j..], rows, j, wp);
-            j += 1;
-        }
+    if j < n && n >= B {
+        // One overlapping block covers the tail: positions n - B..j are recomputed with the
+        // same values and stored twice — cheap next to a cascade of B = 1 blocks, each of
+        // which pays the full (channel pair, tap) sweep.
+        int_block::<F, V, V2, B>(
+            t,
+            &mut out[n - B..],
+            taps,
+            pairs,
+            ph,
+            pw,
+            xp,
+            w,
+            bias,
+            n - B,
+        );
+        return;
+    }
+    while j + 8 <= n {
+        int_block::<F, V, V2, 8>(t, &mut out[j..], taps, pairs, ph, pw, xp, w, bias, j);
+        j += 8;
+    }
+    while j < n {
+        int_block::<F, V, V2, 1>(t, &mut out[j..], taps, pairs, ph, pw, xp, w, bias, j);
+        j += 1;
     }
 }
 
 #[cfg(feature = "avx512")]
 #[arcane]
 fn int_row_v4(t: X64V4Token, job: &mut IntRowJob<'_>) {
-    int_row::<i16x32<X64V4Token>, 16, 32, 14>(t, job)
+    int_row::<i16x32<X64V4Token>, 16, 32, 24>(t, job)
 }
 
 #[arcane]

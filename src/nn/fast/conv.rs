@@ -65,7 +65,8 @@ static ZERO_PAD: [f32; 1024] = [0.0; 1024];
 
 /// The `(tap) x B` body for one input channel `v`: one weight-vector load per tap, each
 /// followed by `B` splat-load / multiply / add steps. The always-true `assert` lets the
-/// optimizer drop the `r[b * S]` bounds checks from the unrolled position loop.
+/// optimizer drop the `r[b * S]` bounds checks from the unrolled position loop; the
+/// accumulators must be indexed, not iterated — `iter_mut` forces the array to memory.
 #[inline(always)]
 fn tap_loop<F: SimdF32<V>, const V: usize, const B: usize, const S: usize>(
     t: F::Token,
@@ -81,6 +82,27 @@ fn tap_loop<F: SimdF32<V>, const V: usize, const B: usize, const S: usize>(
         let wv = F::load(t, wt);
         for b in 0..B {
             // `v < V` always; the mask lets the compiler see it.
+            acc[b] = wv.mul_add(F::splat(t, r[b * S][v & (V - 1)]), acc[b]);
+        }
+    }
+}
+
+/// [`tap_loop`] with a compile-time tap count: the tap loop unrolls fully, so each weight
+/// vector offset and `sr` slot is a constant. `NT` covers every layer in the models (1x1
+/// convs, the 2x2 phases of a stride-2 transposed 4x4, 3x3 convs).
+#[inline(always)]
+fn tap_loop_n<F: SimdF32<V>, const V: usize, const B: usize, const S: usize, const NT: usize>(
+    t: F::Token,
+    acc: &mut [F; B],
+    wrow: &[[f32; V]; NT],
+    sr: &[&[[f32; V]]; NT],
+    v: usize,
+) {
+    for t_ in 0..NT {
+        let (wt, r) = (&wrow[t_], sr[t_]);
+        assert!(r.len() > (B - 1) * S);
+        let wv = F::load(t, wt);
+        for b in 0..B {
             acc[b] = wv.mul_add(F::splat(t, r[b * S][v & (V - 1)]), acc[b]);
         }
     }
@@ -132,9 +154,53 @@ fn block<F: SimdF32<V>, const V: usize, const B: usize, const S: usize>(
             }
             // `vin == V` (every input block but possibly the last) gets a constant trip count:
             // the v-loop unrolls and each splat offset folds into the load instruction.
+            // Constant tap counts (1x1, 2x2 convT phases, 3x3) unroll the tap loop too.
             if vin == V {
-                for v in 0..V {
-                    tap_loop::<F, V, B, S>(t, &mut acc, &wblk[v * ntaps..][..ntaps], &sr, v);
+                match ntaps {
+                    1 => {
+                        for v in 0..V {
+                            tap_loop_n::<F, V, B, S, 1>(
+                                t,
+                                &mut acc,
+                                wblk[v..][..1].try_into().unwrap(),
+                                sr[..1].try_into().unwrap(),
+                                v,
+                            );
+                        }
+                    }
+                    4 => {
+                        for v in 0..V {
+                            tap_loop_n::<F, V, B, S, 4>(
+                                t,
+                                &mut acc,
+                                wblk[v * 4..][..4].try_into().unwrap(),
+                                sr[..4].try_into().unwrap(),
+                                v,
+                            );
+                        }
+                    }
+                    9 => {
+                        for v in 0..V {
+                            tap_loop_n::<F, V, B, S, 9>(
+                                t,
+                                &mut acc,
+                                wblk[v * 9..][..9].try_into().unwrap(),
+                                sr[..9].try_into().unwrap(),
+                                v,
+                            );
+                        }
+                    }
+                    _ => {
+                        for v in 0..V {
+                            tap_loop::<F, V, B, S>(
+                                t,
+                                &mut acc,
+                                &wblk[v * ntaps..][..ntaps],
+                                &sr,
+                                v,
+                            );
+                        }
+                    }
                 }
             } else {
                 for (v, wrow) in wblk.chunks_exact(ntaps).enumerate() {
@@ -178,6 +244,13 @@ fn conv_row_s<F: SimdF32<V>, const V: usize, const B: usize, const S: usize>(
         block::<F, V, B, S>(t, job, xp, w, &bias, j);
         j += B;
     }
+    if j < n && n >= B {
+        // One overlapping block covers the tail: positions n - B..j are recomputed with the
+        // same values and stored twice — cheap next to a cascade of narrower blocks, each of
+        // which pays the full (input channel, tap) sweep.
+        block::<F, V, B, S>(t, job, xp, w, &bias, n - B);
+        return;
+    }
     while j + 8 <= n {
         block::<F, V, 8, S>(t, job, xp, w, &bias, j);
         j += 8;
@@ -195,11 +268,15 @@ fn conv_row_s<F: SimdF32<V>, const V: usize, const B: usize, const S: usize>(
 #[cfg(feature = "avx512")]
 #[arcane]
 fn conv_row_v4(t: X64V4Token, job: &mut RowJob<'_>) {
-    conv_row::<f32x16<X64V4Token>, 16, 28>(t, job)
+    // AVX-512 has 32 vector registers: B = 24 keeps 24 accumulators plus the weight vector
+    // and broadcast temporaries resident (B = 27+ spills, see benchmarks/conv_kernels_*).
+    conv_row::<f32x16<X64V4Token>, 16, 24>(t, job)
 }
 
 #[arcane]
 fn conv_row_v3(t: X64V3Token, job: &mut RowJob<'_>) {
+    // 16 ymm registers: B = 12 accumulators + weight + broadcast temporaries just fit
+    // (B = 14 spills one accumulator per FMA, benchmarks/conv_kernels_*).
     conv_row::<f32x8<X64V3Token>, 8, 12>(t, job)
 }
 
@@ -444,40 +521,52 @@ impl PackedConv {
             }
             // Border columns: copy their (few) input windows into a small padded buffer.
             // The scratch is per-thread: every row needs one, and a fresh `vec![0.0; n]` per
-            // row contends on the global allocator under `threads`.
-            for (ja, jb) in [(0, j0), (j1, ow)] {
-                if jb <= ja {
-                    continue;
-                }
-                let bw = (jb - ja - 1) * st + self.kw;
-                border_buf((icb1 - icb0) * self.kh * bw * v, |buf| {
-                    self.border_row(&x.data, h, w, in_row, icb0, icb1, ja, bw, buf);
-                    let mut taps = [(None, 0usize); MAX_TAPS];
-                    for ky in 0..self.kh {
-                        for kx in 0..self.kw {
-                            taps[ky * self.kw + kx] = (Some(ky), kx);
+            // row contends on the global allocator under `threads`. Both sides share one
+            // buffer, so there is at most one TLS access per row.
+            let bwl = if j0 > 0 { (j0 - 1) * st + self.kw } else { 0 };
+            let bwr = if ow > j1 {
+                (ow - j1 - 1) * st + self.kw
+            } else {
+                0
+            };
+            if bwl + bwr > 0 {
+                let nblk = icb1 - icb0;
+                border_buf(nblk * self.kh * (bwl + bwr) * v, |buf| {
+                    for (side, (ja, jb)) in [(0, j0), (j1, ow)].into_iter().enumerate() {
+                        if jb <= ja {
+                            continue;
                         }
+                        let bw = (jb - ja - 1) * st + self.kw;
+                        let buf =
+                            &mut buf[side * nblk * self.kh * bwl * v..][..nblk * self.kh * bw * v];
+                        self.border_row(&x.data, h, w, in_row, icb0, icb1, ja, bw, buf);
+                        let mut taps = [(None, 0usize); MAX_TAPS];
+                        for ky in 0..self.kh {
+                            for kx in 0..self.kw {
+                                taps[ky * self.kw + kx] = (Some(ky), kx);
+                            }
+                        }
+                        run_row(
+                            tier,
+                            &mut RowJob {
+                                out: &mut *row,
+                                o0: ja,
+                                os: 1,
+                                n: jb - ja,
+                                xp: buf,
+                                ph: self.kh,
+                                pw: bw,
+                                icb_base: icb0,
+                                icb0,
+                                icb1,
+                                in_ch: self.in_ch,
+                                is: st,
+                                taps: &taps[..ntaps],
+                                w: wts,
+                                bias,
+                            },
+                        );
                     }
-                    run_row(
-                        tier,
-                        &mut RowJob {
-                            out: &mut *row,
-                            o0: ja,
-                            os: 1,
-                            n: jb - ja,
-                            xp: buf,
-                            ph: self.kh,
-                            pw: bw,
-                            icb_base: icb0,
-                            icb0,
-                            icb1,
-                            in_ch: self.in_ch,
-                            is: st,
-                            taps: &taps[..ntaps],
-                            w: wts,
-                            bias,
-                        },
-                    );
                 });
             }
         });
@@ -505,10 +594,14 @@ impl PackedConv {
                 let Some(iy) = in_row(ky) else { continue };
                 let src = &x[(icb * h + iy) * w * v..][..w * v];
                 let dst = &mut buf[((icb - icb0) * self.kh + ky) * bw * v..][..bw * v];
-                for c in 0..bw {
-                    if let Some(ix) = (ja * st + c).checked_sub(pl).filter(|&ix| ix < w) {
-                        dst[c * v..][..v].copy_from_slice(&src[ix * v..][..v]);
-                    }
+                // The in-range cells `c` (input column `ja * st + c - pl` in `0..w`) form one
+                // contiguous run: copy it in a single slice copy. Cells before/after it are
+                // the padding and stay zero.
+                let c0 = pl.saturating_sub(ja * st);
+                let c1 = (w + pl).saturating_sub(ja * st).min(bw);
+                if c0 < c1 {
+                    let ix0 = ja * st + c0 - pl;
+                    dst[c0 * v..c1 * v].copy_from_slice(&src[ix0 * v..(ix0 + c1 - c0) * v]);
                 }
             }
         }
