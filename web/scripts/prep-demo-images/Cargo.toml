@@ -1,0 +1,20 @@
+[workspace]
+
+[package]
+name = "prep-demo-images"
+version = "0.0.1"
+edition = "2021"
+publish = false
+license = "AGPL-3.0-only OR LicenseRef-Imazen-Commercial"
+
+# Standalone helper, not a workspace member of the main crate: downscales demo source PNGs to
+# ~1 MP for the wasm/browser demo, using only imazen imaging crates (zenpng decode/encode,
+# zenresize resample) per CLAUDE.md's imazen-only-imaging-software rule. Not built by CI or by
+# `cargo build` at the repo root; run by hand, see web/demo/IMAGES.md.
+[dependencies]
+zenpng = "0.1"
+zenpixels-convert = { version = "0.2", features = ["rgb", "imgref"] }
+zenresize = "0.3"
+imgref = "1"
+rgb = "0.8"
+enough = "0.4"

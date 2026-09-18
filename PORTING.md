@@ -635,3 +635,19 @@ Appended by the second encoder agent, 2026-09-17:
   `enc_img01_bop_m1_b0`.
 - Open: items 1.1-1.5 above. Nothing of them is started. The encoder is also **not** wired into
   `zencodec` (the standards agent's item 3) and has no `Limits` of its own.
+
+Appended by the browser (`wasm`) agent, 2026-09-18, continuing the above:
+
+- Landed: worker pool + `<img>`/`<picture>` polyfill, the threads package now actually runs (it
+  had never linked — see `web/README.md` "Done and measured" #1 for the three real bugs found
+  running it in a browser for the first time), a 36-test Playwright suite across
+  chromium/firefox/webkit x 3 CSP/isolation profiles, the demo + `demo-assets-v1` release,
+  `.github/workflows/pages.yml`, a wasm size audit (`benchmarks/wasm_size_2026-09-18.md`, new
+  additive `pth` core-crate feature), and a measured (not assumed) Display-P3 canvas support
+  matrix per browser. Full detail: `web/README.md`.
+- Open: GitHub Pages is not enabled on the repo (private; needs a human to flip Settings ->
+  Pages -> Source: GitHub Actions — see `web/README.md` "Not done" for exactly what that makes
+  public). Wide-gamut (P3) canvas output is a documented hook (`web/README.md` "Colour"), not
+  implemented — no reference/demo stream carries non-sRGB CICP to build and test it against.
+  `gpu/README.md` now exists (landed after this agent's first check found it absent) — GPU
+  wiring into the web build is worth revisiting; see `web/README.md` for what was found.

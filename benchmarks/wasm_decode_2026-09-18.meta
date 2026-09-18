@@ -1,0 +1,4 @@
+commit	8b19b197d1ed
+host	dev
+command	npx playwright test tests/benchmark.spec.ts
+date	2026-09-18

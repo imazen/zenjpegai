@@ -1,27 +1,40 @@
-//! Reader for the reference software's PyTorch checkpoints (`models/**/*.pth`).
+//! Reader for the reference software's PyTorch checkpoints (`models/**/*.pth`) and packed
+//! bundles.
 //!
 //! A `.pth` file is an uncompressed ZIP holding `<prefix>/data.pkl` (a pickled state dict whose
 //! tensors are persistent references to storages) and one `<prefix>/data/<key>` member per
 //! storage, little-endian. [`Checkpoint::parse`] runs the pickle through a data-only interpreter
 //! (no code execution) and exposes the top-level tensors by name; tensor bytes are only touched
 //! when a tensor is requested, so the optimizer state some upstream files carry costs nothing.
+//! Reading raw `.pth` files needs the `pth` feature (on by default; off in the browser wasm
+//! build, which only ever reads packed `ZJM1`/`ZJB1` bundles — see `wasm/Cargo.toml` and
+//! `benchmarks/wasm_size_*.md`). With `pth` off, [`Checkpoint::parse`] accepts packed files only.
 
+pub mod dtype;
 pub mod packed;
+#[cfg(feature = "pth")]
 mod pickle;
+#[cfg(feature = "pth")]
 mod zip;
 
-use alloc::string::{String, ToString};
+use alloc::string::String;
+#[cfg(feature = "pth")]
+use alloc::string::ToString;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 
+pub use dtype::{DType, TensorRef};
+#[cfg(feature = "pth")]
 use pickle::Value;
-pub use pickle::{DType, TensorRef};
 
 use crate::error::{Error, Result};
 
 /// Where tensor bytes live.
 enum Backing<'a> {
-    /// A PyTorch ZIP: storages are archive members `<prefix>data/<key>`.
+    /// A PyTorch ZIP: storages are archive members `<prefix>data/<key>`. Only ever constructed
+    /// with the `pth` feature on (see [`Checkpoint::parse`]), but the variant itself stays
+    /// unconditional so [`Backing`]'s other match arms don't need `#[cfg]` scattered on them.
+    #[cfg(feature = "pth")]
     Torch {
         archive: zip::Archive<'a>,
         prefix: String,
@@ -61,7 +74,8 @@ fn model_err(msg: impl Into<String>) -> Error {
 }
 
 impl<'a> Checkpoint<'a> {
-    /// Parse a PyTorch `.pth` file or a packed `ZJM1` file (told apart by the magic).
+    /// Parse a PyTorch `.pth` file (needs the `pth` feature) or a packed `ZJM1` file (told apart
+    /// by the magic).
     pub fn parse(file: &'a [u8]) -> Result<Self> {
         if file.starts_with(packed::ZJM_MAGIC) {
             let (tensors, ints) = packed::parse_zjm(file)?;
@@ -72,34 +86,41 @@ impl<'a> Checkpoint<'a> {
                 ints,
             });
         }
-        let archive = zip::Archive::parse(file)?;
-        let pkl = archive
-            .entries
-            .iter()
-            .find(|e| e.name.ends_with("/data.pkl") || e.name == "data.pkl")
-            .ok_or_else(|| model_err("checkpoint has no data.pkl"))?;
-        let prefix = pkl.name.strip_suffix("data.pkl").unwrap_or("").to_string();
-        let root = pickle::load(pkl.data)?;
-        let Value::Dict(items) = root else {
-            return Err(model_err("checkpoint root is not a state dict"));
-        };
-        let mut tensors = Vec::new();
-        let mut ints = Vec::new();
-        for (k, v) in items {
-            let Value::Str(name) = k else { continue };
-            match v {
-                Value::Tensor(t) => tensors.push((name, t)),
-                Value::Int(i) => ints.push((name, i)),
-                // nested dicts (optimizer state) and anything else are not model weights
-                _ => {}
+        #[cfg(feature = "pth")]
+        {
+            let archive = zip::Archive::parse(file)?;
+            let pkl = archive
+                .entries
+                .iter()
+                .find(|e| e.name.ends_with("/data.pkl") || e.name == "data.pkl")
+                .ok_or_else(|| model_err("checkpoint has no data.pkl"))?;
+            let prefix = pkl.name.strip_suffix("data.pkl").unwrap_or("").to_string();
+            let root = pickle::load(pkl.data)?;
+            let Value::Dict(items) = root else {
+                return Err(model_err("checkpoint root is not a state dict"));
+            };
+            let mut tensors = Vec::new();
+            let mut ints = Vec::new();
+            for (k, v) in items {
+                let Value::Str(name) = k else { continue };
+                match v {
+                    Value::Tensor(t) => tensors.push((name, t)),
+                    Value::Int(i) => ints.push((name, i)),
+                    // nested dicts (optimizer state) and anything else are not model weights
+                    _ => {}
+                }
             }
+            Ok(Self {
+                backing: Backing::Torch { archive, prefix },
+                touched: tensors.iter().map(|_| AtomicBool::new(false)).collect(),
+                tensors,
+                ints,
+            })
         }
-        Ok(Self {
-            backing: Backing::Torch { archive, prefix },
-            touched: tensors.iter().map(|_| AtomicBool::new(false)).collect(),
-            tensors,
-            ints,
-        })
+        #[cfg(not(feature = "pth"))]
+        Err(model_err(
+            "not a packed ZJM1/ZJB1 file, and this build has no `.pth` (PyTorch checkpoint) support",
+        ))
     }
 
     /// Names of the top-level tensors, in file order.
@@ -156,6 +177,7 @@ impl<'a> Checkpoint<'a> {
             )));
         }
         let storage = match &self.backing {
+            #[cfg(feature = "pth")]
             Backing::Torch { archive, prefix } => archive
                 .get(&alloc::format!("{prefix}data/{}", t.storage_key))
                 .ok_or_else(|| {

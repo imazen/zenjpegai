@@ -38,7 +38,7 @@ use alloc::borrow::Cow;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use super::pickle::{DType, TensorRef};
+use super::dtype::{DType, TensorRef};
 use super::{Checkpoint, model_err};
 use crate::error::{Error, Result};
 

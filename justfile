@@ -42,3 +42,13 @@ test-wasi:
 # Wasm-vs-reference-vs-native 8-bit parity table.
 wasm-parity:
     scripts/wasm/parity.sh | tee benchmarks/wasm_parity_$(date +%F).tsv
+
+# Browser build + Playwright suite: wasm packages, npm deps, demo-assets-v1 (needs `gh` auth
+# against the private repo today), the servable site, then chromium+firefox+webkit tests.
+# See web/README.md for the pieces and what each covers.
+web-test:
+    web/scripts/build-wasm.sh
+    cd web && npm ci
+    node web/scripts/fetch-demo-assets.mjs
+    node web/scripts/build-site.mjs
+    cd web && npx playwright test

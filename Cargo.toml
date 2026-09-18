@@ -20,7 +20,7 @@ include = ["/src", "LICENSE-AGPL3", "LICENSE-COMMERCIAL", "upstream-notices", "R
 members = [".", "gpu", "wasm"]
 
 [features]
-default = ["std", "parallel", "avx512"]
+default = ["std", "parallel", "avx512", "pth"]
 # File IO helpers (checkpoint loading from disk) and std::error::Error impls.
 std = []
 # Multi-threaded network inference and entropy-thread decoding via rayon.
@@ -37,12 +37,19 @@ avx512 = ["archmage/avx512", "magetypes/avx512"]
 unstable-internals = []
 # The `zenjpegai` command line tool (PNG output through zenpng). Needs unstable-internals: the
 # CLI reaches nn::fast::{Engine, Tier, set_pool_limit}, model::*, weights::packed::*.
-cli = ["std", "dep:zenpng", "dep:imgref", "dep:rgb", "unstable-internals"]
+cli = ["std", "pth", "dep:zenpng", "dep:imgref", "dep:rgb", "unstable-internals"]
 # zencodec trait implementations (DecoderConfig / DecodeJob / Decode) for dispatch through
 # zencodecs and other zencodec-driven pipelines. RGB output only today (see src/codec.rs).
 # Needs unstable-internals: JpegAiDecoderConfig's public API takes model::ModelSource +
 # nn::fast::Engine.
 zencodec = ["std", "dep:zencodec", "dep:zenpixels", "unstable-internals"]
+# Reading raw upstream PyTorch `.pth` checkpoints (a ZIP + a data-only pickle interpreter,
+# `src/weights/{pickle,zip}.rs`) straight from a model directory, as opposed to only the packed
+# `ZJM1`/`ZJB1` bundles `pack-models` writes (`src/weights/packed.rs`, always available). On by
+# default; the browser wasm build turns it off (`wasm/Cargo.toml`: it only ever reads packed
+# bundles) to drop the pickle interpreter from the shipped binary — see
+# `benchmarks/wasm_size_*.md`.
+pth = []
 
 [dependencies]
 archmage = { version = "0.9.29", features = ["macros"] }
@@ -168,3 +175,9 @@ codegen-units = 1
 panic = "abort"
 debug = false
 incremental = false
+
+# Size-measurement variant of wasm-release (see benchmarks/wasm_size_*.md): opt-level "z" vs "3",
+# everything else identical. Not built by web/scripts/build-wasm.sh; a one-off A/B measurement.
+[profile.wasm-release-z]
+inherits = "wasm-release"
+opt-level = "z"

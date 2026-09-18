@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>zenjpegai — JPEG AI in the browser</title>
+<link rel="stylesheet" href="demo.css">
+</head>
+<body>
+<header>
+  <h1>zenjpegai: JPEG AI (ISO/IEC 6048) decoded in the browser</h1>
+  <p>
+    A pure-Rust, <code>#![forbid(unsafe_code)]</code> port of the JPEG AI reference software,
+    compiled to WebAssembly and run in Web Workers. Every image below is decoded client-side —
+    nothing is pre-rendered. Source:
+    <a href="https://github.com/imazen/zenjpegai">github.com/imazen/zenjpegai</a>.
+  </p>
+  <dl id="status" class="status"></dl>
+</header>
+
+<main>
+  <section id="license-notice" class="notice" hidden>
+    <strong>Model weights:</strong> <span id="license-text"></span>
+  </section>
+
+  <section id="gpu-note" class="notice"></section>
+
+  <div id="gallery" class="gallery"></div>
+</main>
+
+<footer>
+  <p>Image provenance and licensing: <a href="IMAGES.md">IMAGES.md</a>. Reference software:
+  <a href="https://gitlab.com/wg1/jpeg-ai/jpeg-ai-reference-software">gitlab.com/wg1/jpeg-ai/jpeg-ai-reference-software</a>.</p>
+</footer>
+
+<script type="module" src="demo.js"></script>
+</body>
+</html>

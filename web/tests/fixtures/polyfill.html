@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>polyfill fixture</title></head>
+<body>
+<!-- direct src, default (canvas) render mode -->
+<img id="direct" src="streams/line-plot_bpp25.jai" alt="line plot test image" width="1000" height="1000" data-model-id="0">
+
+<!-- srcset with a single w-descriptor candidate -->
+<img id="srcset" srcset="streams/clipart_bpp25.jai 816w" alt="clipart test image" data-model-id="2">
+
+<!-- picture > source[type=image/jpeg-ai], falls back to a PNG the browser CAN decode natively
+     (proves the polyfill intervenes instead of leaving the native fallback in place) -->
+<picture id="picture">
+  <source type="image/jpeg-ai" srcset="streams/artwork_bpp25.jai">
+  <img alt="artwork test image" data-model-id="2">
+</picture>
+
+<!-- opt-in "img" render mode: blob: URL swap instead of a canvas element -->
+<img id="imgmode" src="streams/dumplings_bpp25.jai" alt="dumplings test image" data-jai-render="img" data-model-id="1">
+
+<!-- lazy: loading=lazy defers decode until intersection; starts far below the fold -->
+<div style="height:3000px"></div>
+<img id="lazy" loading="lazy" src="streams/mountain_bpp25.jai" alt="mountain test image" data-model-id="1">
+
+<script src="csp-log.js"></script>
+<script type="module" src="polyfill-init.js"></script>
+</body>
+</html>

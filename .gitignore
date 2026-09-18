@@ -7,6 +7,7 @@ target/
 # model weights and reference streams never go in git (see models/README.md)
 *.pth
 *.zjai
+*.zjb
 /models/*.bin
 /scratch/
 
@@ -34,3 +35,5 @@ web/.tools/
 web/test-results/
 web/playwright-report/
 web/assets/
+web/.demo-assets/
+web/scripts/prep-demo-images/target/
