@@ -995,8 +995,7 @@ impl GpuSynthesis {
                 "zenjpegai latent",
             )?;
             if let Some(b) = &ws.latents[i] {
-                ctx.queue()
-                    .write_buffer(b, 0, bytemuck::cast_slice(&packed));
+                ctx.write_buffer(b, bytemuck::cast_slice(&packed));
             }
         }
         let rec_bytes = (3 * height * width * 4) as u64;

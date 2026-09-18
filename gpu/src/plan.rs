@@ -774,7 +774,7 @@ impl<'a> Graph<'a> {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        ctx.queue.write_buffer(&uniforms, 0, &blob);
+        ctx.write_buffer(&uniforms, &blob);
 
         let buffer_of = |id: usize| -> &wgpu::Buffer {
             match &self.tensors[id].external {
@@ -910,8 +910,7 @@ impl Plan {
     /// Upload a planar `[C, H, W]` map into input `t`.
     pub fn write(&self, ctx: &GpuContext, t: T, planar: &[f32]) -> Result<()> {
         let packed = crate::layers::pack_hwc4(planar, t.c, t.h, t.w)?;
-        ctx.queue
-            .write_buffer(self.buffer(t)?, 0, bytemuck::cast_slice(&packed));
+        ctx.write_buffer(self.buffer(t)?, bytemuck::cast_slice(&packed));
         Ok(())
     }
 

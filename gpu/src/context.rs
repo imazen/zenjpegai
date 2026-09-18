@@ -37,6 +37,11 @@ impl core::fmt::Debug for GpuContext {
     }
 }
 
+/// Size of one `queue.write_buffer` call, a multiple of `COPY_BUFFER_ALIGNMENT`. Chosen well
+/// under every backend's write staging (Dawn splits queue writes itself); the largest uploads
+/// here are a few MiB, so this almost always means exactly one call.
+const WRITE_CHUNK: usize = 16 << 20;
+
 fn is_software(info: &wgpu::AdapterInfo) -> bool {
     info.device_type == wgpu::DeviceType::Cpu
 }
@@ -206,6 +211,22 @@ impl GpuContext {
     /// Number of compiled pipelines (cold-start accounting in the benchmarks).
     pub fn pipeline_count(&self) -> usize {
         self.pipelines.lock().map(|m| m.len()).unwrap_or(0)
+    }
+
+    /// Upload `data` into `buffer` (which must carry `COPY_DST`) through
+    /// [`wgpu::Queue::write_buffer`], chunked so no single call has to stage the whole thing.
+    ///
+    /// Uploads never go through `create_buffer_init` / `mapped_at_creation`: on the browser's
+    /// WebGPU backend a buffer mapped at creation is staged through a bounded shared-memory
+    /// window in Dawn, and over that limit the JS `createBuffer` throws a synchronous
+    /// RangeError that wgpu `unwrap`s into an unreachable wasm trap (`panic = "abort"`, so it
+    /// escapes the calling promise entirely). Queue writes have no such failure mode on
+    /// either backend.
+    pub(crate) fn write_buffer(&self, buffer: &wgpu::Buffer, data: &[u8]) {
+        for (i, chunk) in data.chunks(WRITE_CHUNK).enumerate() {
+            self.queue
+                .write_buffer(buffer, (i * WRITE_CHUNK) as u64, chunk);
+        }
     }
 
     /// Wait for a buffer mapping. Native: drive the device until the callback ran. Browser: the

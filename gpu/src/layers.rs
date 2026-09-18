@@ -1,6 +1,5 @@
 //! Layer parameters packed into the layout the kernels walk (see [`crate::kernels`]).
 
-use wgpu::util::DeviceExt;
 use zenjpegai::nn::{Conv2d, ConvTranspose2d};
 
 use crate::context::GpuContext;
@@ -39,12 +38,17 @@ pub fn unpack_hwc4(packed: &[f32], c: usize, h: usize, w: usize) -> Vec<f32> {
 }
 
 fn storage(ctx: &GpuContext, label: &str, data: &[f32]) -> wgpu::Buffer {
-    ctx.device
-        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some(label),
-            contents: bytemuck::cast_slice(data),
-            usage: wgpu::BufferUsages::STORAGE,
-        })
+    // `create_buffer` + queue write, never `create_buffer_init`: `mapped_at_creation` trips a
+    // synchronous JS exception in the browser's WebGPU backend (see `GpuContext::write_buffer`).
+    let bytes = bytemuck::cast_slice(data);
+    let buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label),
+        size: bytes.len() as u64,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    ctx.write_buffer(&buffer, bytes);
+    buffer
 }
 
 /// Largest of 4, 2, 1 output blocks per invocation that divides `blocks`.
