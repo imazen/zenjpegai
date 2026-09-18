@@ -30,6 +30,8 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo build --release --features cli
 ZENJPEGAI_MODELS=$ZENJPEGAI_REF/models target/release/zenjpegai decode X.bits out.png --time
 target/release/zenjpegai encode in.png out.bits --model 1 --beta-disp 0 --op bop
+target/release/zenjpegai encode in.png out.bits --bpp 0.5            # rate matching
+scripts/bench/encode_end_to_end.sh > benchmarks/encode_end_to_end_$(date +%F).tsv
 target/release/zenjpegai info X.bits                        # every header field
 scripts/bench/decode_end_to_end.sh > benchmarks/decode_end_to_end_$(date +%F).tsv
 ```
@@ -54,7 +56,7 @@ hygiene".
 | post-filters | `src/filters/` | bounded float error |
 | chroma format, colour, bit depth | `src/decoder/output.rs` | bicubic resampler bit-identical to PyTorch |
 | one-call API, CLI | `src/decoder/api.rs`, `src/bin/zenjpegai.rs` | - |
-| encoder (colour, analysis, quantisation, stream assembly) | `src/encoder/`, `src/model/{analysis,hyper_encoder}.rs`, `ContextModel::compress` | integer decisions exactly; six of seven reference encodes byte-identical (`tests/encode_ref.rs`) |
+| encoder (colour, analysis, quantisation, tiling, rate matching, regions, tools, stream assembly) | `src/encoder/`, `src/model/{analysis,hyper_encoder}.rs`, `ContextModel::compress`, the encode side of `tools::{rvs,qualmap}` | every integer decision exactly; thirteen of seventeen reference encodes byte-identical, the other four the reference's length (`tests/encode_ref.rs`) |
 | SIMD engine (all float networks run on it) | `src/nn/fast/` | every tier / thread count bit-identical to `src/nn/reference.rs` |
 | browser build, GPU backend | `wasm/`, `web/`, `gpu/` | see their READMEs |
 

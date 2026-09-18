@@ -609,38 +609,27 @@ stream assembly. Reference facts it verified that are still worth having written
   (`ccs_sgmm_tool.py::encode` iterates `reversed(models_list)`).
 - `z`: clamp to `[-31, 31]`, round half to even, symbol = `z + 31` (checked exact).
 
-Appended by the second encoder agent, 2026-09-17:
+Appended by the second encoder agent, 2026-09-18. The encoder now exists end to end; the rows
+`encoder`, `encoder::tiles`, `encoder::rate`, `tools::rvs` (encode), `tools::qualmap` (encode)
+and `model::mcm` (compress) above say exactly how far each piece goes.
 
-- Landed: `src/encoder/` (colour pre-processing, the compress pipeline, header + container
-  assembly), `ContextModel::compress` and `mcm::{quantise, CUBE_SIZE}`,
-  `decoder::entropy::{ComponentScales, component_scales, dequantize_residual, channel_step,
-  distribution_index}` factored out of `decode_component` (decoder output unchanged, its tests
-  still bit-identical), `zenjpegai encode`, `examples/dbg_encode`, five more `encoder` vectors
-  (`make_reference_streams.sh`), and the gates in `tests/encode_ref.rs`
-  (`colour_preprocessing_matches_reference`, `decisions_match_reference_given_its_latents`,
-  `encoder_end_to_end_matches_reference`, and `reference_decoder_accepts_our_streams`, which is
-  `#[ignore]`d because it shells out to the reference's Python decoder - run it with
-  `cargo test --all-features --test encode_ref reference_decoder -- --ignored`).
-- Also landed (same session): `encoder::tiles` (analysis tiling + the header's synthesis
-  tiling), `encoder::rate` (`--bpp`), `scripts/bench/{encode_end_to_end.sh, ref_encode.py}` and
-  `benchmarks/encode_end_to_end_2026-09-18.{tsv,meta}`, and the vectors
-  `enc_img30_{bop_m1_bm300, sop_m0_bm300, bop_m3_b400, bop_m0_bm1069, hop_m3_bm1069}` +
-  `enc_img01_bop_m1_b0`.
-- Open: items 1.1-1.5 above. Nothing of them is started. The encoder is also **not** wired into
-  `zencodec` (the standards agent's item 3) and has no `Limits` of its own.
-
-Appended by the browser (`wasm`) agent, 2026-09-18, continuing the above:
-
-- Landed: worker pool + `<img>`/`<picture>` polyfill, the threads package now actually runs (it
-  had never linked — see `web/README.md` "Done and measured" #1 for the three real bugs found
-  running it in a browser for the first time), a 36-test Playwright suite across
-  chromium/firefox/webkit x 3 CSP/isolation profiles, the demo + `demo-assets-v1` release,
-  `.github/workflows/pages.yml`, a wasm size audit (`benchmarks/wasm_size_2026-09-18.md`, new
-  additive `pth` core-crate feature), and a measured (not assumed) Display-P3 canvas support
-  matrix per browser. Full detail: `web/README.md`.
-- Open: GitHub Pages is not enabled on the repo (private; needs a human to flip Settings ->
-  Pages -> Source: GitHub Actions — see `web/README.md` "Not done" for exactly what that makes
-  public). Wide-gamut (P3) canvas output is a documented hook (`web/README.md` "Colour"), not
-  implemented — no reference/demo stream carries non-sRGB CICP to build and test it against.
-  `gpu/README.md` now exists (landed after this agent's first check found it absent) — GPU
-  wiring into the web build is worth revisiting; see `web/README.md` for what was found.
+- Landed: `src/encoder/` (colour pre-processing, the compress pipeline, analysis tiling, rate
+  matching, region partitioning, header + container assembly), `ContextModel::compress` and the
+  `mcm::Quantiser` trait, the encode direction of `tools::rvs` and `tools::qualmap`,
+  `decoder::entropy::{ComponentScales, component_scales(_with), dequantize_residual,
+  channel_step, distribution_index}` factored out of `decode_component` (the decoder's output is
+  unchanged and its tests stay bit-identical), the `encode` subcommand with
+  `--model/--beta-disp/--op/--bpp/--rvs/--grfs/--lsbs/--ans-threads/--regions/--quality-map`,
+  `examples/dbg_encode`, ten more `encoder` vectors, `scripts/bench/{encode_end_to_end.sh,
+  ref_encode.py}` + `benchmarks/encode_end_to_end_2026-09-18.{tsv,meta}`, and the gates in
+  `tests/encode_ref.rs`. `reference_decoder_accepts_our_streams` is `#[ignore]`d because it
+  shells out to the reference's Python decoder; run it with
+  `cargo test --all-features --test encode_ref reference_decoder -- --ignored`.
+- Open: items 1-4 above (post-filters, subsampled / 10-bit / YUV sources, the rate matcher's
+  likelihood estimator, encoder memory). The encoder is also **not** wired into `zencodec` (that
+  crate's `Encode` traits), has no `Limits` of its own, and is not in CI (`reference-tests` needs
+  the 3.4 GB upstream checkout).
+- Watch out for: `compress_regions` is the mirror of
+  `decoder::reconstruct::reconstruct_latent_with` and must stay one - when that function changes,
+  change this one with it. The same holds for `ContextModel::{compress, decompress}` and for
+  `ComponentScales::{quantize, dequantize}`, whose tool order is each other's reverse.
