@@ -117,6 +117,17 @@
   (deprecation warning gone, incl. wasm-bindgen-rayon's spawned workers via a build-time patch
   in `build-wasm.sh`). `DecoderPool`/`worker.js` take a `threads` override used by
   `web/tests/threads.spec.ts` for the scaling table.
+- Wasm conv kernel pass 2 (`nn::fast::conv`): TurboFan machine-code inspection showed the
+  previous pass's "floor" was wrong — accumulators were spilled to memory per input block and
+  every tap carried bounds-check branches. Restructured `block()` so the B accumulators stay in
+  registers across the whole input-channel loop (bias initialises them directly, tap rows are
+  sliced once to `(B-1)*S+1` with a single provable `assert!`, the common `vin == V` channel
+  loop unrolls so splat offsets fold into load instructions, padding taps alias a static
+  `ZERO_PAD` — the per-call zero `Vec` is gone). Single-threaded decode of the 560x888 profile
+  stream under node: 356.6 -> 307.1 ms (-13.9%); wasmtime 40: ~920 -> 365 ms (-60%). Output is
+  bit-identical across wasm tiers and thread counts; `benchmarks/wasm_kernel_2026-09-18.md` has
+  the instruction counts and the rejected variants (B=2/6, paired taps, ntaps==9 unroll,
+  iterator positions).
 - `wasm/` crate (`zenjpegai-wasm`, wasm-bindgen: `addModels` / `info` / `decode`, single-thread SIMD128 build and a rayon `threads` build) and `web/scripts/build-wasm.sh`; `pkg-simd` is 389 KB (131 KB brotli). Polyfill, tests and demo are not written yet (`web/README.md`).
 - `Limits` (pixels, dimensions, input bytes, estimated memory; safe defaults 120 MP / 4 GiB), judged on the picture header before any model load or picture-sized allocation; `estimate_memory` / `Decoder::estimate_memory` (model calibrated on heaptrack measurements, `benchmarks/memory_2026-09-17.*`); `Decoder::preload`; `nn::fast::set_pool_limit` and `zenjpegai --pool-mb / --discard / preload`.
 - Decode memory: feature maps are freed as soon as the next layer has them, synthesis tiles go straight into the cropped / subsampled output planes, entropy-stage tensors are shed after use. Measured peak heap (heaptrack, decode only, default 1 GiB buffer pool): 560x888 SOP 83.7 to 64.7 MB, BOP 145.0 to 116.0 MB, HOP 1260 to 1190 MB, 2096x1400 BOP 389.5 to 309.1 MB; without buffer recycling (`--pool-mb 0`) 39.5 / 64.6 / 442.2 / 145.7 MB. Pixels identical, no slowdown (`benchmarks/memory_2026-09-17.*`, `decode_before_after_2026-09-17.tsv`).

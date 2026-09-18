@@ -44,8 +44,6 @@ pub(crate) struct RowJob<'a> {
     pub pw: usize,
     /// Block index of the first block stored in `xp`.
     pub icb_base: usize,
-    /// A row of zeros at least as long as any tap row: stands in for rows of the zero padding.
-    pub zero: &'a [f32],
     /// Input blocks to accumulate, and the total number of real input channels.
     pub icb0: usize,
     pub icb1: usize,
@@ -61,36 +59,93 @@ pub(crate) struct RowJob<'a> {
     pub bias: &'a [f32],
 }
 
-/// `B` output positions of one input block: load accumulators, add every (channel, tap), store.
+/// Zero fill for taps that fall in the padding: `sr` rows point here when the input row is
+/// `None`. Long enough for every (B, S, V) instantiation: `B * S * V` is at most 55 * 16.
+static ZERO_PAD: [f32; 1024] = [0.0; 1024];
+
+/// The `(tap) x B` body for one input channel `v`: one weight-vector load per tap, each
+/// followed by `B` splat-load / multiply / add steps. The always-true `assert` lets the
+/// optimizer drop the `r[b * S]` bounds checks from the unrolled position loop.
+#[inline(always)]
+fn tap_loop<F: SimdF32<V>, const V: usize, const B: usize, const S: usize>(
+    t: F::Token,
+    acc: &mut [F; B],
+    wrow: &[[f32; V]],
+    sr: &[&[[f32; V]]; MAX_TAPS],
+    v: usize,
+) {
+    for (wt, &r) in wrow.iter().zip(sr.iter()) {
+        // One always-true assert tells the optimizer `b * S` is in bounds, so the unrolled
+        // loop below needs no element checks.
+        assert!(r.len() > (B - 1) * S);
+        let wv = F::load(t, wt);
+        for b in 0..B {
+            // `v < V` always; the mask lets the compiler see it.
+            acc[b] = wv.mul_add(F::splat(t, r[b * S][v & (V - 1)]), acc[b]);
+        }
+    }
+}
+
+/// `B` output positions accumulated over every input block: the accumulators stay in
+/// registers across the whole `(icb, channel, tap)` loop — the bias goes straight into them
+/// and they are stored once — so an output position's value passes through memory exactly
+/// once, at the store.
+///
+/// Per input block the `ntaps` input rows are first cut down to the `L = (B-1)*S + 1`
+/// positions the block reads; the `assert` inside the inner loop then lets the compiler drop
+/// every `r[b * S]` bounds check, leaving one weight-vector load plus `B` splat-load /
+/// multiply / add steps per `(channel, tap)`.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
 fn block<F: SimdF32<V>, const V: usize, const B: usize, const S: usize>(
     t: F::Token,
-    out: &mut [[f32; V]],
-    os: usize,
-    rows: &[&[[f32; V]]],
-    j: usize,
+    job: &mut RowJob<'_>,
+    xp: &[[f32; V]],
     w: &[[f32; V]],
-    vin: usize,
+    bias: &[f32; V],
+    j: usize,
 ) {
-    let mut acc = [F::splat(t, 0.0); B];
-    for b in 0..B {
-        acc[b] = F::load(t, &out[b * os]);
-    }
-    let mut wi = 0;
-    for v in 0..vin {
-        for r in rows {
-            let r = &r[j * S..][..(B - 1) * S + 1];
-            let wv = F::load(t, &w[wi]);
-            wi += 1;
-            for b in 0..B {
-                // `v < V` always; the mask lets the compiler see it.
-                acc[b] = wv.mul_add(F::splat(t, r[b * S][v & (V - 1)]), acc[b]);
+    let l = (B - 1) * S + 1;
+    let ntaps = job.taps.len();
+    let (pad, _) = ZERO_PAD[..l * V].as_chunks::<V>();
+    // Interior blocks have every tap inside the input; the `Option` test is per-`j`-block
+    // invariant, so hoist it out of the input-block loop.
+    let interior = job.taps.iter().all(|t| t.0.is_some());
+    let mut acc = [F::load(t, bias); B];
+    if ntaps != 0 {
+        for icb in job.icb0..job.icb1 {
+            let vin = (job.in_ch - icb * V).min(V);
+            let wblk = &w[(icb - job.icb0) * V * ntaps..][..vin * ntaps];
+            let xbase = (icb - job.icb_base) * job.ph * job.pw;
+            let mut sr = [pad; MAX_TAPS];
+            if interior {
+                for (s, &(y, dx)) in sr.iter_mut().zip(job.taps) {
+                    let y = y.unwrap();
+                    *s = &xp[xbase + y * job.pw + dx + j * S..][..l];
+                }
+            } else {
+                for (s, &(y, dx)) in sr.iter_mut().zip(job.taps) {
+                    if let Some(y) = y {
+                        *s = &xp[xbase + y * job.pw + dx + j * S..][..l];
+                    }
+                }
+            }
+            // `vin == V` (every input block but possibly the last) gets a constant trip count:
+            // the v-loop unrolls and each splat offset folds into the load instruction.
+            if vin == V {
+                for v in 0..V {
+                    tap_loop::<F, V, B, S>(t, &mut acc, &wblk[v * ntaps..][..ntaps], &sr, v);
+                }
+            } else {
+                for (v, wrow) in wblk.chunks_exact(ntaps).enumerate() {
+                    tap_loop::<F, V, B, S>(t, &mut acc, wrow, &sr, v);
+                }
             }
         }
     }
+    let (out, _) = job.out.as_chunks_mut::<V>();
     for b in 0..B {
-        acc[b].store(&mut out[b * os]);
+        acc[b].store(&mut out[job.o0 + (j + b) * job.os]);
     }
 }
 
@@ -108,49 +163,32 @@ fn conv_row_s<F: SimdF32<V>, const V: usize, const B: usize, const S: usize>(
     t: F::Token,
     job: &mut RowJob<'_>,
 ) {
-    let (out, _) = job.out.as_chunks_mut::<V>();
-    let (xp, _) = job.xp.as_chunks::<V>();
-    let (zero, _) = job.zero.as_chunks::<V>();
-    let (w, _) = job.w.as_chunks::<V>();
+    // Copy the `&'a` inputs out of `job` first so the chunk views don't hold a borrow on it.
+    let (xpf, wf) = (job.xp, job.w);
+    let (xp, _) = xpf.as_chunks::<V>();
+    let (w, _) = wf.as_chunks::<V>();
     let mut bias = [0.0f32; V];
     bias.copy_from_slice(&job.bias[..V]);
-    let ntaps = job.taps.len();
-    let (o0, os, n) = (job.o0, job.os, job.n);
+    let n = job.n;
     if n == 0 {
         return;
     }
-    for j in 0..n {
-        out[o0 + j * os] = bias;
+    let mut j = 0;
+    while j + B <= n {
+        block::<F, V, B, S>(t, job, xp, w, &bias, j);
+        j += B;
     }
-    for icb in job.icb0..job.icb1 {
-        let vin = (job.in_ch - icb * V).min(V);
-        let wblk = &w[(icb - job.icb0) * V * ntaps..][..V * ntaps];
-        let mut rows: [&[[f32; V]]; MAX_TAPS] = [&[]; MAX_TAPS];
-        let len = (n - 1) * S + 1;
-        for (r, &(y, dx)) in rows.iter_mut().zip(job.taps) {
-            *r = match y {
-                Some(y) => &xp[((icb - job.icb_base) * job.ph + y) * job.pw + dx..][..len],
-                None => &zero[..len],
-            };
-        }
-        let rows = &rows[..ntaps];
-        let mut j = 0;
-        while j + B <= n {
-            block::<F, V, B, S>(t, &mut out[o0 + j * os..], os, rows, j, wblk, vin);
-            j += B;
-        }
-        while j + 8 <= n {
-            block::<F, V, 8, S>(t, &mut out[o0 + j * os..], os, rows, j, wblk, vin);
-            j += 8;
-        }
-        while j + 4 <= n {
-            block::<F, V, 4, S>(t, &mut out[o0 + j * os..], os, rows, j, wblk, vin);
-            j += 4;
-        }
-        while j < n {
-            block::<F, V, 1, S>(t, &mut out[o0 + j * os..], os, rows, j, wblk, vin);
-            j += 1;
-        }
+    while j + 8 <= n {
+        block::<F, V, 8, S>(t, job, xp, w, &bias, j);
+        j += 8;
+    }
+    while j + 4 <= n {
+        block::<F, V, 4, S>(t, job, xp, w, &bias, j);
+        j += 4;
+    }
+    while j < n {
+        block::<F, V, 1, S>(t, job, xp, w, &bias, j);
+        j += 1;
     }
 }
 
@@ -367,7 +405,6 @@ impl PackedConv {
         } else {
             j0
         };
-        let zero = alloc::vec![0.0f32; (w.max(1) + self.kw) * v];
         for_each_row(eng, &mut out.data, ow * v, |idx, row| {
             let (ocb, oy) = (idx / oh, idx % oh);
             let group = ocb / ocb_group;
@@ -395,7 +432,6 @@ impl PackedConv {
                         ph: h,
                         pw: w,
                         icb_base: 0,
-                        zero: &zero,
                         icb0,
                         icb1,
                         in_ch: self.in_ch,
@@ -433,7 +469,6 @@ impl PackedConv {
                             ph: self.kh,
                             pw: bw,
                             icb_base: icb0,
-                            zero: &zero,
                             icb0,
                             icb1,
                             in_ch: self.in_ch,
@@ -606,7 +641,6 @@ impl PackedConvTranspose {
                     ph: xp.h,
                     pw: xp.w,
                     icb_base: 0,
-                    zero: &[],
                     icb0: 0,
                     icb1: icb,
                     in_ch: self.in_ch,

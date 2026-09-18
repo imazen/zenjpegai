@@ -38,7 +38,7 @@ against reference-produced data passes. "stub" and "partial" mean what they say.
 | `model::mcm` (compress) | `context.py::{forward, pred, gen_skip_cubeflag, convert_cubeflag_map, _mask_redundant_padding_*}` | ported: per stage quantise with the sigma-threshold mask, decide the stage's cube flags from its own reconstruction error, re-quantise with the cubes that must not be skipped | as above (`y.residual_quant`, `y.cube_flag`) |
 | `decoder::entropy` | `common_modules.py::decode/decode_z/decode_y/_ac_decode_y/_cal_step_size`, `gm.py::build_indexes` | ported for: all 4 models, 1..16 threads, no regions / dependent / independent regions, RVS, GRFS, the quality map, and progressive decode (`num_decode_chs`: a caller-chosen prefix of the latent channels) | `tests/entropy_ref.rs`: 21 reference streams (6 with RVS and/or GRFS, 3 with a quality map); z_hat, sigma, quantised residual exact, dequantised residual bit-identical |
 | `nn` + `nn::reference` | `torch.nn.functional` conv2d / conv_transpose2d / pixel_shuffle / ReLU / ReLU6 | ported as plain loops that *define* the crate's numeric contract (FMA accumulation in `(ic, ky, kx)` order). Kept as the oracle and as the fallback for geometries the fast engine does not cover (stride-2 convolutions) | `tests/nn_vectors.rs`: 11 tiny PyTorch-computed cases (groups, depthwise, stride 2, 2x2, 1x3/3x1, both transposed geometries) within 2e-6 relative; pixel shuffle exact |
-| `nn::fast` | (replaces oneDNN under PyTorch) | NCHWc blocked tensors (16 lanes on AVX-512, 8 on AVX2 / NEON / WebAssembly SIMD128 / scalar); register-blocked FMA micro-kernel for stride-1 and stride-2 convolutions (any group count with block-aligned groups, up to 9 taps) reading the input in place with virtual zero padding; depthwise 3x3; stride-2 transposed convolution (k <= 4); int8 `madd` convolution for the HSD; ReLU/ReLU6/gate/sigmoid/ELU-gate, layer norm, channel attention, pixel shuffle on blocked data; rayon over output rows; bounded buffer pool. `exp` is one fixed algorithm (Cephes `expf`) and long sums run in `f64` with a fixed order, so every tier agrees bit for bit. **Not done: Winograd, int8 VNNI, padding-free transposed convolution; Wasm128 kernel is at its floor (B=4 x V=8 wins; 5/6 measured slower — 16 v128 registers)** | `tests/fast_vs_reference.rs`: every tier, with and without threads, bit-identical to `nn::reference`; `tests/math_tiers.rs`; `tests/decode_ref.rs::tiers_and_threads_agree_bit_for_bit` on whole SOP / BOP / HOP decodes |
+| `nn::fast` | (replaces oneDNN under PyTorch) | NCHWc blocked tensors (16 lanes on AVX-512, 8 on AVX2 / NEON / WebAssembly SIMD128 / scalar); register-blocked FMA micro-kernel for stride-1 and stride-2 convolutions (any group count with block-aligned groups, up to 9 taps) reading the input in place with virtual zero padding; depthwise 3x3; stride-2 transposed convolution (k <= 4); int8 `madd` convolution for the HSD; ReLU/ReLU6/gate/sigmoid/ELU-gate, layer norm, channel attention, pixel shuffle on blocked data; rayon over output rows; bounded buffer pool. `exp` is one fixed algorithm (Cephes `expf`) and long sums run in `f64` with a fixed order, so every tier agrees bit for bit. **Not done: Winograd, int8 VNNI, padding-free transposed convolution; Wasm128 kernel retuned to B=4 x V=8 with register-resident accumulators (pass 2, `benchmarks/wasm_kernel_2026-09-18.md`); remaining per-iteration overhead is V8 safepoint/load artifacts, not reachable from safe Rust** | `tests/fast_vs_reference.rs`: every tier, with and without threads, bit-identical to `nn::reference`; `tests/math_tiers.rs`; `tests/decode_ref.rs::tiers_and_threads_agree_bit_for_bit` on whole SOP / BOP / HOP decodes |
 | `model::hyper_decoder` | `components/autoencoder_hyper/decoder/base.py` | ported | `tests/decode_ref.rs` (`psi` within 5e-4 abs of the reference) |
 | `model::mcm` | `components/contexts/{context,MCM_phases,fusion_pred_net,utils}.py` (decoder direction) | ported: 4-phase context model + the context-free chroma path | `tests/decode_ref.rs` (`y_hat` within 5e-4) |
 | `model::synthesis` | `components/autoencoder_data/decoder/{sop,bop,hop}_{prim,sec}.py`, `activations/resau.py`, `base_layers/conv_layers.py` | ported: SOP, BOP and HOP, luma and chroma | `tests/decode_ref.rs` (planes within 3e-3 on a 0..255 scale) |
@@ -192,13 +192,14 @@ Native targets are unchanged (fused everywhere).
   Every difference is by 1; the worst case (443 of 8,803,200) is a quarter of the whole-picture
   gate (1 in 5000).
 - Speed, one thread, 560x888 BOP 0.5 bpp stream, node 26 on a Ryzen 9 9950X3D: fused soft-float
-  6.0 s; unfused without SIMD 1.42 s; unfused `Wasm128` 0.35 s (wasmtime: 0.51 s). Native
+  6.0 s; unfused without SIMD 1.42 s; unfused `Wasm128` 0.31 s (wasmtime: 0.37 s). Native
   AVX-512, one thread: 0.093 s. The `Wasm128` micro-kernel keeps 4 output positions x 8 channels
   in registers (3 / 4 / 6 / 8 / 12 positions measured: 428 / 352 / 385 / 457 / 457 ms).
 - 2026-09-18 profile + speed pass (`benchmarks/wasm_profile_2026-09-18.md`,
   `wasm_threads_2026-09-18.tsv`): `conv::run_row` is 88% of a single-threaded decode; the kernel
-  is at its bit-identity floor (unfused mul+add, fixed order, 16 v128 registers — B=5/B=6 both
-  measured slower), so the remaining levers were outside it: the rayon pool now defaults to
+  was believed to be at its bit-identity floor (unfused mul+add, fixed order, 16 v128
+  registers — B=5/B=6 measured slower; pass 2 below disproved the "floor"), so the levers were
+  outside it: the rayon pool now defaults to
   `min(hardwareConcurrency, 16)` children — measured optimum on a 32-hwc host where 32 children
   regressed (162 vs 132 ms mean) — the per-row border-column scratch is `thread_local` (allocator
   calls under shared memory are atomic-linked), and wasm-bindgen init uses the non-deprecated
@@ -207,6 +208,15 @@ Native targets are unchanged (fused everywhere).
   (`benchmarks/wasm_decode_2026-09-18.tsv` run 0 vs run 3; box is shared, the run-0 baseline
   predates several sessions, treat the exact ratio as approximate). ~12% of decode stays serial
   (entropy + latent reconstruction), which caps threaded decode at ~90-130 ms regardless.
+- 2026-09-18 kernel pass 2 (`benchmarks/wasm_kernel_2026-09-18.md`): inspecting V8's TurboFan
+  code showed the "floor" claim above was wrong — accumulators were spilled per input block and
+  every tap carried bounds checks. Restructuring `block()` (accumulators live across the whole
+  channel loop, bias inits `acc` directly, tap rows sliced once to `(B-1)*S+1` with a single
+  `assert!`, the `vin == V` input-channel loop unrolled, padding taps point at a static
+  `ZERO_PAD` instead of a per-call `Vec`) gives 356.6 -> 307.1 ms (-13.9%) single-threaded
+  under V8 and ~920 -> 365 ms (-60%) under wasmtime; output stays bit-identical across wasm
+  tiers and thread counts. The residual per-`(channel, tap)` overhead is V8 artifacts
+  unreachable from safe Rust (safepoint poll, a wasted `leaq` before each `vbroadcastss`).
 
 ## Reference behaviour that differs from its own configuration
 
