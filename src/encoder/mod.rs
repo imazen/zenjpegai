@@ -7,9 +7,10 @@
 //! encode_z, encode_y, _ac_encode_y, _ac_encode_z}`).
 //!
 //! What is ported: a fixed model and operating point, one analysis tile, one region, one ANS
-//! thread per substream, tools off. What is not: analysis tiling (pictures above ~1 MP),
-//! regions, rate matching (`--bpp`), RVS / GRFS / LSBS / quality maps / post-filters, chroma
-//! subsampling, bit depths other than 8. See `PORTING.md`.
+//! thread per substream, tools off; RGB or planar-YUV sources at 4:4:4 / 4:2:2 / 4:2:0, coded
+//! at any of them, 8- and 10-bit. What is not: analysis tiling (pictures above ~1 MP),
+//! regions, rate matching (`--bpp`), RVS / GRFS / LSBS / quality maps / post-filters. See
+//! `PORTING.md`.
 
 // The per-channel loops index several parallel arrays with one counter, like the reference's
 // tensor expressions; an iterator chain over one of them would hide that.
@@ -17,10 +18,12 @@
 
 mod colour;
 mod rate;
+mod resample;
 mod tiles;
 
-pub use colour::{AnalysisInput, preprocess_rgb};
+pub use colour::{AnalysisInput, SourceImage, SourceMeta, preprocess, preprocess_rgb};
 pub use rate::{BDL_SEARCH_RANGE, RateMatch, search_beta};
+pub use resample::resize_bilinear;
 pub use tiles::{AnalysisTile, analysis_tiles};
 
 use alloc::vec::Vec;
@@ -33,6 +36,7 @@ use crate::container::{CodestreamWriter, Marker, join_dependent_regions, join_th
 use crate::decoder::entropy::{
     ComponentScales, GrfsFlags, channel_step, component_scales_with, distribution_index,
 };
+#[cfg(feature = "cli")]
 use crate::decoder::output::RgbImage;
 use crate::decoder::reconstruct::{HD_MCM_TILE_OVERLAP, hyper_crop};
 use crate::error::{Error, Result};
@@ -89,6 +93,14 @@ pub struct EncodeParams {
     /// derived from the picture size (`calc_numHor_numVer_regions`); a picture of at most
     /// `NumSamplesInRegion` samples gets no regions whatever this says.
     pub regions: Option<RegionMode>,
+    /// `c_ver` override (`-c_ver_value`): code the chroma at half vertical resolution. `None`
+    /// codes it at the source's subsampling (4:2:2 / 4:2:0 sources cannot be coded finer).
+    pub c_ver: Option<u8>,
+    /// `c_hor` override (`-c_hor_value`), horizontal axis of [`EncodeParams::c_ver`].
+    pub c_hor: Option<u8>,
+    /// Non-displayed columns / rows on the right / bottom (`diff_display_img_width` /
+    /// `_height`): coded but cropped on output.
+    pub diff_display: (u8, u8),
 }
 
 /// How a region's residual reaches the codestream
@@ -133,6 +145,9 @@ impl Default for EncodeParams {
             num_threads_z: 1,
             num_threads_r: 1,
             regions: None,
+            c_ver: None,
+            c_hor: None,
+            diff_display: (0, 0),
         }
     }
 }
@@ -248,13 +263,16 @@ impl Encoder {
         Ok(set)
     }
 
-    /// Encode one 8-bit RGB picture.
+    /// Encode one source picture — an 8- or 16-bit [`RgbImage`] (coded as BT.709 4:4:4, or the
+    /// coded subsampling `params.c_ver` / `c_hor` select) or a planar [`YuvImage`]
+    /// (`crate::decoder::output::YuvImage`), whose chroma plane size sets `s_ver` / `s_hor` and
+    /// which is coded as `colour_transform_idx` 0.
     pub fn encode(
         &self,
-        rgb: &RgbImage,
+        src: impl Into<SourceImage>,
         params: EncodeParams,
     ) -> core::result::Result<Vec<u8>, At<Error>> {
-        self.encode_with(rgb, params, &enough::Unstoppable)
+        self.encode_with(src, params, &enough::Unstoppable)
     }
 
     /// [`Encoder::encode`] with a quality map: one `qp` in `-8..=8` per *latent* position
@@ -263,11 +281,11 @@ impl Encoder {
     /// from a region-of-interest mask the way the reference's `qp_map_type = 3` does.
     pub fn encode_with_quality_map(
         &self,
-        rgb: &RgbImage,
+        src: impl Into<SourceImage>,
         params: EncodeParams,
         quality_map: &QualityMap,
     ) -> core::result::Result<Vec<u8>, At<Error>> {
-        self.encode_inner(rgb, params, Some(quality_map), &enough::Unstoppable)
+        self.encode_inner(&src.into(), params, Some(quality_map), &enough::Unstoppable)
             .map(|(stream, _)| stream)
             .map_err(|e| at!(e))
     }
@@ -276,11 +294,11 @@ impl Encoder {
     /// layers and stages, never per sample.
     pub fn encode_with(
         &self,
-        rgb: &RgbImage,
+        src: impl Into<SourceImage>,
         params: EncodeParams,
         stop: &dyn enough::Stop,
     ) -> core::result::Result<Vec<u8>, At<Error>> {
-        self.encode_inner(rgb, params, None, stop)
+        self.encode_inner(&src.into(), params, None, stop)
             .map(|(stream, _)| stream)
             .map_err(|e| at!(e))
     }
@@ -289,21 +307,21 @@ impl Encoder {
     /// chroma). Used by the parity tests against the reference encoder's own dumps.
     pub fn encode_traced(
         &self,
-        rgb: &RgbImage,
+        src: impl Into<SourceImage>,
         params: EncodeParams,
     ) -> core::result::Result<(Vec<u8>, [ComponentTrace; 2]), At<Error>> {
-        self.encode_traced_with(rgb, params, None)
+        self.encode_traced_with(src, params, None)
     }
 
     /// [`Encoder::encode_traced`] with a quality map.
     pub fn encode_traced_with(
         &self,
-        rgb: &RgbImage,
+        src: impl Into<SourceImage>,
         params: EncodeParams,
         quality_map: Option<&QualityMap>,
     ) -> core::result::Result<(Vec<u8>, [ComponentTrace; 2]), At<Error>> {
         let (stream, components) = self
-            .encode_inner(rgb, params, quality_map, &enough::Unstoppable)
+            .encode_inner(&src.into(), params, quality_map, &enough::Unstoppable)
             .map_err(|e| at!(e))?;
         Self::trace(stream, components, quality_map).map_err(|e| at!(e))
     }
@@ -358,12 +376,16 @@ impl Encoder {
         params: EncodeParams,
         quality_map: Option<&QualityMap>,
     ) -> core::result::Result<(Vec<u8>, [ComponentTrace; 2]), At<Error>> {
+        // Latents carry no source metadata: the reference's default (8 bit, 4:4:4, BT.709).
+        let meta = SourceMeta::resolve(1, 1, 8, ColourTransform::Bt709, params.c_ver, params.c_hor)
+            .map_err(|e| at!(e))?;
         let (stream, components) = self
             .encode_from_latents(
                 latents,
                 z_hats.map(|z| [z[0].clone(), z[1].clone()]),
                 width,
                 height,
+                &meta,
                 params,
                 quality_map,
                 &enough::Unstoppable,
@@ -374,20 +396,24 @@ impl Encoder {
 
     fn encode_inner(
         &self,
-        rgb: &RgbImage,
+        src: &SourceImage,
         params: EncodeParams,
         quality_map: Option<&QualityMap>,
         stop: &dyn enough::Stop,
     ) -> Result<(Vec<u8>, Vec<Component>)> {
         stop.check()?;
-        let set = self.model_set(self.check_params(rgb.width, rgb.height, params)?, params.op)?;
+        let meta = src.meta(params.c_ver, params.c_hor)?;
+        let set = self.model_set(
+            self.check_params(src.width(), src.height(), params)?,
+            params.op,
+        )?;
         // 1. Colour pre-processing, then the analysis transform and the hyper-encoder, tile by
         //    tile (`sep_chan_tool.py::analysis_and_hyper_encoder`).
         let independent = (params.regions == Some(RegionMode::Independent))
-            .then(|| region_counts(rgb.height, rgb.width))
+            .then(|| region_counts(src.height(), src.width()))
             .flatten()
             .map(|(v, h)| (v as usize, h as usize));
-        let input = preprocess_rgb(rgb)?;
+        let input = preprocess(src, &meta)?;
         let planes = [&input.luma, &input.chroma];
         let (mut ys, mut zs) = (Vec::with_capacity(2), Vec::with_capacity(2));
         for (ccs, plane) in planes.into_iter().enumerate() {
@@ -399,8 +425,9 @@ impl Encoder {
         self.encode_from_latents(
             [&ys[0], &ys[1]],
             Some(z),
-            rgb.width,
-            rgb.height,
+            src.width(),
+            src.height(),
+            &meta,
             params,
             quality_map,
             stop,
@@ -417,28 +444,28 @@ impl Encoder {
     /// decides); every other field applies.
     pub fn encode_to_bpp(
         &self,
-        rgb: &RgbImage,
+        src: impl Into<SourceImage>,
         target_bpp: f64,
         params: EncodeParams,
     ) -> core::result::Result<(Vec<u8>, RateMatch), At<Error>> {
-        self.encode_to_bpp_with(rgb, target_bpp, params, &enough::Unstoppable)
+        self.encode_to_bpp_with(src, target_bpp, params, &enough::Unstoppable)
     }
 
     /// [`Encoder::encode_to_bpp`] with cooperative cancellation.
     pub fn encode_to_bpp_with(
         &self,
-        rgb: &RgbImage,
+        src: impl Into<SourceImage>,
         target_bpp: f64,
         params: EncodeParams,
         stop: &dyn enough::Stop,
     ) -> core::result::Result<(Vec<u8>, RateMatch), At<Error>> {
-        self.rate_match(rgb, target_bpp, params, stop)
+        self.rate_match(&src.into(), target_bpp, params, stop)
             .map_err(|e| at!(e))
     }
 
     fn rate_match(
         &self,
-        rgb: &RgbImage,
+        src: &SourceImage,
         target_bpp: f64,
         params: EncodeParams,
         stop: &dyn enough::Stop,
@@ -447,11 +474,12 @@ impl Encoder {
         if !(target_bpp.is_finite() && target_bpp > 0.0) {
             return Err(Error::InvalidArgument("target bpp must be positive"));
         }
-        let pixels = (rgb.width * rgb.height) as f64;
-        let input = preprocess_rgb(rgb)?;
+        let meta = src.meta(params.c_ver, params.c_hor)?;
+        let pixels = (src.width() * src.height()) as f64;
+        let input = preprocess(src, &meta)?;
         let base_params = EncodeParams { op, ..params };
         let independent = (params.regions == Some(RegionMode::Independent))
-            .then(|| region_counts(rgb.height, rgb.width))
+            .then(|| region_counts(src.height(), src.width()))
             .flatten()
             .map(|(v, h)| (v as usize, h as usize));
         let mut trials = 0usize;
@@ -487,8 +515,9 @@ impl Encoder {
             let (stream, _) = self.encode_from_latents(
                 [&y[0], &y[1]],
                 Some([z[0].clone(), z[1].clone()]),
-                rgb.width,
-                rgb.height,
+                src.width(),
+                src.height(),
+                &meta,
                 params,
                 None,
                 stop,
@@ -675,6 +704,7 @@ impl Encoder {
         z_hats: Option<[Tensor<i8>; 2]>,
         w: usize,
         h: usize,
+        meta: &SourceMeta,
         params: EncodeParams,
         quality_map: Option<&QualityMap>,
         stop: &dyn enough::Stop,
@@ -714,7 +744,7 @@ impl Encoder {
 
         // 3. A provisional header: everything the scale derivation reads is known now; the
         //    cube flags are filled in once the residual has been quantised.
-        let mut hdr = picture_header(w as u32, h as u32, params.model_id, beta, params);
+        let mut hdr = picture_header(w as u32, h as u32, params.model_id, beta, params, meta);
         if let Some(m) = quality_map {
             let (lh, lw) = hdr.latent_size(0);
             if (m.qp.h, m.qp.w) != (lh as usize, lw as usize) {
@@ -919,6 +949,36 @@ pub fn read_png_rgb8(bytes: &[u8]) -> Result<RgbImage> {
         width: w,
         height: h,
         bit_depth: 8,
+        data,
+    })
+}
+
+/// Read a PNG at its own bit depth (`cli` feature, zenpng): an 8-bit file decodes to
+/// `bit_depth` 8 as in [`read_png_rgb8`], a 16-bit file to `bit_depth` 16 — the reference's
+/// `read_png` does the same (`uint16` -> `bit_depth` 16). Paletted and <16-bit PNGs still
+/// decode to 8-bit RGB; alpha is dropped.
+#[cfg(feature = "cli")]
+pub fn read_png_rgb(bytes: &[u8]) -> Result<RgbImage> {
+    let info = zenpng::probe(bytes).map_err(|e| Error::InvalidArgument(png_err(e)))?;
+    if info.bit_depth != 16 {
+        return read_png_rgb8(bytes);
+    }
+    let (w, h) = (info.width as usize, info.height as usize);
+    if w == 0 || h == 0 {
+        return Err(Error::InvalidArgument("empty PNG"));
+    }
+    let mut buf = alloc::vec![rgb::Rgb { r: 0u16, g: 0, b: 0 }; w * h];
+    zenpng::PngDecoderConfig::new()
+        .decode_into_rgb16(bytes, imgref::ImgRefMut::new(&mut buf, w, h))
+        .map_err(|e| Error::InvalidArgument(png_err(e)))?;
+    let mut data = Vec::with_capacity(w * h * 3);
+    for p in &buf {
+        data.extend_from_slice(&[p.r, p.g, p.b]);
+    }
+    Ok(RgbImage {
+        width: w,
+        height: h,
+        bit_depth: 16,
         data,
     })
 }
@@ -1210,6 +1270,7 @@ fn picture_header(
     model_id: u8,
     beta_displacement_log: [i32; 2],
     params: EncodeParams,
+    meta: &SourceMeta,
 ) -> PictureHeader {
     use OperatingPoint::{Bop, Hop, Sop};
     let op = params.op;
@@ -1242,14 +1303,14 @@ fn picture_header(
         level_idc: LEVEL_IDC,
         width,
         height,
-        diff_display_width: 0,
-        diff_display_height: 0,
-        bit_depth: 8,
-        s_ver: 1,
-        s_hor: 1,
-        c_ver: 1,
-        c_hor: 1,
-        colour_transform: ColourTransform::Bt709,
+        diff_display_width: params.diff_display.0,
+        diff_display_height: params.diff_display.1,
+        bit_depth: meta.bit_depth,
+        s_ver: meta.s_ver,
+        s_hor: meta.s_hor,
+        c_ver: meta.c_ver,
+        c_hor: meta.c_hor,
+        colour_transform: meta.colour_transform.clone(),
         model_id,
         num_threads_z: params.num_threads_z,
         beta_displacement_log,

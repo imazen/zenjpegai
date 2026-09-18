@@ -147,7 +147,9 @@ fn analysis_tiers_agree_bit_for_bit() {
 // through both decoders.
 
 use std::path::Path;
-use zenjpegai::encoder::{EncodeParams, Encoder, RegionMode, preprocess_rgb, read_png_rgb8};
+use zenjpegai::encoder::{
+    EncodeParams, Encoder, RegionMode, SourceImage, preprocess_rgb, read_png_rgb8,
+};
 
 /// (`vector`, source image, `model_id`, operating point, `beta_displacement_log`, tools) of
 /// every fixed-model encode `make_reference_streams.sh encoder` produces.
@@ -576,7 +578,7 @@ fn encoder_end_to_end_matches_reference() {
         let (vector, params) = (v.name, v.params());
         let enc = Encoder::new(ref_root().join("models"));
         let (stream, traces) = enc
-            .encode_traced_with(&source(v.image), params, v.quality_map().as_ref())
+            .encode_traced_with(source(v.image), params, v.quality_map().as_ref())
             .unwrap();
         let moved = compare_decisions(vector, &traces);
         let reference = std::fs::read(vector_dir(vector).join("stream.bits")).unwrap();
@@ -639,9 +641,9 @@ fn reference_decoder_accepts_our_streams() {
         let (vector, params) = (v.name, v.params());
         let enc = Encoder::new(ref_root().join("models"));
         let stream = match v.quality_map() {
-            None => enc.encode(&source(v.image), params).unwrap(),
+            None => enc.encode(source(v.image), params).unwrap(),
             Some(m) => enc
-                .encode_with_quality_map(&source(v.image), params, &m)
+                .encode_with_quality_map(source(v.image), params, &m)
                 .unwrap(),
         };
         let scratch = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/refdec");
@@ -771,4 +773,310 @@ fn rate_matching_hits_the_target() {
         ran += 1;
     }
     assert!(ran > 0, "no reference streams on disk");
+}
+
+// ---------------------------------------------------------------------------------------------
+// The `formats` vectors: chroma-subsampled, 10-bit and YUV sources, the `c_*_value` overrides
+// and a non-displayed border (`make_reference_streams.sh`; inputs under `reference/inputs`).
+
+/// One `formats` vector: the directory name, the input file (`reference/inputs` for `.yuv`,
+/// `data/test` for PNG) and the encode options `make_reference_streams.sh` gave it.
+struct FormatVector {
+    name: &'static str,
+    file: &'static str,
+    /// `-c_ver_value`.
+    c_ver: Option<u8>,
+    /// `-c_hor_value`.
+    c_hor: Option<u8>,
+    /// `-diff_display_img_width`, `-diff_display_img_height`.
+    diff_display: (u8, u8),
+}
+
+const VECTORS_FORMATS: &[FormatVector] = &[
+    FormatVector {
+        name: "img30yuv420_base_off_bpp050",
+        file: "img30_560x888_8bit_420.yuv",
+        c_ver: None,
+        c_hor: None,
+        diff_display: (0, 0),
+    },
+    FormatVector {
+        name: "img30yuv422_base_off_bpp050",
+        file: "img30_560x888_8bit_422.yuv",
+        c_ver: None,
+        c_hor: None,
+        diff_display: (0, 0),
+    },
+    FormatVector {
+        name: "img30yuv444_base_off_bpp050",
+        file: "img30_560x888_8bit_444.yuv",
+        c_ver: None,
+        c_hor: None,
+        diff_display: (0, 0),
+    },
+    FormatVector {
+        name: "img30yuv420b10_base_off_bpp050",
+        file: "img30_560x888_10bit_420.yuv",
+        c_ver: None,
+        c_hor: None,
+        diff_display: (0, 0),
+    },
+    FormatVector {
+        name: "img30yuv444b10_base_off_bpp050",
+        file: "img30_560x888_10bit_444.yuv",
+        c_ver: None,
+        c_hor: None,
+        diff_display: (0, 0),
+    },
+    FormatVector {
+        name: "img30cropyuv420_base_off_bpp075",
+        file: "img30crop_203x301_8bit_420.yuv",
+        c_ver: None,
+        c_hor: None,
+        diff_display: (0, 0),
+    },
+    FormatVector {
+        name: "img30_base_off_c420_bpp050",
+        file: IMG30,
+        c_ver: Some(2),
+        c_hor: Some(2),
+        diff_display: (0, 0),
+    },
+    FormatVector {
+        name: "img30_base_off_c422_bpp050",
+        file: IMG30,
+        c_ver: None,
+        c_hor: Some(2),
+        diff_display: (0, 0),
+    },
+    FormatVector {
+        name: "img30_base_off_display_m1",
+        file: IMG30,
+        c_ver: None,
+        c_hor: None,
+        diff_display: (37, 5),
+    },
+];
+
+/// `read_file`: `.yuv` input comes from the reference's `inputs/` directory (geometry, bit
+/// depth and chroma format in the file name), PNG from `data/test`.
+fn formats_source(file: &str) -> SourceImage {
+    if file.ends_with(".yuv") {
+        let dir = vector_dir("img30yuv420_base_off_bpp050")
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("inputs");
+        let path = dir.join(file);
+        let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        SourceImage::read_yuv(&path.to_string_lossy(), &bytes).unwrap()
+    } else {
+        SourceImage::from(source(file))
+    }
+}
+
+/// Encode the `formats` vectors: the header must carry the source's subsampling, bit depth,
+/// colour transform and display crop; the analysis-transform inputs must be bit-for-bit the
+/// reference's (`enc2` dumps); the integer stage must match its decisions; and the stream must
+/// be byte for byte when no residual symbol sits on a rounding boundary (the same rule as
+/// `decisions_match_reference_given_its_latents`).
+#[test]
+fn formats_streams_match_reference() {
+    let enc = Encoder::new(ref_root().join("models"));
+    let dec = zenjpegai::Decoder::new("");
+    let mut ran = 0;
+    for &FormatVector {
+        name: vector,
+        file,
+        c_ver,
+        c_hor,
+        diff_display,
+    } in VECTORS_FORMATS
+    {
+        let reference = std::fs::read(vector_dir(vector).join("stream.bits")).unwrap();
+        let theirs = dec.read_headers(&reference).unwrap().picture;
+        let src = formats_source(file);
+        let params = EncodeParams {
+            model_id: theirs.model_id,
+            beta_displacement_log: theirs.beta_displacement_log,
+            op: OperatingPoint::Bop,
+            c_ver,
+            c_hor,
+            diff_display,
+            ..Default::default()
+        };
+        let (stream, traces) = enc.encode_traced(&src, params).unwrap();
+        let ours = dec.read_headers(&stream).unwrap().picture;
+        assert_eq!(ours.bit_depth, theirs.bit_depth, "{vector}: bit_depth");
+        assert_eq!(
+            (ours.s_ver, ours.s_hor, ours.c_ver, ours.c_hor),
+            (theirs.s_ver, theirs.s_hor, theirs.c_ver, theirs.c_hor),
+            "{vector}: subsampling"
+        );
+        assert_eq!(
+            ours.colour_transform, theirs.colour_transform,
+            "{vector}: colour transform"
+        );
+        assert_eq!(
+            (ours.diff_display_width, ours.diff_display_height),
+            (theirs.diff_display_width, theirs.diff_display_height),
+            "{vector}: display crop"
+        );
+        // The tensors committed to the analysis transforms (`enc2` dump) must come out
+        // bit-for-bit: they are integer/float data flow, no network numerics.
+        let meta = src.meta(c_ver, c_hor).unwrap();
+        let input = zenjpegai::encoder::preprocess(&src, &meta).unwrap();
+        let dump = load_encoder_dump(&vector_dir(vector).join("enc2"));
+        assert_eq!(
+            input.luma.data,
+            dump["analysis_y.0.in"].f32(),
+            "{vector}: analysis luma input"
+        );
+        assert_eq!(
+            input.chroma.data,
+            dump["analysis_uv.0.in"].f32(),
+            "{vector}: analysis chroma input"
+        );
+        let moved = compare_decisions(vector, &traces);
+        let ratio = stream.len() as f64 / reference.len() as f64;
+        println!(
+            "{vector}: {} bytes, reference {} ({:+.3} %), symbols moved {} / {}",
+            stream.len(),
+            reference.len(),
+            (ratio - 1.0) * 100.0,
+            moved[0],
+            moved[1],
+        );
+        assert!(
+            (ratio - 1.0).abs() < 0.005,
+            "{vector}: stream size differs from the reference by more than 0.5 %"
+        );
+        if moved == [0, 0] {
+            assert_eq!(
+                stream, reference,
+                "{vector}: same decisions must give the same bytes"
+            );
+        }
+        ran += 1;
+    }
+    assert!(ran > 0, "no formats vectors on disk");
+}
+
+/// The `formats` streams must decode in the reference decoder. Its output is compared with
+/// our own decoder's on the same stream — a YUV stream to a `WxH_Nbit_FMT.yuv` (the file
+/// name carries the format for `write_yuv`/`extract_info`), an RGB stream to `.png` — with
+/// the same bound `check_dump` applies (worst 1 LSB, fewer than 1 in 5000 samples).
+#[test]
+#[ignore = "runs the reference decoder (Python); enable with --ignored"]
+fn reference_decoder_accepts_formats_streams() {
+    use zenjpegai::Picture;
+    let enc = Encoder::new(ref_root().join("models"));
+    let dec = zenjpegai::Decoder::new(ref_root().join("models"));
+    let scratch = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/refdec");
+    std::fs::create_dir_all(&scratch).unwrap();
+    for &FormatVector {
+        name: vector,
+        file,
+        c_ver,
+        c_hor,
+        diff_display,
+    } in VECTORS_FORMATS
+    {
+        let reference = std::fs::read(vector_dir(vector).join("stream.bits")).unwrap();
+        let theirs = dec.read_headers(&reference).unwrap().picture;
+        let src = formats_source(file);
+        let stream = enc
+            .encode(
+                &src,
+                EncodeParams {
+                    model_id: theirs.model_id,
+                    beta_displacement_log: theirs.beta_displacement_log,
+                    op: OperatingPoint::Bop,
+                    c_ver,
+                    c_hor,
+                    diff_display,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let bits = scratch.join(format!("{vector}.bits"));
+        std::fs::write(&bits, &stream).unwrap();
+        let ours = dec.decode_picture(&stream).unwrap();
+        // The output name must carry the picture geometry/format for `write_yuv`.
+        let out = match &ours {
+            Picture::Yuv(y) => {
+                let fmt = match (theirs.s_ver, theirs.s_hor) {
+                    (1, 1) => "444",
+                    (1, 2) => "422",
+                    (2, 2) => "420",
+                    _ => unreachable!(),
+                };
+                scratch.join(format!(
+                    "{vector}_{}x{}_{}bit_{}.yuv",
+                    y.width, y.height, y.bit_depth, fmt
+                ))
+            }
+            Picture::Rgb(_) => scratch.join(format!("{vector}.png")),
+        };
+        let status = std::process::Command::new("bash")
+            .arg("-lc")
+            .arg(format!(
+                ". {ref}/.venv/bin/activate && cd {ref} && PYTHONPATH=. \
+                 python -m src.reco.coders.decoder {} {} -target_device cpu",
+                bits.display(),
+                out.display(),
+                ref = ref_root().display()
+            ))
+            .status()
+            .unwrap();
+        assert!(status.success(), "{vector}: the reference decoder failed");
+        let reference_out = std::fs::read(&out).unwrap();
+        // Samples in bit-depth units: 1 byte at 8 bit, little-endian u16 above.
+        let plane_bytes = |p: &[u16], depth: u8| -> Vec<u8> {
+            if depth > 8 {
+                p.iter().flat_map(|v| v.to_le_bytes()).collect()
+            } else {
+                p.iter().map(|&v| v as u8).collect()
+            }
+        };
+        let (got, want, depth): (Vec<i64>, Vec<i64>, u8) = match &ours {
+            Picture::Yuv(y) => (
+                [&y.y, &y.u, &y.v]
+                    .iter()
+                    .flat_map(|p| plane_bytes(p, y.bit_depth))
+                    .map(i64::from)
+                    .collect(),
+                reference_out.iter().map(|&b| i64::from(b)).collect(),
+                y.bit_depth,
+            ),
+            Picture::Rgb(rgb) => {
+                let png = zenjpegai::encoder::read_png_rgb(&reference_out).unwrap();
+                // A >8-bit PNG stores the samples shifted left to 16 bit.
+                let shift = (png.bit_depth - rgb.bit_depth) as i64;
+                (
+                    rgb.data.iter().map(|&v| i64::from(v)).collect(),
+                    png.data.iter().map(|&v| i64::from(v) >> shift).collect(),
+                    rgb.bit_depth,
+                )
+            }
+        };
+        assert_eq!(got.len(), want.len(), "{vector}: reference output size");
+        let mut n = 0usize;
+        let mut worst = 0i64;
+        for (&a, &b) in got.iter().zip(&want) {
+            let d = (a - b).abs();
+            n += (d != 0) as usize;
+            worst = worst.max(d);
+        }
+        println!(
+            "{vector}: reference output agrees within {worst} LSB ({n} of {} {depth}-bit \
+             samples differ)",
+            got.len()
+        );
+        assert!(
+            worst <= 1 && n * 5000 < got.len(),
+            "{vector}: reference output differs by {worst} in {n} samples"
+        );
+    }
 }

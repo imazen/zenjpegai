@@ -24,8 +24,8 @@ const USAGE: &str = "\
 zenjpegai - JPEG AI (ISO/IEC 6048) codec
 
 USAGE:
-    zenjpegai encode <in.png> <out.bits> [--model <0..3>] [--beta-disp <n>] [--op <sop|bop|hop>]
-    zenjpegai encode <in.png> <out.bits> --bpp <r> [--op <sop|bop|hop>]
+    zenjpegai encode <in.png | in.yuv> <out.bits> [--model <0..3>] [--beta-disp <n>] [--op <sop|bop|hop>]
+    zenjpegai encode <in.png | in.yuv> <out.bits> --bpp <r> [--op <sop|bop|hop>]
     zenjpegai decode <in.bits> <out.png | out.yuv> [options]
     zenjpegai info <in.bits>
     zenjpegai pack-models --models <dir> --out <file.zjb> [--model <0..3>]... [--op <sop|bop|hop>]...
@@ -40,6 +40,10 @@ OPTIONS:
     --beta-disp <n>    encode: quantiser displacement, -1069..702 (default 0; lower = lower rate)
     --bpp <r>          encode: target bits per pixel; searches the model and the displacement
                        (rate matching) instead of taking --model / --beta-disp
+    --c-ver <1|2>      encode: code the chroma at half vertical resolution
+                       (-c_ver_value; default: the source's subsampling)
+    --c-hor <1|2>      encode: the same, horizontally (-c_hor_value)
+    --diff-display <w,h>  encode: do not display the last w columns / h rows
     --rvs --grfs       encode: residual variance scaling / channel gain flags
     --lsbs             encode: latent scaling before synthesis (a decoder-side tool)
     --ans-threads <n>  encode: ANS threads per substream (1, 2, 4, 8 or 16)
@@ -74,6 +78,9 @@ struct Args {
     only: Option<String>,
     beta_disp: i32,
     bpp: Option<f64>,
+    c_ver: Option<u8>,
+    c_hor: Option<u8>,
+    diff_display: (u8, u8),
     rvs: bool,
     grfs: bool,
     lsbs: bool,
@@ -100,6 +107,9 @@ fn parse_args() -> Result<Args, String> {
         only: None,
         beta_disp: 0,
         bpp: None,
+        c_ver: None,
+        c_hor: None,
+        diff_display: (0, 0),
         rvs: false,
         grfs: false,
         lsbs: false,
@@ -163,6 +173,25 @@ fn parse_args() -> Result<Args, String> {
             }
             "--bpp" => {
                 a.bpp = Some(value("--bpp")?.parse().map_err(|e| format!("--bpp: {e}"))?);
+            }
+            "--c-ver" | "--c-hor" => {
+                let v: u8 = value(&arg)?.parse().map_err(|e| format!("{arg}: {e}"))?;
+                if v != 1 && v != 2 {
+                    return Err(format!("{arg}: {v} is not 1 or 2"));
+                }
+                if arg == "--c-ver" {
+                    a.c_ver = Some(v);
+                } else {
+                    a.c_hor = Some(v);
+                }
+            }
+            "--diff-display" => {
+                let v = value("--diff-display")?;
+                let (w, h) = v
+                    .split_once(',')
+                    .ok_or("--diff-display wants <width>,<height>")?;
+                let parse = |s: &str| s.parse::<u8>().map_err(|e| format!("--diff-display: {e}"));
+                a.diff_display = (parse(w)?, parse(h)?);
             }
             "--beta-disp" => {
                 a.beta_disp = value("--beta-disp")?
@@ -299,8 +328,17 @@ fn run() -> Result<(), String> {
                 Tier::detect()
             };
             let engine = Engine::with(tier, !args.single_thread && cfg!(feature = "parallel"));
-            let png = std::fs::read(input).map_err(|e| format!("{input}: {e}"))?;
-            let image = zenjpegai::encoder::read_png_rgb8(&png).map_err(|e| format!("{e:?}"))?;
+            let bytes = std::fs::read(input).map_err(|e| format!("{input}: {e}"))?;
+            // `read_file`: ".yuv" is planar YUV, size/depth/format from the file name;
+            // anything else is PNG (8- and 16-bit, like the reference's `read_png`).
+            let image = if input.to_lowercase().ends_with("yuv") {
+                zenjpegai::encoder::SourceImage::read_yuv(input, &bytes)
+                    .map_err(|e| format!("{e:?}"))?
+            } else {
+                zenjpegai::encoder::SourceImage::from(
+                    zenjpegai::encoder::read_png_rgb(&bytes).map_err(|e| format!("{e:?}"))?,
+                )
+            };
             let params = EncodeParams {
                 model_id: args.model_ids.first().copied().unwrap_or(1) as u8,
                 beta_displacement_log: [args.beta_disp; 2],
@@ -311,6 +349,9 @@ fn run() -> Result<(), String> {
                 num_threads_z: args.ans_threads,
                 num_threads_r: args.ans_threads,
                 regions: args.regions,
+                c_ver: args.c_ver,
+                c_hor: args.c_hor,
+                diff_display: args.diff_display,
             };
             // `--quality-map`: an RGB mask at picture resolution, white = region of interest.
             let quality_map = match &args.quality_map {
@@ -330,8 +371,8 @@ fn run() -> Result<(), String> {
                     Some(
                         zenjpegai::tools::qualmap::QualityMap::from_roi_mask(
                             &planes,
-                            image.height.div_ceil(16),
-                            image.width.div_ceil(16),
+                            image.height().div_ceil(16),
+                            image.width().div_ceil(16),
                         )
                         .map_err(|e| format!("{e:?}"))?,
                     )
@@ -368,8 +409,8 @@ fn run() -> Result<(), String> {
                     eprintln!(
                         "encode {run}: {:.1} ms ({}x{}, {:?}{})",
                         t.elapsed().as_secs_f64() * 1e3,
-                        image.width,
-                        image.height,
+                        image.width(),
+                        image.height(),
                         engine.tier,
                         if run == 0 {
                             ", includes model load"
@@ -383,7 +424,7 @@ fn run() -> Result<(), String> {
             eprintln!(
                 "{output}: {} bytes ({:.4} bpp)",
                 stream.len(),
-                stream.len() as f64 * 8.0 / (image.width * image.height) as f64
+                stream.len() as f64 * 8.0 / (image.width() * image.height()) as f64
             );
             Ok(())
         }

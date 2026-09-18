@@ -129,6 +129,36 @@ fn pixel_shuffle_order() {
     }
 }
 
+/// `Image.to_420_` / `to_422_`'s resampler (the encoder's chroma down-sampler). For
+/// `[1, 1, H, W]` tensors PyTorch 1.10.2 dispatches to its channels-last bilinear kernel —
+/// four pre-multiplied weights `hλ * wλ` accumulated `fma(p0, a, p1*b)`, `fma(p2, c, _)`,
+/// `fma(p3, d, _)` — which `encoder::resample::resize_bilinear` repeats operation for
+/// operation, so this agrees to the bit.
+#[test]
+fn bilinear_align_corners_matches_torch() {
+    let t = load("bilinear_align_corners");
+    for i in 0..8 {
+        let (x, want) = (tensor(&t[&format!("x{i}")]), tensor(&t[&format!("y{i}")]));
+        let got = zenjpegai::encoder::resize_bilinear(&x, want.h, want.w).unwrap();
+        let worst = got
+            .data
+            .iter()
+            .zip(&want.data)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        let exact = got
+            .data
+            .iter()
+            .zip(&want.data)
+            .all(|(a, b)| a.to_bits() == b.to_bits());
+        println!(
+            "case {i}: {}x{} -> {}x{} max abs diff {worst:e} exact={exact}",
+            x.h, x.w, want.h, want.w
+        );
+        assert!(exact, "case {i}: max abs diff {worst:e}");
+    }
+}
+
 /// `Image.to_444_`'s resampler. The port repeats PyTorch's compiled kernel operation for
 /// operation (including where its build fuses multiply-adds), so this one agrees to the bit.
 #[test]

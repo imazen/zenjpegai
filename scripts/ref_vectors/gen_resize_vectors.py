@@ -41,6 +41,21 @@ def main(out_dir):
         tensors[f"y{i}"] = y[0]
     write(f"{out_dir}/bicubic_align_corners.bin", tensors)
 
+    # `Image.to_420_` / `to_422_`'s resampler: `mode="bilinear"`, chroma down-sampling
+    # (odd sizes included), a 4:2:2 width-only case, a one-sample axis and one up-sample.
+    # Single channel, as the encoder resamples one component plane at a time (a [1, 1, H, W]
+    # tensor takes PyTorch's channels-last scalar tail; a wider C vectorises differently).
+    tensors = {}
+    for i, ((ih, iw), (oh, ow)) in enumerate(
+        [((6, 5), (3, 3)), ((7, 9), (4, 5)), ((8, 4), (8, 2)), ((5, 7), (3, 4)),
+         ((12, 10), (6, 5)), ((1, 7), (1, 4)), ((3, 4), (7, 9)), ((9, 6), (5, 3))]
+    ):
+        x = torch.rand(1, 1, ih, iw) * 255.0
+        y = F.interpolate(x, size=(oh, ow), mode="bilinear", align_corners=True)
+        tensors[f"x{i}"] = x[0]
+        tensors[f"y{i}"] = y[0]
+    write(f"{out_dir}/bilinear_align_corners.bin", tensors)
+
 
 if __name__ == "__main__":
     main(sys.argv[1])

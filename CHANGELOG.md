@@ -6,6 +6,18 @@
 <!-- Breaking changes that will ship together in the next major (or minor for 0.x) release. -->
 
 ### Added
+- Encoder: chroma-subsampled, 10-bit and YUV sources. `SourceImage::{Rgb, Yuv}` with
+  `SourceImage::read_yuv` (planar YUV whose `WxH_Nbit_{420,422,444}` file name carries the
+  geometry, like the reference's `extract_info`), `SourceMeta` with `s_ver`/`s_hor` from the
+  chroma plane size and `c_ver`/`c_hor` from `EncodeParams` (`-c_ver_value`/`-c_hor_value`;
+  4:2:2 coded as 4:2:0 is `Unsupported`, as upstream), `EncodeParams::diff_display` for the
+  non-displayed border, and 16-bit PNG input (`bit_depth_idc` 4). Chroma down-sampling is
+  `encoder::resample::resize_bilinear`, bit-identical to PyTorch's bilinear
+  `align_corners=True` kernel (`tests/vectors/nn/bilinear_align_corners.bin`). CLI:
+  `zenjpegai encode in.yuv …`, `--c-ver`/`--c-hor`/`--diff-display`. On the nine `formats`
+  vectors the analysis-transform inputs are bit-for-bit the reference's, seven streams are
+  byte-identical, and the two 10-bit ones are the same length with 5 of 1,254,400 luma
+  residual symbols moved by 1; the reference decoder reads all nine.
 - eICCI on chroma-subsampled pictures (4:2:0 and 4:2:2): the reference decoder's
   `Image.to_444_` bicubic chroma up-sampling, eICCI at luma size, then `to_format_` bilinear
   down-sampling back (`filters::icci::resize_bilinear` reproduces PyTorch's channels-last

@@ -372,11 +372,15 @@ impl PictureHeader {
         if self.diff_display_width > 63 || self.diff_display_height > 63 {
             return Err(Error::InvalidArgument("diff_display_* must be below 64"));
         }
-        let bit_depth_idc = match self.bit_depth {
-            8 => 0,
-            10 => 1,
-            _ => return Err(Error::InvalidArgument("bit depth must be 8 or 10")),
-        };
+        // The reference encoder codes any `supported_image_data_bits` (a 16-bit PNG source
+        // produces idc 4); the reference *decoder* accepts only the first two.
+        let bit_depth_idc =
+            BIT_DEPTHS
+                .iter()
+                .position(|&d| d == self.bit_depth)
+                .ok_or(Error::InvalidArgument(
+                    "bit depth must be one of 8, 10, 12, 14, 16",
+                ))? as u32;
         w.write_bits(self.stream_profile_idc as u32, 4);
         w.write_bits(self.decoder_profile_id as u32, 4);
         w.write_bits(n as u32 - 1, 4);
