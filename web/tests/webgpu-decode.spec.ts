@@ -40,7 +40,10 @@ test('gpu=on: decode parity on whichever path the adapter allows', async ({ page
   const { info, r } = await decodeOnce(page, PORTS.isolated, 'on');
   annotate(testInfo, 'decode-path', r.timings.path);
   annotate(testInfo, 'adapter', info.gpu ? `${info.gpu.adapter} (${info.gpu.backend})` : info.gpuError || 'none');
-  if (process.env.WEBGPU_ADAPTER === 'hardware') {
+  // The adapter policy only applies to the WebGPU-enabled launch — the other projects
+  // never get `--enable-unsafe-webgpu`/`navigator.gpu`, so `hardware` is a requirement
+  // there and meaningless here (playwright.config.ts documents this scoping).
+  if (process.env.WEBGPU_ADAPTER === 'hardware' && testInfo.project.name === 'chromium-webgpu') {
     // A hardware run must not silently downgrade to a fallback adapter or a CPU path.
     expect(
       info.gpu?.ok && info.gpu.software === false && info.adapterProbe?.isFallbackAdapter === false,
