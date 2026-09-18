@@ -114,7 +114,8 @@
   (`zenjpegai-models-v2`, the unversioned v1 cache is deleted). `DecoderPool`/`polyfill` take
   an optional `bundleVersions` map. `web/tests/cache-swap.spec.ts` proves a same-name swap
   renders new content on reload without clearing storage. `playwright.config.ts` ports are
-  shiftable via `JAI_PORT_BASE` so sibling workspaces stop testing each other's `dist/site`.
+  shiftable via `JAI_PORT_BASE` and default to a port derived from the workspace path, so
+  sibling workspaces stop testing each other's `dist/site`.
 - Browser decode scheduling (`web/`): `DecoderPool` now runs all decodes through one shared
   priority queue instead of posting every job to a worker at once — at most
   `min(navigator.hardwareConcurrency - 1, N)` in-flight on the simd build (one hardware thread

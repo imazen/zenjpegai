@@ -19,8 +19,9 @@ const tsvPath = join(__dirname, '..', '..', 'benchmarks', `wasm_decode_${date}_g
 const metaPath = tsvPath.replace(/\.tsv$/, '.meta');
 const HEADER = ['browser', 'browser_version', 'os', 'slug', 'bpp', 'model_id', 'width', 'height', 'stream_bytes', 'variant', 'tier', 'gpu_mode', 'call', 'path', 'presented', 'adapter', 'software_adapter', 'gpu_ns', 'gpu_error', 'fetch_ms', 'models_ms', 'decode_ms', 'total_ms'].join('\t');
 
+// Restricted to the chromium-webgpu project in playwright.config.ts (testIgnore) rather than
+// skipped at run time — the row columns only make sense from the WebGPU-enabled launch.
 test('decode every demo stream on the GPU path and record timings', async ({ page, browserName, browser }, testInfo) => {
-  test.skip(testInfo.project.name !== 'chromium-webgpu', 'GPU benchmark rows only come from the WebGPU-enabled project');
   test.setTimeout(300_000);
   const gpuMode = process.env.WEBGPU_ADAPTER ? 'software' : 'auto';
   await page.goto(`http://127.0.0.1:${PORTS.isolated}/decode.html?gpu=${gpuMode}`);

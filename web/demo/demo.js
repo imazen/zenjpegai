@@ -61,7 +61,7 @@ for (const [name, info] of Object.entries(manifest.models || {})) bundleVersions
 // `?gpu=off|auto|software|force-software` overrides the pool's adapter policy (default auto).
 const gpuMode = new URLSearchParams(location.search).get('gpu') || 'auto';
 const pool = new DecoderPool({ modelsBaseUrl: 'models/', bundleVersions, gpu: gpuMode });
-// Test/debug hooks: the Playwright scheduling spec reads these.
+// Test/debug hooks: the Playwright specs read these.
 window.__pool = pool;
 window.__poolStats = () => pool.stats();
 const ready = await pool.ready();

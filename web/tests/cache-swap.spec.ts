@@ -14,9 +14,7 @@
 // model-bundle requests carry theirs (the Cache API would otherwise pin stale bundles).
 //
 // dist/site is mutated and restored in `finally`; it is a build artifact (build-site.mjs).
-// JAI_BASE_PLAIN overrides the server URL — needed when another workspace's playwright run
-// left servers on the default ports (reuseExistingServer): point it at your own
-// `node scripts/serve.mjs dist/site plain <port>` instead.
+// JAI_BASE_PLAIN overrides the server URL to point at a custom `serve.mjs` instance.
 import { test, expect } from '@playwright/test';
 import { copyFileSync, readFileSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
@@ -57,12 +55,18 @@ const CARD_HASH = `((slug) => {
 })`;
 // `data-state=done` is set when the worker's decodeToCanvas resolves, but a transferred
 // OffscreenCanvas only updates the element's displayed bitmap on the next compositor commit —
-// hashing immediately can read the still-blank placeholder (its all-zero FNV-1a is 2645745317).
-// A double rAF waits out one frame before reading.
-const cardHash = (page, slug: string) => page.evaluate(`(async () => {
-  await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
-  return (${CARD_HASH})(${JSON.stringify(slug)});
-})()`);
+// an immediate hash can read the still-blank placeholder (all-zero FNV-1a: 2645745317), and
+// under load even a double rAF is not a guaranteed wait-out. Poll until the canvas reports
+// real pixels: every demo image is a photograph, so a legitimately all-zero decode cannot
+// occur; a card that stays blank for 30 s is a presentation bug and must fail, not pass.
+const BLANK_HASH = 2645745317;
+const cardHash = async (page, slug: string) => {
+  const h = await page.waitForFunction(
+    `(() => { const h = (${CARD_HASH})(${JSON.stringify(slug)}); return h !== -1 && h !== ${BLANK_HASH} ? h : false; })()`,
+    { timeout: 30_000, polling: 100 },
+  );
+  return h.jsonValue();
+};
 
 test('stream swapped under the same file name renders new content without clearing storage', async ({ page }) => {
   test.setTimeout(180_000);
@@ -87,19 +91,21 @@ test('stream swapped under the same file name renders new content without cleari
   const donorSha = createHash('sha256').update(readFileSync(join(ASSETS, DONOR))).digest('hex');
   const donorBytes = readFileSync(join(ASSETS, DONOR)).byteLength;
 
-  // The page must be served from THIS workspace's dist/site — a reused server on the default
-  // port may belong to a sibling workspace's tree, which this test would corrupt/misread.
+  // The page must be served from THIS workspace's dist/site. Ports are workspace-derived
+  // (playwright.config.ts), so a mismatch means a stale server from an earlier run is squatting
+  // on the port — kill it (or set JAI_PORT_BASE / JAI_BASE_PLAIN) instead of letting this test
+  // corrupt or misread another tree.
   const served = await page.request.get(`${BASE}/manifest.json`).then((r) => r.text());
-  if (JSON.parse(served)?.images?.[0]?.variants?.[0]?.sha256 !== oldSha) {
-    test.skip(true, `${BASE} serves a different manifest than dist/site — set JAI_BASE_PLAIN to a server rooted here`);
-  }
+  expect(
+    JSON.parse(served)?.images?.[0]?.variants?.[0]?.sha256,
+    `${BASE} serves a different manifest than ${SITE} — a stale server is on the port; kill it or set JAI_PORT_BASE`,
+  ).toBe(oldSha);
 
   try {
     // --- visit 1: populate the HTTP cache and Cache API with the original assets ---
     await page.goto(`${BASE}/index.html`);
     await page.waitForFunction(cardDone('car'), { timeout: 90_000, polling: 100 });
     const hashBefore = await cardHash(page, 'car');
-    expect(hashBefore).not.toBe(-1);
 
     // The stream fetch was content-addressed through the manifest digest, and the model
     // bundles carried theirs (the Cache API key is content-versioned).
@@ -125,7 +131,6 @@ test('stream swapped under the same file name renders new content without cleari
     // NEW digest — a URL nothing in this context's caches can answer with stale bytes.
     expect(manifestRequests.length).toBeGreaterThanOrEqual(2);
     expect(streamRequests.some((u) => u.includes(`/${CAR}?v=${donorSha}`))).toBe(true);
-    expect(hashAfter).not.toBe(-1);
     expect(hashAfter).not.toBe(hashBefore);
 
     // Strongest check: the car card now shows exactly the donor picture (identical stream

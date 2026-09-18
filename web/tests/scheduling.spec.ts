@@ -74,9 +74,10 @@ async function scrollThrough(page) {
   });
 }
 
+// Chromium-only: the timing bounds are calibrated to its scheduler (see the header comment).
+// playwright.config.ts keeps this file out of the firefox/webkit projects via testIgnore —
+// nothing here is skipped at run time.
 test.describe('decode scheduling', () => {
-  test.skip(({ browserName }) => browserName !== 'chromium', 'scheduling numbers are chromium-only');
-
   test('demo page: first image lands fast, everything decodes', async ({ page }) => {
     test.setTimeout(120_000);
     const t0 = Date.now();

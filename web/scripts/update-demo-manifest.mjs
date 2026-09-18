@@ -8,7 +8,10 @@
 // The script also re-verifies the release's hygiene invariants: every `sourceFile` stays
 // redacted to `<id>_..._<WxH>.<ext>` (the real imazen-26 filenames encode where/when a photo
 // was taken — never publish them) and `bytes` still matches the file on disk.
-// usage: node web/scripts/update-demo-manifest.mjs [--check]   (--check: verify, don't write)
+// usage: node web/scripts/update-demo-manifest.mjs [--check]
+//   --check verifies instead of writing: every recorded file/sha256/bytes must equal the value
+//   computed from the files on disk (a stale digest — swapped asset, un-re-stamped manifest —
+//   is a failure, not a silent fix-up).
 import { readFileSync, writeFileSync, statSync, readdirSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -38,25 +41,43 @@ for (const img of manifest.images) {
       continue;
     }
     if (v.bytes !== st.size) bad(`${img.slug}/${file}: manifest bytes ${v.bytes} != ${st.size}`);
-    v.file = file;
-    v.sha256 = sha256(file);
+    const digest = sha256(file);
+    if (checkOnly) {
+      if (v.file !== file) bad(`${img.slug}: manifest file "${v.file}" != "${file}"`);
+      if (v.sha256 !== digest) bad(`${img.slug}/${file}: manifest sha256 does not match the file on disk`);
+    } else {
+      v.file = file;
+      v.sha256 = digest;
+    }
   }
 }
 
-manifest.models = {};
+const models = {};
 for (const f of readdirSync(assets).filter((f) => f.endsWith('.zjb')).sort()) {
-  manifest.models[f] = { sha256: sha256(f), bytes: statSync(join(assets, f)).size };
+  models[f] = { sha256: sha256(f), bytes: statSync(join(assets, f)).size };
 }
-manifest.generated = new Date().toISOString();
+if (checkOnly) {
+  for (const [name, want] of Object.entries(models)) {
+    const got = manifest.models?.[name];
+    if (!got) bad(`models: ${name} missing from the manifest`);
+    else if (got.sha256 !== want.sha256 || got.bytes !== want.bytes) bad(`models: ${name} digest is stale`);
+  }
+  for (const name of Object.keys(manifest.models || {})) {
+    if (!models[name]) bad(`models: ${name} listed in the manifest but not on disk`);
+  }
+} else {
+  manifest.models = models;
+  manifest.generated = new Date().toISOString();
+}
 
 if (problems) {
   console.error(`${problems} problem(s); manifest left untouched`);
   process.exit(1);
 }
-const out = JSON.stringify(manifest, null, 2) + '\n';
 if (checkOnly) {
-  console.log('manifest verified: digests computable, sourceFile redaction intact');
+  console.log('manifest verified: every file/sha256/bytes matches the files on disk, sourceFile redaction intact');
 } else {
+  const out = JSON.stringify(manifest, null, 2) + '\n';
   writeFileSync(manifestPath, out);
   console.log(`wrote ${manifestPath} (${out.length} bytes; ${Object.keys(manifest.models).length} model bundles, ${manifest.images.length} images)`);
 }
