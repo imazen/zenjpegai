@@ -49,7 +49,8 @@ ZENJPEGAI_MODELS=path/to/models target/release/zenjpegai decode picture.bits pic
 ## Speed
 
 Decode time on a Ryzen 9 9950X3D, same streams, same machine, no `-C target-cpu=native`
-(`scripts/bench/decode_end_to_end.sh`, raw data in `benchmarks/decode_end_to_end_2026-09-18_r2.tsv`).
+(`scripts/bench/decode_end_to_end.sh`, raw data in `benchmarks/decode_end_to_end_2026-09-18_r2.tsv`
+and `benchmarks/decode_end_to_end_2026-09-18_d4serial.tsv` for the current zen columns).
 Reference = upstream `b9e573f` on PyTorch 1.10.2 CPU; its number is its own `TOTAL`
 (model load excluded, median of 3). zenjpegai numbers are steady state with models loaded
 (min of 3); "process" is one whole command-line run including start-up, model load and
@@ -57,12 +58,12 @@ PNG output.
 
 | stream | ref, 1 thread | ref, 8 threads | zen, 1 thread | zen, 8 threads | ref GPU (CUDA) | zen GPU (wgpu) | ref process | zen process |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 560x888, simple profile (SOP), 0.50 bpp | 146 ms | 110 ms | 52 ms | 17 ms | 87 ms | 12 ms | 1183 ms | 108 ms |
-| 560x888, base profile (BOP), 0.12 bpp | 226 ms | 136 ms | 84 ms | 25 ms | — | — | 1204 ms | 116 ms |
-| 560x888, base profile (BOP), 0.50 bpp | 230 ms | 128 ms | 81 ms | 23 ms | 93 ms | 17 ms | 1192 ms | 118 ms |
-| 560x888, base profile (BOP), 1.00 bpp | 217 ms | 124 ms | 82 ms | 26 ms | — | — | 1120 ms | 145 ms |
-| 560x888, high profile (HOP), 0.50 bpp | 2313 ms | 660 ms | 1064 ms | 304 ms | 160 ms | 109 ms | 1645 ms | 441 ms |
-| 2096x1400, base profile (BOP), 0.50 bpp | 1228 ms | 512 ms | 496 ms | 157 ms | 288 ms | 93 ms | 1585 ms | 599 ms |
+| 560x888, simple profile (SOP), 0.50 bpp | 146 ms | 110 ms | 52 ms | 14 ms | 87 ms | 12 ms | 1183 ms | 108 ms |
+| 560x888, base profile (BOP), 0.12 bpp | 226 ms | 136 ms | 82 ms | 19 ms | — | — | 1204 ms | 116 ms |
+| 560x888, base profile (BOP), 0.50 bpp | 230 ms | 128 ms | 83 ms | 22 ms | 93 ms | 17 ms | 1192 ms | 118 ms |
+| 560x888, base profile (BOP), 1.00 bpp | 217 ms | 124 ms | 83 ms | 21 ms | — | — | 1120 ms | 145 ms |
+| 560x888, high profile (HOP), 0.50 bpp | 2313 ms | 660 ms | 1066 ms | ~320 ms | 160 ms | 109 ms | 1645 ms | 441 ms |
+| 2096x1400, base profile (BOP), 0.50 bpp | 1228 ms | 512 ms | 494 ms | 120 ms | 288 ms | 93 ms | 1585 ms | 599 ms |
 
 The GPU columns are the same box's RTX 2080 (the CPU columns above are its Ryzen 9
 9950X3D): the reference's CUDA path (torch 1.10.2+cu113, `decode_stream` TOTAL, median
@@ -71,11 +72,14 @@ compute shaders through wgpu/Vulkan, whole codestream to 8-bit, CPU entropy stag
 (`benchmarks/gpu_decode_2026-09-18_rtx2080_kernels.tsv`). On SOP/BOP at 560x888 the GPU
 total is dominated by the CPU entropy stage, so zen's GPU and 8-thread numbers nearly
 coincide; HOP is the kernel-bound operating point, where the reference's cuDNN path stays
-1.5x ahead of the WGSL kernels while its CPU path is 3.8x behind this crate's.
+1.5x ahead of the WGSL kernels while its CPU path is 3.8x behind this crate's. The GPU
+decode's CPU stages run on the rayon pool too — CPU-side decode time in the GPU path
+dropped ~13-39 % after the entropy/latent parallelisation (HOP unchanged — its GPU wall
+dominates; `benchmarks/gpu_decode_2026-09-18_d4serial.tsv` vs `_rtx2080`).
 
 So: ~2.2x to 2.8x faster than the reference on one thread. Threads help the reference
 too (up to ~3.5x on HOP), but zenjpegai's eight-thread decode still beats its
-eight-thread decode by 2.2x to 6.3x — and the margin grows under machine load, because
+eight-thread decode by 2x to 6.4x — and the margin grows under machine load, because
 the convolution accumulators no longer spill to the stack (see
 `benchmarks/conv_kernels_2026-09-18.md`). Process wall — what a batch pipeline feels —
 is 4x to 11x faster end to end.

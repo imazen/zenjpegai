@@ -278,6 +278,30 @@ Native targets are unchanged (fused everywhere).
   (`benchmarks/wasm_decode_2026-09-18.tsv` run 0 vs run 3; box is shared, the run-0 baseline
   predates several sessions, treat the exact ratio as approximate). ~12% of decode stays serial
   (entropy + latent reconstruction), which caps threaded decode at ~90-130 ms regardless.
+- 2026-09-18 decoder-parallelism pass (d4serial; `benchmarks/decode_stages_2026-09-18.{tsv,meta}`,
+  `decode_end_to_end_2026-09-18_d4serial.tsv`, `gpu_decode_2026-09-18_d4serial.tsv`, appended
+  block of `wasm_threads_2026-09-18.tsv`): the "12% serial" above was a *scheduling* serial
+  fraction, not a data dependency — the entropy bodies of the two components, the independent
+  latent regions, the residual streams inside an `ECThread8` substream, and the two synthesis
+  networks are all independent. Now: `z`+qualmap run concurrently with the per-component
+  entropy bodies, both component chains (`entropy → latent → LSBS`) run joined, ANS threads
+  decode to compact per-thread buffers and scatter, latent regions/scales/masks/gather/
+  dequantise go over rayon, the luma synthesis transform runs inside the luma chain
+  overlapping the chroma chain's tail (the chroma transform needs both latents, so it waits
+  for the join), and output conversion is chunked. Cancellation stays deterministic through
+  a `Gate` that serialises `Stop::check` calls and memoises the trip. Bit-identical output on
+  every tier and thread count (`tiers_and_threads_agree_bit_for_bit`, all `decode_ref` and
+  `entropy_ref` vectors, region streams included). Native interleaved A/B mins vs the
+  pre-pass binary: 1T ~unchanged, 8T −17-23 %, 16T −14-30 % (img01 120 ms, BOP-560 21 ms,
+  SOP 14 ms at 8T; `decode_end_to_end_2026-09-18_d4serial.tsv`). Browser threads package
+  (playwright `threads.spec.ts`, same page): 1W ~642 → 16W ~93 ms mean over 16 streams —
+  scaling now extends to 16 workers (was flat past 8). wasip1 stage rows show the remaining
+  single-thread cost is *synthesis kernels* (luma transform alone is 75-90 % of a Wasm128
+  decode — it is per-block compute, not scheduling), so further wasm gains are kernel work,
+  not more threads. What is still serial by construction: container/header parse, per-stream
+  ANS state (me-tANS is a serial bitstream walk; only `ECThread8` streams offer intra-stream
+  parallelism), the MCM's sequential context stages, and the join between chains and the
+  chroma synthesis transform.
 - 2026-09-18 kernel pass 2 (`benchmarks/wasm_kernel_2026-09-18.md`): inspecting V8's TurboFan
   code showed the "floor" claim above was wrong — accumulators were spilled per input block and
   every tap carried bounds checks. Restructuring `block()` (accumulators live across the whole

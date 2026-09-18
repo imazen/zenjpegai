@@ -161,6 +161,26 @@
   `benchmarks/conv_kernels_2026-09-18.md`, `decode_end_to_end_2026-09-18_d2native{,_base}.tsv`.
   VNNI (`vpdpwssd`) examined and not used: archmage/magetypes expose no safe op for the
   packed layout.
+- Decode-stage parallelism (d4serial): the two components' entropy bodies, the residual
+  streams inside a multi-threaded (`ECThread8`) ANS substream (compact per-thread decode
+  + scatter), independent latent-reconstruction regions, the per-region scale/mask/gather/
+  dequantise helpers, the two synthesis transforms and output conversion now run on the
+  rayon pool; `z` + quality-map decode overlaps both component chains, and the luma
+  synthesis transform runs inside the luma chain so it overlaps the chroma chain's tail.
+  Cancellation keeps its exact check sequence through a `Gate` wrapper that serialises
+  `Stop::check` and memoises the trip. Bit-identical output on every tier and thread
+  count (all `decode_ref`/`entropy_ref` vectors, `tiers_and_threads_agree_bit_for_bit`).
+  Native interleaved A/B mins vs the pre-pass build: 1 thread ~unchanged, 8 threads
+  −17-23 %, 16 threads −14-30 % (BOP 560x888 25→21 ms, img01 157→120 ms at 8T;
+  `benchmarks/decode_end_to_end_2026-09-18_d4serial.tsv`). Browser threads package scales
+  to 16 workers (~642→93 ms mean over 16 streams; appended block of
+  `benchmarks/wasm_threads_2026-09-18.tsv`); GPU-path CPU decode time −13-39 %
+  (`benchmarks/gpu_decode_2026-09-18_d4serial.tsv`). New `Decoder::decode_picture_stats`
+  returning `DecodeStats` per-stage timings, CLI `decode --stats` (TSV on stderr), and
+  `scripts/bench/decode_stages.sh`; stage breakdowns in
+  `benchmarks/decode_stages_2026-09-18.{tsv,meta}` (native + wasip1 — on Wasm128 the
+  remaining single-thread cost is synthesis kernels, 75-90 % of decode, not scheduling).
+  `decode_picture` (and therefore `Decoder::decode`) output unchanged.
 - `Limits` (pixels, dimensions, input bytes, estimated memory; safe defaults 120 MP / 4 GiB), judged on the picture header before any model load or picture-sized allocation; `estimate_memory` / `Decoder::estimate_memory` (model calibrated on heaptrack measurements, `benchmarks/memory_2026-09-17.*`); `Decoder::preload`; `nn::fast::set_pool_limit` and `zenjpegai --pool-mb / --discard / preload`.
 - Decode memory: feature maps are freed as soon as the next layer has them, synthesis tiles go straight into the cropped / subsampled output planes, entropy-stage tensors are shed after use. Measured peak heap (heaptrack, decode only, default 1 GiB buffer pool): 560x888 SOP 83.7 to 64.7 MB, BOP 145.0 to 116.0 MB, HOP 1260 to 1190 MB, 2096x1400 BOP 389.5 to 309.1 MB; without buffer recycling (`--pool-mb 0`) 39.5 / 64.6 / 442.2 / 145.7 MB. Pixels identical, no slowdown (`benchmarks/memory_2026-09-17.*`, `decode_before_after_2026-09-17.tsv`).
 - Cooperative cancellation: `Decoder::decode_with(stream, &dyn enough::Stop)`, checked per region / channel chunk / network layer / synthesis tile; `Error::Cancelled`.
