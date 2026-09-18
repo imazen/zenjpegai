@@ -243,6 +243,19 @@
   additionally once per tile).
 - `benchmarks/build_time_2026-09-18.md`: clean/incremental build times + `cargo llvm-lines`
   survey (no build-time issue found).
+- Decoder fuzzing (`fuzz/`, cargo-fuzz + libFuzzer): three targets over the untrusted-input
+  surface — `container_headers` (marker scan, `Codestream::parse`, header/TON/RDI/UDI
+  parsing, region and thread split helpers), `entropy_stage` (`decode_entropy_stage*` on
+  arbitrary bytes against a fixed synthetic zero-weight `ZJM1` model, with a counting
+  `Stop`), and `decode_full` (`Decoder::decode_with` under tight `Limits` and
+  cancellation, on arbitrary bytes and mutated real streams). Synthetic checkpoints let
+  the full pipeline run without committing model weights. `fuzz/zenjpegai.dict`
+  dictionary, `fuzz/seeds/` corpus (47.9 KB of real + truncated reference streams),
+  `tests/fuzz_regression.rs` replays `fuzz/regression/*` through the same entry points on
+  stable, `just fuzz` recipe, additive CI job (nightly target build + stable replay),
+  corpora/artifacts sync to `/mnt/v/fuzzes/zenjpegai/` via
+  `~/work/zen-workspace/fuzz-sync.sh`. First campaign: no crash, timeout, OOM, or
+  slow-unit findings.
 - Repository skeleton.
 
 ### Fixed

@@ -140,3 +140,22 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - run: cargo check
+
+  # Fuzz targets compile only on nightly (sanitizer flags); the regression suite that replays
+  # fuzz/regression/* through the same entry points runs on stable like every other test.
+  fuzz:
+    name: Fuzz build + regression
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: taiki-e/install-action@cargo-fuzz
+
+      - name: Build fuzz targets (nightly)
+        run: cd fuzz && cargo +nightly fuzz build
+
+      - name: Fuzz regression suite (stable)
+        run: cargo +stable test --test fuzz_regression --features unstable-internals

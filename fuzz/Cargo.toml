@@ -1,0 +1,41 @@
+[package]
+name = "zenjpegai-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+enough = "0.4.4"
+
+[dependencies.zenjpegai]
+path = ".."
+features = ["unstable-internals"]
+
+# Prevent this from interfering with workspaces
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "container_headers"
+path = "fuzz_targets/container_headers.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "entropy_stage"
+path = "fuzz_targets/entropy_stage.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "decode_full"
+path = "fuzz_targets/decode_full.rs"
+test = false
+doc = false

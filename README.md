@@ -113,6 +113,13 @@ HOST_LABEL=dev scripts/wasm/parity.sh > benchmarks/wasm_parity_$(date +%F).tsv  
 cd web && npm ci && npm run build && npx playwright test    # browser suite (demo assets via scripts/fetch-demo-assets.mjs)
 ```
 
+The decoder's untrusted-input surface is fuzzed with cargo-fuzz (libFuzzer): `just fuzz`
+builds three nightly targets — `container_headers`, `entropy_stage`, and `decode_full` —
+and runs them with the `fuzz/zenjpegai.dict` dictionary and the `fuzz/seeds/` corpus.
+Every input from `fuzz/regression/` is replayed on stable by `cargo test --test
+fuzz_regression`; crashes and corpora live outside git and sync to block storage via
+`~/work/zen-workspace/fuzz-sync.sh`.
+
 Status detail, the honest table of what is and is not ported, and every measured parity
 bound: [`PORTING.md`](PORTING.md). How to work here: [`CONTRIBUTING.md`](CONTRIBUTING.md).
 

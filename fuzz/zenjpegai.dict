@@ -1,0 +1,61 @@
+# JPEG AI codestream dictionary for the zenjpegai fuzz targets.
+# Markers (2 bytes, big-endian), ue(v) size prefixes, ZJM1 checkpoint magic,
+# and real header bit patterns (PIH/TON prefixes from reference streams).
+# (libFuzzer dict syntax: no trailing comments on entry lines.)
+
+# --- markers ---
+"soc"="\xff\x80"
+"eoc"="\xff\x81"
+"pih"="\xff\x82"
+"ton"="\xff\x83"
+"rdi"="\xff\x84"
+"soz"="\xff\x88"
+"sorp"="\xff\x89"
+"sors"="\xff\x8a"
+"soq"="\xff\x8b"
+"udi"="\xff\x8c"
+"soc_pih"="\xff\x80\xff\x82"
+"pih_soz"="\xff\x82\xff\x88"
+
+# --- packed model magic (checkpoint paths a fuzzed model_id reaches) ---
+"zjm1"="ZJM1"
+"zjb1"="ZJB1"
+
+# --- ue(v) size prefixes (substream length fields, byte-aligned) ---
+# ue(0)
+"ue_0"="\x80"
+# ue(1)
+"ue_1"="\x40"
+# ue(2)
+"ue_2"="\x60"
+# ue(3)
+"ue_3"="\x20"
+# ue(7)
+"ue_7"="\x10"
+# ue(15)
+"ue_15"="\x08"
+# ue(255) spans two bytes
+"ue_255"="\x04\x00"
+
+# --- real PIH payloads (prefixes; header is a bit string, sizes ue(v)) ---
+# img30_base_on_bpp012: BOP, tools on, 560x888
+"pih_base_on"="\x06\x20\x01\x11\x03\x40\x1f\x00\x33\x80\x00\x00\x89\x5a\x85\x03\xff\xff\xf2\x64"
+# enc_img30_hop_m2_b0: HOP model 2
+"pih_hop"="\x09\x00\x02\x22\x10\x34\x01\xf0\x03\x38\x00\x00\x09\x20\x00\x50\x01\x80"
+# img30_base_qmap_rvs_bpp025: quality map + RVS
+"pih_qmap"="\x06\x40\x01\x11\x03\x40\x1f\x00\x33\x80\x00\x00\x89\xc8\x05\x03\xff\xff\xf2\x64"
+# enc_img30_bop_m0_bm1069: BOP model 0
+"pih_bop_m0"="\x06\x20\x01\x11\x03\x40\x1f\x00\x33\x80"
+
+# --- real TON payload prefix (tools on) ---
+"ton_base_on"="\x07\x60\xeb\x3c\xda\x6f\x88\x88\x80\x00\x7f\xff\xbf\xf9\x3f\xfe\x3f\xec\xbf\xff\x08\x88\xbf\xec"
+
+# --- marker + ue(v) size + payload skeletons ---
+# PIH ue(0): empty payload -> header parse hits EOF
+"empty_pih"="\xff\x82\x80"
+"empty_ton"="\xff\x83\x80"
+"empty_soz"="\xff\x88\x80"
+"empty_sorp"="\xff\x89\x80"
+"empty_soq"="\xff\x8b\x80"
+"empty_udi"="\xff\x8c\x80"
+"empty_rdi"="\xff\x84\x80"

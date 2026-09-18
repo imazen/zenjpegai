@@ -153,6 +153,12 @@ required-features = ["unstable-internals"]
 name = "weights_ref"
 required-features = ["unstable-internals"]
 
+# Replays fuzz/regression/* through the same entry points the libFuzzer bins
+# run (fuzz/fuzz_targets/common.rs, included by both). Needs internals + std.
+[[test]]
+name = "fuzz_regression"
+required-features = ["std", "unstable-internals"]
+
 # The float layers are unusable unoptimised (a 0.5 MP decode takes minutes); tests need them.
 [profile.dev]
 opt-level = 2

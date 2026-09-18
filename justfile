@@ -47,6 +47,21 @@ test-wasi:
 wasm-parity:
     scripts/wasm/parity.sh | tee benchmarks/wasm_parity_$(date +%F).tsv
 
+# Decoder fuzzing: build the libFuzzer targets (nightly + cargo-fuzz) and run
+# each for `minutes` total, rotating, with the seed corpus and dictionary.
+# Corpora live in fuzz/corpus/<target>, crashes in fuzz/artifacts/<target>;
+# sync both to /mnt/v/fuzzes/zenjpegai with ~/work/zen-workspace/fuzz-sync.sh.
+fuzz minutes="7" *targets="container_headers entropy_stage decode_full":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd fuzz && cargo +nightly fuzz build
+    for target in {{targets}}; do
+        nice -n 19 cargo +nightly fuzz run "$target" corpus/"$target" seeds -- \
+            -dict=zenjpegai.dict -artifact_prefix=artifacts/"$target"/ \
+            -max_len=262144 -rss_limit_mb=4096 -max_total_time=$(( {{minutes}} * 60 )) \
+            2>&1 | tee ~/tmp/zenjpegai-fuzz-"$target".log
+    done
+
 # Browser build + Playwright suite: wasm packages, npm deps, demo-assets-v1 (needs `gh` auth
 # against the private repo today), the servable site, then chromium+firefox+webkit tests.
 # See web/README.md for the pieces and what each covers.
