@@ -89,7 +89,9 @@ fn tap_loop<F: SimdF32<V>, const V: usize, const B: usize, const S: usize>(
 
 /// [`tap_loop`] with a compile-time tap count: the tap loop unrolls fully, so each weight
 /// vector offset and `sr` slot is a constant. `NT` covers every layer in the models (1x1
-/// convs, the 2x2 phases of a stride-2 transposed 4x4, 3x3 convs).
+/// convs, the 2x2 phases of a stride-2 transposed 4x4, 3x3 convs). Native only — see the
+/// `vin == V` dispatch in [`block`].
+#[cfg(not(target_arch = "wasm32"))]
 #[inline(always)]
 fn tap_loop_n<F: SimdF32<V>, const V: usize, const B: usize, const S: usize, const NT: usize>(
     t: F::Token,
@@ -154,8 +156,13 @@ fn block<F: SimdF32<V>, const V: usize, const B: usize, const S: usize>(
             }
             // `vin == V` (every input block but possibly the last) gets a constant trip count:
             // the v-loop unrolls and each splat offset folds into the load instruction.
-            // Constant tap counts (1x1, 2x2 convT phases, 3x3) unroll the tap loop too.
+            // Constant tap counts (1x1, 2x2 convT phases, 3x3) unroll the tap loop too —
+            // native only: on wasm32 the unrolled bodies spill Cranelift's 16 v128
+            // registers and cost ~45 % of decode (the ntaps==9 rejection in
+            // benchmarks/wasm_kernel_2026-09-18.md generalised), so wasm keeps the
+            // dynamic tap loop.
             if vin == V {
+                #[cfg(not(target_arch = "wasm32"))]
                 match ntaps {
                     1 => {
                         for v in 0..V {
@@ -167,6 +174,7 @@ fn block<F: SimdF32<V>, const V: usize, const B: usize, const S: usize>(
                                 v,
                             );
                         }
+                        continue;
                     }
                     4 => {
                         for v in 0..V {
@@ -178,6 +186,7 @@ fn block<F: SimdF32<V>, const V: usize, const B: usize, const S: usize>(
                                 v,
                             );
                         }
+                        continue;
                     }
                     9 => {
                         for v in 0..V {
@@ -189,18 +198,12 @@ fn block<F: SimdF32<V>, const V: usize, const B: usize, const S: usize>(
                                 v,
                             );
                         }
+                        continue;
                     }
-                    _ => {
-                        for v in 0..V {
-                            tap_loop::<F, V, B, S>(
-                                t,
-                                &mut acc,
-                                &wblk[v * ntaps..][..ntaps],
-                                &sr,
-                                v,
-                            );
-                        }
-                    }
+                    _ => {}
+                }
+                for v in 0..V {
+                    tap_loop::<F, V, B, S>(t, &mut acc, &wblk[v * ntaps..][..ntaps], &sr, v);
                 }
             } else {
                 for (v, wrow) in wblk.chunks_exact(ntaps).enumerate() {

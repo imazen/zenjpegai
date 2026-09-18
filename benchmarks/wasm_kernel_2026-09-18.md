@@ -102,3 +102,23 @@ add); V8 emits ~32. The difference is V8 artifacts unreachable from safe Rust:
 the per-loop safepoint poll, the len reload for the assert, the wasted `leaq`
 before each `vbroadcastss` (x86 base+index+disp could fold), and loop counters.
 The B=8/V=16 shapes spill; B=4/V=8 remains the sweet spot for V8.
+
+## Recheck after the native conv pass (f83e7f9) — 2026-09-18
+
+The native pass (pass 3, `conv_kernels_2026-09-18.md`) added constant-tap-count
+unrolling (`tap_loop_n` / `int_taps` for ntaps 1/4/9) to the *shared* generic
+kernel, so the wasm build picked it up too. Re-measured on the same stream:
+
+| build | node (V8) min | wasmtime 40 min |
+|-------|--------------:|----------------:|
+| f83e7f9- (before) | — | 366-368 |
+| f83e7f9 (all NT unrolls on wasm) | 286.6 | **539-545 (+47 %)** |
+| final: NT unrolls native-only | 304.5 | 362.7 |
+
+Cranelift regressed on *every* NT instantiation (even NT=1 with NT=9 off still
+measured ~540) — its 16-v128 register allocator does not survive the unrolled
+bodies — while V8 got faster with them. The specialization is now
+`cfg(not(target_arch = "wasm32"))`: wasm keeps the dynamic tap loop, giving up
+the ~6 % V8 gain rather than the ~47 % Cranelift loss. Scalar vs Wasm128
+wasip1 decode: byte-identical; vs the reference PNG: 73/1,491,840 samples
+differ, all by 1 — the recorded bound.

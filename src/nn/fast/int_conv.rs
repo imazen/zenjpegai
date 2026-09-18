@@ -186,8 +186,13 @@ fn int_block<F: SimdMadd<V, V2>, const V: usize, const V2: usize, const B: usize
     j: usize,
 ) {
     let mut acc = [bias; B];
-    let ntaps = taps.len();
-    match ntaps {
+    // Fixed tap counts unroll the `(pair, tap)` sweep's inner loop — native only: the
+    // unrolled body spills Cranelift's 16 v128 registers on wasm32 (same failure as the
+    // float conv's ntaps==9 unroll, benchmarks/wasm_kernel_2026-09-18.md).
+    #[cfg(target_arch = "wasm32")]
+    int_taps_dyn::<F, V, V2, B>(t, &mut acc, taps, pairs, ph, pw, xp, w, j);
+    #[cfg(not(target_arch = "wasm32"))]
+    match taps.len() {
         1 => int_taps::<F, V, V2, B, 1>(
             t,
             &mut acc,
@@ -218,7 +223,8 @@ fn int_block<F: SimdMadd<V, V2>, const V: usize, const V2: usize, const B: usize
 }
 
 /// The `(pair, tap)` sweep of [`int_block`], fixed tap count: the tap loop unrolls fully, so
-/// each weight vector offset and tap entry is a constant.
+/// each weight vector offset and tap entry is a constant. Native only — see [`int_block`].
+#[cfg(not(target_arch = "wasm32"))]
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
 fn int_taps<
