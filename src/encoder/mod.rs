@@ -554,8 +554,7 @@ impl Encoder {
         // `org_img_i` of the post-filters' `compress`: EFE linear reads the source's planes
         // in `[0, 255]` at its own subsampling, eICCI the same planes in its internal
         // `[0, 1]` range (`filters::icci::org_planes`).
-        let efe_org = params
-            .efe_linear
+        let efe_org = (params.efe_linear || params.efe_nonlinear)
             .then(|| efe_source_planes(src, &meta))
             .transpose()?;
         let icci_org = params
@@ -636,8 +635,7 @@ impl Encoder {
         // `org_img_i` of the post-filters' `compress`, computed once for the final encode;
         // the rate trials leave the tools off so their stream sizes never carry a tool
         // header.
-        let efe_org = params
-            .efe_linear
+        let efe_org = (params.efe_linear || params.efe_nonlinear)
             .then(|| efe_source_planes(src, &meta))
             .transpose()?;
         let icci_org = params
@@ -677,6 +675,7 @@ impl Encoder {
                 model_id: ccs_model as u8,
                 beta_displacement_log: [beta; 2],
                 efe_linear: final_run && base_params.efe_linear,
+                efe_nonlinear: final_run && base_params.efe_nonlinear,
                 eicci: if final_run { base_params.eicci } else { None },
                 ..base_params
             };
@@ -978,7 +977,7 @@ impl Encoder {
         // The post-filters decide on the decoded picture: keep the masked dequantised
         // residual (and the `likely` map for LSBS) so `reconstruct_latent` can rebuild
         // `y_hat`.
-        let post_filters = params.efe_linear || params.eicci.is_some();
+        let post_filters = params.efe_linear || params.efe_nonlinear || params.eicci.is_some();
         let mut efe_residuals: Vec<Option<Tensor<f32>>> = Vec::with_capacity(2);
         let mut efe_likely: Vec<Option<Tensor<u16>>> = Vec::with_capacity(2);
         for (ccs, latent) in latents.into_iter().enumerate() {
@@ -1095,6 +1094,7 @@ impl Encoder {
         //     `synthesize` rebuild exactly what the decoder produces, then
         //     `to_source_format` lands it on the source's chroma lattice.
         let mut efe_linear = None;
+        let mut efe_nonlinear = None;
         let mut icci = None;
         if post_filters {
             let need =
@@ -1161,9 +1161,11 @@ impl Encoder {
                 stop,
             )?;
             let rec = crate::decoder::output::to_source_format(&hdr, planes)?;
-            // `FiltersComposite.compress` chains the picture through the enabled tools
-            // (`EFElinear` before `eICCI`), so eICCI's `img` is the EFE-filtered one.
+            // `FiltersComposite.compress` chains `current_images[0]` through the enabled tools
+            // in factory order (`EFElinear`, `eICCI`, `EFEnonlinear`); `current_images[1]`
+            // (the EFE linear filter's up-sampled picture) passes through untouched.
             let mut filtered = None;
+            let mut upsampled = None;
             if params.efe_linear {
                 let org = efe_org.ok_or_else(need)?;
                 let out = filters::efe_linear::decide(&filters::efe_linear::EfeLinearInput {
@@ -1175,16 +1177,9 @@ impl Encoder {
                     org,
                     rec: &rec,
                 })?;
-                // `ans[1]` (the up-sampled picture) feeds only the EFE non-linear filter's
-                // search — E2 will consume it.
-                let filters::efe_linear::EfeLinearOutput {
-                    header,
-                    filtered: f,
-                    upsampled,
-                } = out;
-                drop(upsampled);
-                filtered = Some(f);
-                efe_linear = Some(header);
+                upsampled = out.upsampled;
+                filtered = Some(out.filtered);
+                efe_linear = Some(out.header);
             }
             // `eICCI.compress`: the per-tile model search on the (possibly filtered)
             // reconstruction.
@@ -1200,6 +1195,34 @@ impl Encoder {
                     cfg,
                     stop,
                 )?;
+                // The non-linear search sees eICCI's output picture: replay the selected
+                // models with the decoder-side apply.
+                if let Some(h) = &icci {
+                    filtered = Some(crate::filters::icci::filter(
+                        eng,
+                        &hdr,
+                        h,
+                        synth_op,
+                        &*self.models,
+                        &self.icci_nets,
+                        filtered.unwrap_or_else(|| rec.clone()),
+                        stop,
+                    )?);
+                }
+            }
+            // `EFEnonlinear.compress`: the per-tile weight fit and the on/off mask search.
+            if params.efe_nonlinear {
+                let org = efe_org.ok_or_else(need)?;
+                let out =
+                    filters::efe_nonlinear::decide(&filters::efe_nonlinear::EfeNonlinearInput {
+                        eng,
+                        meta,
+                        model_id: params.model_id as usize,
+                        org,
+                        rec: filtered.as_ref().unwrap_or(&rec),
+                        upsampled: upsampled.as_ref(),
+                    })?;
+                efe_nonlinear = Some(out.header);
             }
         }
 
@@ -1210,10 +1233,10 @@ impl Encoder {
             lsbs_enabled: [params.lsbs; 2],
             efe_linear,
             icci,
+            efe_nonlinear,
             // `LEF.compress` -> `analyze`: the channel of the luma scale map with the highest
             // mean. The filter itself runs on the decoder; nothing else about it is coded.
             lef_channel,
-            ..ToolHeader::default()
         };
         out.substream(Marker::Ton, &tools.write(&hdr)?)?;
         out.substream(Marker::Rdi, &RenderingInfo::default().write()?)?;

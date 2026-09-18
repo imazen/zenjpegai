@@ -1536,3 +1536,372 @@ fn eicci_tiers_agree_bit_for_bit() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// EFE non-linear encode side (E2): `EFEnonlinear.compress` ported as
+// `encoder::filters::efe_nonlinear::decide`, replayed against the per-vector dumps
+// `scripts/ref_vectors/dump_efe_nonlinear.py` writes into `<vector>/efe_nonlinear/`
+// (make_reference_streams.sh `efe` set — the dumps replay the real reference `compress` on
+// the same `filters/` input pictures, with its own lstsq/integerize/mask decisions recorded).
+
+/// Vectors carrying an `efe_nonlinear/` oracle dump: every stream where the tool ran at
+/// encode time. Forced (`_nl`) vectors exercise the forced-selection paths; the free ones
+//  (`img30_efe_f4c6_f1c5`, the `c420`/`c422` non-`_nl` vectors, `base_efenl`, `base_on`)
+/// carry authentic enable/disable decisions — including `dctif` and `base_efenl`, where no
+/// up-sampled alternative exists and the mask search is skipped.
+const EFE_NL_VECTORS: &[&str] = &[
+    "img30_efe_f2c1_f2c2_nl",
+    "img30_efe_f3c3_f3c4_nl",
+    "img30_efe_f3c5_f4c7_nl",
+    "crop277_efe_f4c5_f3c6_nl",
+    "img01_efe_f2c0_f3c0_nl",
+    "img30_c420_efe_f3c5_f4c7_nl",
+    "crop277_c420_efe_f4c6_f3c3_nl",
+    "crop277_s420_efe_f3c5_f4c7_nl",
+    "img30_s420_efe_f1c0_f2c1_nl",
+    "crop277_s422_efe_f3c6_f4c2_nl",
+    "img30_efe_f4c6_f1c5",
+    "img30_c420_efe_f1c0_f2c1",
+    "img30_c422_efe_f3c2_f2c4",
+    "img30_c420_efe_dctif",
+    "img30_base_efenl_bpp050",
+    "img30_base_on_bpp025",
+    "img30_base_on_bpp100",
+];
+
+/// The dump's `meta` row: `[model_id, s_ver, s_hor, bSize, tile_w, tile_h, numTiles,
+/// u_enabled, v_enabled, mask1_enabled, mask2_enabled]`.
+struct NlMeta {
+    model_id: usize,
+    s_ver: u8,
+    s_hor: u8,
+    bsize: usize,
+    tile_w: usize,
+    tile_h: usize,
+    ntiles: usize,
+    enabled: [bool; 2],
+    mask_en: [bool; 2],
+}
+
+fn nl_meta(dump: &std::collections::HashMap<String, common::RefTensor>) -> NlMeta {
+    let m = dump["meta"].i64();
+    assert_eq!(m.len(), 11, "efe_nonlinear meta length");
+    NlMeta {
+        model_id: m[0] as usize,
+        s_ver: m[1] as u8,
+        s_hor: m[2] as u8,
+        bsize: m[3] as usize,
+        tile_w: m[4] as usize,
+        tile_h: m[5] as usize,
+        ntiles: m[6] as usize,
+        enabled: [m[7] != 0, m[8] != 0],
+        mask_en: [m[9] != 0, m[10] != 0],
+    }
+}
+
+fn nl_planes(
+    dump: &std::collections::HashMap<String, common::RefTensor>,
+    prefix: &str,
+) -> Option<Planes> {
+    let a = dump.get(&format!("{prefix}.a"))?;
+    Some(Planes {
+        y: plane(a),
+        u: plane(&dump[&format!("{prefix}.b")]),
+        v: plane(&dump[&format!("{prefix}.c")]),
+    })
+}
+
+/// Per-vector parity tallies: deterministic-vs-deterministic counts plus the measured
+/// MKL-divergence statistics.
+#[derive(Default, Debug)]
+struct NlStats {
+    /// Our weight codes differing from the dump's deterministic f64 re-solve by more
+    /// than one code (`round` boundary), and the total compared.
+    w64_bad: usize,
+    w64_total: usize,
+    /// Exact matches against the f64 oracle.
+    w64_exact: usize,
+    /// Our codes vs the MKL f32 draw (`weights_{u,v}`) — informational only: the
+    /// reference's own draw is not run-to-run reproducible on these systems.
+    wmkl_diff: usize,
+    /// Mask-block values differing from the dump's, where both sides kept a mask.
+    mask_diff: usize,
+    mask_total: usize,
+    /// Per-plane enable decisions where ours matched neither the coded stream nor the
+    /// replay (two independent reference draws).
+    flag_outlier: usize,
+    /// Per-plane keep/drop disagreements of the mask decision.
+    mask_flag_diff: usize,
+    /// Max |filtered − reference output| over the chroma planes.
+    out_worst: f32,
+}
+
+/// `decide` replayed on one vector's dumps; returns the parity tallies.
+fn check_efe_nl(name: &str) -> NlStats {
+    use zenjpegai::decoder::read_headers;
+    use zenjpegai::encoder::SourceMeta;
+    use zenjpegai::encoder::filters::efe_nonlinear::{EfeNonlinearInput, decide};
+
+    let dir = vector_dir(name);
+    // Hard failure when the oracle dumps are absent: the caller opted in with
+    // `reference-tests` + ZENJPEGAI_REF (just test-ref).
+    let dump = common::load_dump(&dir.join("efe_nonlinear"));
+    let meta = nl_meta(&dump);
+    let stream = std::fs::read(dir.join("stream.bits")).unwrap();
+    let headers = read_headers(&zenjpegai::container::Codestream::parse(&stream).unwrap()).unwrap();
+    let pic = &headers.picture;
+    assert_eq!(meta.model_id, pic.model_id as usize, "{name}: model_id");
+    assert_eq!(meta.s_ver, pic.s_ver, "{name}: s_ver");
+    assert_eq!(meta.s_hor, pic.s_hor, "{name}: s_hor");
+
+    let org = nl_planes(&dump, "org").unwrap();
+    let rec = nl_planes(&dump, "in").unwrap();
+    let alt = nl_planes(&dump, "alt");
+    let smeta = SourceMeta {
+        bit_depth: pic.bit_depth,
+        s_ver: pic.s_ver,
+        s_hor: pic.s_hor,
+        c_ver: pic.c_ver,
+        c_hor: pic.c_hor,
+        colour_transform: pic.colour_transform.clone(),
+    };
+    let out = decide(&EfeNonlinearInput {
+        eng: &Engine::new(),
+        meta: &smeta,
+        model_id: meta.model_id,
+        org: &org,
+        rec: &rec,
+        upsampled: alt.as_ref(),
+    })
+    .unwrap();
+    let h = &out.header;
+    let mut st = NlStats::default();
+    assert_eq!(h.min_symbol, 0, "{name}: minSymbol is always 0");
+    assert_eq!(h.max_symbol, u16::MAX, "{name}: maxSymbol is always 65535");
+
+    // Tile grid and per-tile luma ranges are integer/f32-exact.
+    let want_min = dump["luma_min"].i64();
+    let want_max = dump["luma_max"].i64();
+    assert_eq!(want_min.len(), meta.ntiles, "{name}: dump numTiles");
+    if let Some(t) = &h.nonlinear {
+        assert_eq!(t.tile_width as usize, meta.tile_w, "{name}: tile width");
+        assert_eq!(t.tile_height as usize, meta.tile_h, "{name}: tile height");
+        assert_eq!(t.luma_min.len(), meta.ntiles, "{name}: numTiles");
+        assert_eq!(
+            t.luma_min.iter().map(|&v| v as i64).collect::<Vec<_>>(),
+            want_min,
+            "{name}: lumaMin"
+        );
+        assert_eq!(
+            t.luma_max.iter().map(|&v| v as i64).collect::<Vec<_>>(),
+            want_max,
+            "{name}: lumaMax"
+        );
+    }
+    // The weight codes themselves: exact against the deterministic f64 re-solve of the
+    // dumped `A`/`B` (up to a one-code `round` boundary), and measured against the MKL
+    // f32 draw the reference itself cannot reproduce.
+    if let Some(t) = &h.nonlinear {
+        for (p, key) in ["weights_u", "weights_v"].iter().enumerate() {
+            if let Some(got) = &t.weights[p] {
+                let want64 = dump[&format!("{key}_f64")].i64();
+                let wantmkl = dump[*key].i64();
+                assert_eq!(got.len(), want64.len(), "{name}: {key}_f64 length");
+                st.w64_total += want64.len();
+                for (i, &g) in got.iter().enumerate() {
+                    let (w64, wmkl) = (want64[i], wantmkl[i]);
+                    if g as i64 == w64 {
+                        st.w64_exact += 1;
+                    } else if (g as i64 - w64).abs() > 1 {
+                        st.w64_bad += 1;
+                        println!("{name}: {key}_f64[{i}] ours {g} f64 {w64} mkl {wmkl}");
+                    }
+                    if g as i64 != wmkl {
+                        st.wmkl_diff += 1;
+                    }
+                }
+            }
+        }
+    }
+    // The per-plane enable decisions: compared against both independent reference draws
+    // (the coded stream's header and the replay's) — they already disagree with each
+    // other on these systems.
+    let got_en = h
+        .nonlinear
+        .as_ref()
+        .map(|t| [t.weights[0].is_some(), t.weights[1].is_some()])
+        .unwrap_or([false, false]);
+    let stream_en = headers
+        .tools
+        .efe_nonlinear
+        .as_ref()
+        .and_then(|s| s.nonlinear.as_ref())
+        .map(|t| [t.weights[0].is_some(), t.weights[1].is_some()])
+        .unwrap_or([false, false]);
+    for p in 0..2 {
+        if got_en[p] != meta.enabled[p] && got_en[p] != stream_en[p] {
+            st.flag_outlier += 1;
+            println!(
+                "{name}: enabled[{p}] ours {} dump {} stream {}",
+                got_en[p], meta.enabled[p], stream_en[p]
+            );
+        }
+    }
+
+    // Masks: geometry is exact wherever the replay kept a mask; contents and the
+    // keep/drop decision follow the filtered planes and are measured.
+    if (meta.mask_en[0] || meta.mask_en[1])
+        && let Some((bs, my, mx)) = h.mask_geometry
+    {
+        assert_eq!(bs as usize, meta.bsize, "{name}: bS");
+        let p = usize::from(!meta.mask_en[0]);
+        let wm = &dump[&format!("mask.{p}")];
+        assert_eq!(
+            (my as usize, mx as usize),
+            (wm.shape[2], wm.shape[3]),
+            "{name}: mask geometry"
+        );
+    }
+    for p in 0..2 {
+        let want = dump[&format!("mask.{p}")].i64();
+        match (&h.masks[p], meta.mask_en[p]) {
+            (Some(got), true) => {
+                assert_eq!(got.len(), want.len(), "{name}: mask.{p} length");
+                st.mask_total += want.len();
+                for (&g, &w) in got.iter().zip(&want) {
+                    if g as i64 != w {
+                        st.mask_diff += 1;
+                    }
+                }
+            }
+            (None, false) => {}
+            _ => st.mask_flag_diff += 1,
+        }
+    }
+
+    // The output picture vs the replay's `out` (chroma only — the luma passes through).
+    for (p, c) in ["b", "c"].iter().enumerate() {
+        let want = plane(&dump[&format!("out.{c}")]);
+        let got = [&out.filtered.u, &out.filtered.v][p];
+        st.out_worst = st.out_worst.max(max_abs_diff(&want.data, &got.data));
+    }
+    st
+}
+
+/// `EFEnonlinear.compress` parity. Deterministic in the reference — and asserted exactly —
+/// are the tile grid, the per-tile luma bounds, the mask geometry, `numTiles`, the weight
+/// count, and the `minSymbol`/`maxSymbol` constants (`encode_header`'s fold pins them to
+/// 0/65535). The weight codes are asserted against the dump's *f64* re-solve (`dgelsy`,
+/// the same algorithm family our `lstsq` port implements): exact or off by one `round`
+/// boundary. Everything downstream of the solve — the MKL f32 draw, the enable flags, the
+/// mask contents, the output planes — is *not* run-to-run reproducible by the reference
+/// itself (the coded streams and the replay draw different flags on identical inputs), so
+/// it is measured and bounded, not asserted exactly.
+#[test]
+fn efe_nonlinear_decisions_match_reference() {
+    let mut all = NlStats::default();
+    for &name in EFE_NL_VECTORS {
+        let st = check_efe_nl(name);
+        println!(
+            "{name}: w64 {}/{} exact ({} bad), mkl diffs {}, masks {}/{} differ, \
+             flag outliers {}, mask-flag diffs {}, out max|d| {:e}",
+            st.w64_exact,
+            st.w64_total,
+            st.w64_bad,
+            st.wmkl_diff,
+            st.mask_diff,
+            st.mask_total,
+            st.flag_outlier,
+            st.mask_flag_diff,
+            st.out_worst,
+        );
+        all.w64_bad += st.w64_bad;
+        all.w64_total += st.w64_total;
+        all.w64_exact += st.w64_exact;
+        all.wmkl_diff += st.wmkl_diff;
+        all.mask_diff += st.mask_diff;
+        all.mask_total += st.mask_total;
+        all.flag_outlier += st.flag_outlier;
+        all.mask_flag_diff += st.mask_flag_diff;
+        all.out_worst = all.out_worst.max(st.out_worst);
+    }
+    println!(
+        "efe_nonlinear: f64 weights {}/{} exact +{} boundary, mkl diffs {}, \
+         masks {}/{}, flags {}, mask flags {}, out {:e}",
+        all.w64_exact,
+        all.w64_total,
+        all.w64_total - all.w64_exact - all.w64_bad,
+        all.wmkl_diff,
+        all.mask_diff,
+        all.mask_total,
+        all.flag_outlier,
+        all.mask_flag_diff,
+        all.out_worst,
+    );
+    assert_eq!(
+        all.w64_bad, 0,
+        "integerised weights differ from the deterministic f64 solve by more than a \
+         round boundary"
+    );
+    // Measured slack on the quantities downstream of the MKL draw — tripwires against a
+    // behaviour change in our port, not parity claims (the reference's own draws disagree
+    // with each other here). Measured 2026-09: 11 flag outliers of 34, 3 mask-flag diffs,
+    // 289/1234 mask blocks, out max|d| 19.2.
+    assert!(all.flag_outlier <= 16, "enable-flag outliers: {all:?}");
+    assert!(all.mask_flag_diff <= 5, "mask keep/drop diffs: {all:?}");
+    assert!(
+        all.mask_diff * 2 <= all.mask_total,
+        "mask block diffs {}/{}",
+        all.mask_diff,
+        all.mask_total
+    );
+    assert!(
+        all.out_worst <= 32.0,
+        "output planes differ by {}",
+        all.out_worst
+    );
+}
+
+/// End-to-end: an encode with `efe_linear + efe_nonlinear` on must produce a stream the
+/// stock reference decoder accepts — this exercises the whole `mod.rs` post-filter chain
+/// and the `TON` assembly, not just `decide`. Our own decode must land within 1 of the
+/// reference decoder's picture (the whole-picture gate of `decode_ref.rs`).
+#[test]
+#[ignore = "runs the reference decoder (Python); enable with --ignored"]
+fn reference_decoder_accepts_efe_nonlinear_stream() {
+    use zenjpegai::decoder::read_headers;
+    let params = EncodeParams {
+        model_id: 1,
+        op: OperatingPoint::Bop,
+        efe_linear: true,
+        efe_nonlinear: true,
+        ..Default::default()
+    };
+    let enc = Encoder::new(ref_root().join("models"));
+    let stream = enc.encode(source(IMG30), params).unwrap();
+    // The stream must carry the tool header.
+    let headers = read_headers(&zenjpegai::container::Codestream::parse(&stream).unwrap()).unwrap();
+    assert!(headers.tools.efe_linear.is_some(), "no EFE linear header");
+    assert!(
+        headers.tools.efe_nonlinear.is_some(),
+        "no EFE non-linear header"
+    );
+    let scratch = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/refdec");
+    std::fs::create_dir_all(&scratch).unwrap();
+    let bits = scratch.join("enc_img30_efenl.bits");
+    let png = scratch.join("enc_img30_efenl.png");
+    std::fs::write(&bits, &stream).unwrap();
+    ref_decode(&bits, &png, "enc_img30_efenl");
+    let theirs = read_png_rgb8(&std::fs::read(&png).unwrap()).unwrap();
+    let ours = zenjpegai::Decoder::new(ref_root().join("models"))
+        .decode(&stream)
+        .unwrap();
+    let worst = ours
+        .data
+        .iter()
+        .zip(&theirs.data)
+        .map(|(a, b)| (*a as i32 - *b as i32).abs())
+        .max()
+        .unwrap();
+    assert!(worst <= 1, "reference decode differs by {worst}");
+}

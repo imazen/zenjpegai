@@ -59,7 +59,7 @@ OPTIONS:
                        -1 tiles never)
     --efe-linear       encode: search and signal the EFE linear post-filter
     --efe-dctif-only   encode: signal EFE linear with no filters (DCTIF_only)
-    --efe-nonlinear    encode: also fit the up-sampled set EFE non-linear needs
+    --efe-nonlinear    encode: search and signal the EFE non-linear post-filter
     --ans-threads <n>  encode: ANS threads per substream (1, 2, 4, 8 or 16)
     --regions <mode>   encode: region partitioning, `dependent` or `independent` (large
                        pictures only; the grid follows the picture size)

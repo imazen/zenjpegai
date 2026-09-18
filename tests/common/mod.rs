@@ -110,6 +110,26 @@ impl RefTensor {
         assert_eq!(self.dtype, "i8");
         self.bytes.iter().map(|&b| b as i8).collect()
     }
+    /// Signed 64-bit integer tensor (the dump format's `i64`).
+    pub fn i64(&self) -> Vec<i64> {
+        assert_eq!(self.dtype, "i64");
+        self.bytes
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|b| i64::from_le_bytes(*b))
+            .collect()
+    }
+    /// f64 tensor (the dump format's `f64`).
+    pub fn f64(&self) -> Vec<f64> {
+        assert_eq!(self.dtype, "f64");
+        self.bytes
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|b| f64::from_le_bytes(*b))
+            .collect()
+    }
     /// Integer tensor of any width, widened to i32.
     pub fn i32(&self) -> Vec<i32> {
         match self.dtype.as_str() {

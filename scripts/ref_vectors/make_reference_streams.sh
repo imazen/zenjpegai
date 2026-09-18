@@ -145,6 +145,26 @@ filters_dump() { # name
   nice -n 19 python "$HERE/dump_filters.py" "$dir/stream.bits" "$dir/filters" > "$dir/dump_filters.log" 2>&1
 }
 
+# EFE non-linear encode-side oracle (`<vector>/efe_nonlinear/`): replay `EFEnonlinear.compress`
+# on the filters/ dumps and record its decisions, for tests/encode_ref.rs. No-op for vectors
+# whose stream never enabled the tool.
+nl_dump() { # name source_image model_id
+  local dir="$OUT/$1"
+  if [ -f "$dir/efe_nonlinear/manifest.txt" ]; then return; fi
+  grep -q "EFEnonlinear.in.a" "$dir/filters/manifest.txt" 2>/dev/null || return 0
+  echo "== $1: replaying EFEnonlinear.compress"
+  nice -n 19 python "$HERE/dump_efe_nonlinear.py" "$dir/efe_nonlinear" "$dir/filters" "$2" "$3" \
+      > "$dir/dump_efe_nonlinear.log" 2>&1
+}
+
+# `nl_dump` for streams the bitrate matcher coded: the model id comes back out of the PIH.
+nl_dump_probe() { # name source_image
+  local dir="$OUT/$1" mid
+  mid=$(PYTHONPATH=. python scripts/bitstream_probe.py "$dir/stream.bits" 2>/dev/null \
+      | awk -F'|' '$2 ~ /^ *model_id *$/ {gsub(/ /,"",$3); print $3; exit}')
+  nl_dump "$1" "$2" "$mid"
+}
+
 # EFE filter streams with the encoder's EFE decisions forced (force_efe_encode.py): the stock
 # encoder nearly always picks a 1x1 filter, one region, non-linear filter off.
 efe() { # name input model_id beta_disp_log "force args" cfg... [-- encoder overrides...]
@@ -163,11 +183,15 @@ efe() { # name input model_id beta_disp_log "force args" cfg... [-- encoder over
     ls -la "$dir/stream.bits" | awk '{print "   stream bytes:", $5}'
   fi
   filters_dump "$name"
+  nl_dump "$name" "$input" "$tool"
 }
 
 if [ "$SET" = efe ] || [ "$SET" = all ]; then
-  for v in img30_base_efelin_bpp050 img30_base_on_bpp025 img30_base_on_bpp100; do
+  for v in img30_base_efelin_bpp050 img30_base_efenl_bpp050 img30_base_on_bpp025 img30_base_on_bpp100; do
     [ -f "$OUT/$v/manifest.txt" ] && filters_dump "$v"
+  done
+  for v in img30_base_efenl_bpp050 img30_base_on_bpp025 img30_base_on_bpp100; do
+    [ -f "$OUT/$v/filters/manifest.txt" ] && nl_dump_probe "$v" "data/test/$IMG30"
   done
   EFE="cfg/tools_off.json cfg/tools/EFElinear.json cfg/tools/EFEnonlinear.json cfg/profiles/base.json"
   IN="$OUT/_inputs"; mkdir -p "$IN"

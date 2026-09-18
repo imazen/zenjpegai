@@ -7,6 +7,21 @@
 - `EncodeParams` no longer derives `Eq` (the new `eicci` config carries `f32` loss weights).
 
 ### Added
+- Encoder: the EFE non-linear post-filter (`E2`) — `EncodeParams::efe_nonlinear` / CLI
+  `--efe-nonlinear` run the reference's `EFEnonlinear.compress` on the post-eICCI
+  reconstruction (`src/encoder/filters/efe_nonlinear.rs`): the 1200-px tile grid snapped to
+  64, per-tile `lumaMin`/`lumaMax`, the eight ReLU-hinge weight solve per tile per chroma
+  plane (`integerize`, raw u16 codes — the header's `minSymbol`/`maxSymbol` fold pins
+  0/65535), per-plane enable by `lossModifier`-scaled loss, and the W5 on/off-mask search
+  (`block_sizes`/`base_model_beta` by `model_id`, `candNum`, strictly-positive keep rule)
+  against EFE linear's up-sampled picture. The solve reuses E1's deterministic f64
+  pivoted-QR `gelsy`: **272/272 tile weight codes exact** against the oracle's f64
+  re-solve (`dgelsy`); MKL's f32 draw is nondeterministic on these rank-borderline hinge
+  matrices (the coded stream and a `compress` replay disagree on enable flags on identical
+  inputs), so enable/mask/output parity is measured, not asserted exactly (11/34 enable
+  outliers vs both reference draws, 3 mask keep/drop diffs, 289/1234 mask blocks, max
+  output diff 19.2/255). The stock reference decoder accepts our
+  `efe_linear + efe_nonlinear` stream (decoded output within 1).
 - Encoder: the eICCI model-selection search (`E3`) — `EncodeParams::eicci` / CLI
   `--eicci [--eicci-loss mse|ms-ssim|mixed] [--eicci-long-list] [--eicci-tile-samples N]`
   run the reference's `icci_filter.py::compress` + `model_idxes.py::encode_header` once on

@@ -25,7 +25,7 @@ use crate::nn::fast::for_each_row;
 use crate::tensor::Tensor;
 
 /// `hist_split_num`: luma bins per tile, which is also the number of weights per tile.
-const BINS: usize = 8;
+pub(crate) const BINS: usize = 8;
 
 /// The reference's test for "the on/off switch is in use": `mask1.shape[2] > 0 or
 /// mask1.shape[3] > 0`. Only the first (U) mask is looked at; a stream with the V mask alone
@@ -48,7 +48,7 @@ struct Tile {
 
 /// `round(float(a) / n * n)` as the reference computes its tile borders (Python doubles, round
 /// half to even).
-fn tile_edge(a: usize, n: usize) -> usize {
+pub(crate) fn tile_edge(a: usize, n: usize) -> usize {
     ((a as f64 / n as f64) * n as f64).round_ties_even() as usize
 }
 
@@ -93,16 +93,18 @@ fn tiles(
     Ok(out)
 }
 
-/// `LumaAidedAdaptiveNonlinearFilter_apply` for one chroma plane, in place.
-fn filter_plane(
-    ctx: &FilterContext<'_>,
+/// `LumaAidedAdaptiveNonlinearFilter_apply` for one chroma plane, in place. `subsampling` is
+/// the source's `(s_ver, s_hor)` — the luma is sampled at the chroma positions.
+pub(crate) fn filter_plane(
+    eng: &crate::nn::fast::Engine,
+    subsampling: (usize, usize),
     t: &EfeNonlinearTiles,
     min_symbol: u16,
     codes: &[u32],
     luma: &Tensor<f32>,
     plane: &mut Tensor<f32>,
 ) -> Result<()> {
-    let (sv, sh) = (ctx.hdr.s_ver as usize, ctx.hdr.s_hor as usize);
+    let (sv, sh) = subsampling;
     // `downsample`: luma at the chroma positions, `Y[::s_ver, ::s_hor]`.
     let (hh, ww) = (luma.h.div_ceil(sv), luma.w.div_ceil(sh));
     if (plane.h, plane.w) != (hh, ww) {
@@ -115,7 +117,7 @@ fn filter_plane(
     }
     let tiles = tiles(t, min_symbol, codes, (hh, ww))?;
     let (lw, y) = (luma.w, &luma.data);
-    for_each_row(ctx.eng, &mut plane.data, ww, |row_idx, row| {
+    for_each_row(eng, &mut plane.data, ww, |row_idx, row| {
         let yrow = &y[row_idx * sv * lw..][..lw];
         for tile in tiles
             .iter()
@@ -137,8 +139,8 @@ fn filter_plane(
 
 /// `apply_OnoffSwitch` for one plane: per `bs x bs` block, mask value 0 keeps the filtered
 /// sample, 2 takes the alternative picture's, 1 averages the two.
-fn switch_plane(
-    ctx: &FilterContext<'_>,
+pub(crate) fn switch_plane(
+    eng: &crate::nn::fast::Engine,
     (bs, my, mx): (usize, usize, usize),
     mask: &[u8],
     alt: &Tensor<f32>,
@@ -161,7 +163,7 @@ fn switch_plane(
         return Ok(());
     }
     let a = &alt.data;
-    for_each_row(ctx.eng, &mut plane.data, w, |y, row| {
+    for_each_row(eng, &mut plane.data, w, |y, row| {
         let arow = &a[y * w..][..w];
         let mrow = &mask[(y / bs) * mx..][..mx];
         for (bx, &m) in mrow.iter().enumerate() {
@@ -193,12 +195,29 @@ pub fn apply(
         mut image,
         upsampled,
     } = state;
+    let subsampling = (ctx.hdr.s_ver as usize, ctx.hdr.s_hor as usize);
     if let Some(t) = &h.nonlinear {
         if let Some(codes) = &t.weights[0] {
-            filter_plane(ctx, t, h.min_symbol, codes, &image.y, &mut image.u)?;
+            filter_plane(
+                ctx.eng,
+                subsampling,
+                t,
+                h.min_symbol,
+                codes,
+                &image.y,
+                &mut image.u,
+            )?;
         }
         if let Some(codes) = &t.weights[1] {
-            filter_plane(ctx, t, h.min_symbol, codes, &image.y, &mut image.v)?;
+            filter_plane(
+                ctx.eng,
+                subsampling,
+                t,
+                h.min_symbol,
+                codes,
+                &image.y,
+                &mut image.v,
+            )?;
         }
     }
     if has_first_mask(h) {
@@ -208,10 +227,10 @@ pub fn apply(
         let (bs, my, mx) = h.mask_geometry.unwrap_or_default();
         let geom = (bs as usize, my as usize, mx as usize);
         if let Some(mask) = &h.masks[0] {
-            switch_plane(ctx, geom, mask, &alt.u, &mut image.u)?;
+            switch_plane(ctx.eng, geom, mask, &alt.u, &mut image.u)?;
         }
         if let Some(mask) = &h.masks[1] {
-            switch_plane(ctx, geom, mask, &alt.v, &mut image.v)?;
+            switch_plane(ctx.eng, geom, mask, &alt.v, &mut image.v)?;
         }
     }
     Ok(FilterState { image, upsampled })

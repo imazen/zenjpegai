@@ -5,5 +5,6 @@
 //! the codestream. The decoder-side filter bodies live in `crate::filters`.
 
 pub mod efe_linear;
+pub mod efe_nonlinear;
 pub mod icci;
 pub mod lef;

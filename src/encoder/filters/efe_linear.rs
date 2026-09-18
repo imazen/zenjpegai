@@ -451,7 +451,7 @@ fn ormrz_lt(a: &Mat, k: usize, l: usize, tau: &[f64], c: &mut Mat) {
 /// default), triangular solve, `?tzrzf`/`?ormrz` min-norm completion when short.
 ///
 /// `a` is row-major `m x n`, `b` length `m`; returns the `n` coefficients.
-fn lstsq(a: &[f64], b: &[f64], m: usize, n: usize) -> Result<Vec<f64>> {
+pub(crate) fn lstsq(a: &[f64], b: &[f64], m: usize, n: usize) -> Result<Vec<f64>> {
     if a.len() != m * n || b.len() != m {
         return Err(Error::InvalidArgument("EFE linear: lstsq input shape"));
     }
@@ -983,7 +983,7 @@ fn search_core(
 /// `10*log10(255^2 / mse)` of `SplitDecide`. `org` and `filtered` are source-resolution
 /// planes; the phase-space un/shuffle of the reference is a bijection and leaves the SSE
 /// unchanged.
-fn psnr(org: &Tensor<f32>, filtered: &Tensor<f32>) -> f64 {
+pub(crate) fn psnr(org: &Tensor<f32>, filtered: &Tensor<f32>) -> f64 {
     let mse = org
         .data
         .iter()
