@@ -397,280 +397,76 @@ used by the parity tests live under `/mnt/v/output/zenjpegai/reference/`; they a
 
 ## Work queue
 
-Ordered by value. Each item names the upstream source and the gate that closes it. Agents append
-their own open items below when they stop.
+Each item is sized for one agent, names its upstream source, the files it owns, the oracle and
+the gate that closes it. "Byte-identical" means our stream equals the reference encoder's for the
+same decisions; where the reference's float search can legitimately land elsewhere, the gate is
+"same length, decodes with the reference decoder, size/PSNR within the stated tolerance". Add new
+reference streams through `scripts/ref_vectors/make_reference_streams.sh` (new set), dump
+intermediate tensors through additive flags of `dump_encode.py` / `dump_decode.py`, and record
+measured numbers in the status table above when you close an item.
 
-1. **Encoder, the rest of it.** The encoder is ported through analysis tiling and rate matching
-   (rows `encoder`, `encoder::tiles`, `encoder::rate` above); it reproduces the reference's
-   stream byte for byte on seven of eight fixed-model vectors. What is left, in order:
-   1. **The post-filters on the encode side** (EFE linear / non-linear, eICCI, LEF) - the only
-      decoder-supported tools the encoder still cannot switch on. Each needs its RDO search as
-      well as its syntax; `scripts/ref_vectors/force_efe_encode.py` shows how to pin the
-      reference's decisions to get oracles for individual branches.
-   2. **Chroma-subsampled / 10-bit / YUV sources**: `ccs_sgmm_tool.py::compress` builds the
-      12-plane chroma input differently for 4:2:0 and 4:2:2 (`encoder::colour` ports the 4:4:4
-      branch only), and `s_ver/s_hor/c_ver/c_hor` in the header follow.
-   3. **The rate matcher's likelihood estimator** (`ECLibLH` + `GMProbModel.forward`), if
-      reproducing the reference's *choices* rather than beating them ever matters: our search
-      codes each trial, which is why it lands closer to the target (table above) but on different
-      displacements.
-   4. **Encoder memory**: nothing is measured. `Limits` / `estimate_memory` cover decoding only;
-      a rate-matched encode holds one model's latents plus a trial stream (554 MB max RSS at
-      560x888, `/usr/bin/time -v`, not heaptrack).
-2. **Browser**: wasm SIMD + threads builds, polyfill, Playwright, Pages workflow (`wasm/`, `web/`;
-   status in `web/README.md`). GPU (`gpu/`, wgpu) synthesis backend and its wiring into the web
-   build (status in `gpu/README.md`).
-3. **Zen codec standards**: zencodec traits, limits + measured memory, `unstable-internals`
-   visibility, no_std check, build-time report, CI on all required platforms (status: see the
-   entries the standards agent appended below and `.github/workflows/`).
-4. **Decoder leftovers**: eICCI on chroma-subsampled pictures. (Closed 2026-09-18: cube-flag
-   streams added to `tests/entropy_ref.rs` / `tests/decode_ref.rs`; `scaler_from_log` verified
-   against `torch.exp` on every reachable input; `colour_transform_idx = 2` investigated and
-   decided "do not port" — see "Reference dead code".)
-5. **Speed**: Winograd / int8-VNNI kernels, padding-free transposed convolution, SIMD `exp` for
-   HOP's ELU gate; re-run `scripts/bench/decode_end_to_end.sh` after each and commit the TSV.
+### Encoder (decoder-supported features the encoder cannot produce yet)
 
-Appended by the browser (`wasm`) agent, 2026-09-17, stopped early on a budget change:
+- **E1 EFE linear, encode side.** Upstream `filters/EFElinear/EFElinear.py`: `compress`,
+  `SplitDecide`/`searchCore` (candidate splits x filter lengths, cost = SSE with `lossModifier`),
+  `LumaAidedUpsampler_encoder` (least-squares solve, `integerize` to 16-bit codes, `minSymbol` /
+  `maxSymbol`), the second "up-sampled" set for EFE non-linear. Files: `src/encoder/filters/efe_linear.rs`
+  (new), `src/filters/efe_linear.rs` read-only. Oracle: `scripts/ref_vectors/dump_filters.py`
+  + `force_efe_encode.py` (pins decisions; use it to test the solver and the search separately).
+  Gate: with the reference's decisions pinned, coded weights identical; with our own search,
+  header bytes identical on the EFE vectors (`img30_base_efelin_bpp050`, the `efe` set) or
+  documented deviation with size/PSNR within 0.1 % / 0.01 dB; reference decoder reads the stream.
+- **E2 EFE non-linear, encode side.** `filters/EFEnonlinear/EFEnonlinear.py::compress`: the
+  tile grid, per-tile luma bins (`lumaMin`/`lumaMax`), weight search, on/off masks (`W5`),
+  `candNum`. Files: `src/encoder/filters/efe_nonlinear.rs` (new). Oracle/gate as E1 with the
+  `efe` vectors that enable the non-linear filter.
+- **E3 eICCI, encode side.** `filters/eICCI/icci_filter.py::compress` + `model_idxes.py::encode_header`:
+  per-tile model choice by loss (`mse` / `ms-ssim` / `mixed` with `luma_loss_weights`,
+  `chroma_loss_weights`; needs an MS-SSIM implementation matching `pytorch_msssim` closely
+  enough to pick the same model — verify on the vectors, record mismatch rate), short-list vs
+  long-list decision, tiling with `tile_min_size_for_MSSSIM = 176`. Files:
+  `src/encoder/filters/icci.rs`, a `src/encoder/msssim.rs`. Gate: same model indices as the
+  reference on `img30_base_eicci_bpp050`, `img30_base_on_bpp*`, `img01_base_eiccitiles_lef_bpp050`;
+  streams reference-decodable.
+- **E4 LEF, encode side.** `filters/LEF/LEFfilter.py::analyze` (reference channel choice from the
+  luma scale map). Small. Gate: same `LEF_chIdx` on the LEF vectors.
+- **E5 Post-filters in the rate loop.** Once E1–E4 exist, `coding_engine.py::compress` runs the
+  filters inside the bitrate matcher's trial; wire `EncodeParams` flags `--efe-linear
+  --efe-nonlinear --eicci --lef` and the `tools_on` preset; gate: `tools_on` streams at the five
+  CTC rates within 0.5 % size / 0.02 dB of the reference's.
+- **E6 Chroma-subsampled, 10-bit and YUV sources.** `ccs_sgmm_tool.py::compress` builds the
+  12-plane chroma input differently for 4:2:0 / 4:2:2; `s_ver/s_hor/c_ver/c_hor`, `c_*_value`
+  overrides, 10-bit range handling; CLI reads `.yuv` inputs named like the reference's
+  (`WxH_Nbit_420`). Files: `src/encoder/colour.rs`, `src/bin/zenjpegai.rs` (additive). Oracle:
+  the `formats` vectors (they were encoded from the YUV inputs in `/mnt/v/output/zenjpegai/reference/inputs`).
+  Gate: byte-identical streams for the nine `formats` vectors.
+- **E7 Likelihood-based rate estimation.** `bitrate_matcher` uses `ECLibLH` +
+  `GMProbModel.forward` to estimate bits without coding; ours codes each trial. Port it as an
+  optional `RateEstimate::Likelihood` so our search picks the reference's displacements exactly;
+  gate: same `(model, beta)` as the reference at the five CTC rates on both test pictures, and
+  the estimator's bit count within 0.5 % of the coded size.
+- **E8 Encoder limits and memory.** `Limits` for encoding, `estimate_encode_memory`, heaptrack
+  measurements at 560x888 and 2096x1400 (fixed model and rate-matched) in `benchmarks/memory_encode_<date>.tsv`;
+  drop trial streams/latents early. Gate: estimate within 1x–2x of measured; pixels unchanged.
+- **E9 zencodec encoder trait.** Mirror `src/codec.rs` for encoding (config carries the model
+  source and `EncodeParams`); test bit-identity with `Encoder::encode`.
 
-- Landed: wasm32 numeric policy + `Wasm128` tier, packed model bundles + `pack-models`, the
-  `wasm/` crate and `web/scripts/build-wasm.sh` (sizes and timings in `web/README.md`).
-- Open, nothing started: worker pool + `<img>` polyfill (`web/src/`), Playwright suite, demo page
-  with imazen-26 images, `demo-assets-v1` release, `.github/workflows/pages.yml`, GPU wiring into
-  the web build. The threads package builds but has never run. Exact next commands:
-  `web/README.md` "Next steps".
-- Post-filter weight loaders must call `model::with_checkpoint` or `pack-models` cannot see
-  their tensors (bundles hold no post-filter checkpoints today).
+### Browser and GPU
 
-Appended by the GPU (`gpu`) agent, 2026-09-17; second pass, on hardware:
+- **B1** WebGPU synthesis in the worker/polyfill/demo behind feature detection (in progress on a
+  SWE-2 agent; `gpu/README.md` has the API). **B2** demo throttling + viewport-priority queue and
+  the AIC image swap (in progress). **B3** GPU kernels: convolutions reach 4–7 % of f32 peak —
+  profile with `ncu` before writing more kernels; 8-bit readback; `f16`; cancellation and
+  `max_channels` on the GPU path (details in `gpu/README.md` "Status").
 
-- Landed: the whole backend now runs on a real GPU (RTX 2080, NVIDIA 580.178.04). `just gpu-test`
-  passes there with the parity numbers in the `gpu/` row above; the llvmpipe numbers it replaces
-  were equal or looser. Full size sweep 64 to 4096 plus the reference streams:
-  `benchmarks/gpu_decode_2026-09-17_rtx2080.{tsv,meta}` (before the tuning:
-  `..._rtx2080_pretuning.tsv`; the integrated Radeon: `..._radv_igpu.{tsv,meta}`).
-  Per-dispatch device time before and after tuning: `gpu_profile_2026-09-17_rtx2080.{tsv,meta}`.
-  The reference software decoding the same streams on CPU and GPU:
-  `gpu_reference_2026-09-17.{tsv,meta}` + `scripts/bench/reference_gpu.sh`.
-- Crossover against this crate's own CPU engine (8 threads of a 9950X3D): SOP about 384x384,
-  BOP about 256x256, HOP about 128x128. At 1024x1024 the GPU is 2.2x / 1.4x / 1.2x that CPU and
-  7x / 5.7x / 4x a single thread.
-- Against the reference software on the same card (whole stream, 560x888): reference CPU
-  (1 thread, which is what it forces) 0.133 / 0.221 / 2.358 s for SOP / BOP / HOP, reference GPU
-  0.087 / 0.093 / 0.160 s, this crate's CPU engine at 8 threads 0.016 / 0.024 / 0.401 s, this
-  crate's GPU 0.016 / 0.022 / 0.257 s. The reference's GPU path has an ~85 ms per-picture Python
-  floor, so only HOP compares kernels: there cuDNN is 1.6x faster than these WGSL kernels.
-- Open, in order (detail in `gpu/README.md` "Status"): find out why the convolutions only reach
-  4-7% of the card's f32 peak (`ncu` works now) before writing another kernel; 8-bit instead of
-  f32 readback for large pictures; wire into `wasm/` / `web/` and run it in a browser; `f16`;
-  cancellation and `max_channels`. Falsified and recorded there: pixel register tiling in the
-  convolution (helps SOP, loses on BOP and HOP).
+### Decoder
 
-Appended by the encoder agent, 2026-09-17, stopped early on a budget change. **There is no
- encoder yet**: deliverable 1 of 7 landed (networks + Gate 1), nothing of 2..7.
- 
- - Landed: `model::analysis` (BOP + HOP), `model::hyper_encoder`, loaders
-   (`model::{analysis_path, load_analysis_primary, load_analysis_secondary, load_hyper_encoder}`),
-   `tests/encode_ref.rs`, `dump_encode.py --enc2` (dumps `y`, `psi`, `cube_flag`, every analysis /
-   hyper-encoder call's input and output, the context model's four stage means), the `encoder` set
-   of `make_reference_streams.sh` (vectors `enc_img30_bop_m1_b0`, `enc_img30_hop_m2_b0`, dumps in
-   `<vector>/enc2/`). A fixed-model reference encode of the 560x888 picture takes 2.0 s of process
-   wall time on this box (16 torch threads): that is the speed to beat.
- - Verified against the reference while reading (560x888, model 1, beta 0):
-   - Colour pre-processing is bit-exact with plain f32 arithmetic: `r,g,b = v/255`;
-     `y = 0.2126 r + 0.7152 g + 0.0722 b` (left to right); `u = (b - y)/1.8556 + 0.5`;
-     `v = (r - y)/1.5748 + 0.5`; each `* 255`. Luma input = `[1,h,w]`; chroma input (4:4:4 coding) =
-     12 planes at half size: `pixel_unshuffle(Y,2)` (order (0,0),(0,1),(1,0),(1,1)), then U's
-     four phases, then V's. Odd sizes: replicate-pad by one first (`ccs_sgmm_tool.py::compress`).
-   - Stock `tools_off` streams carry `use_cube_flags = 0` here (all 48 flags true), level_idc 52,
-     `synthesis_transforms` `[Bop, Sop]` (base) / `[Hop, Bop, Sop]` (high), TON and RDI present
-     (RDI one zero byte). The residual substreams appear to precede SOZ in the file
-     (`reverse_encode_order`); confirm with `Codestream::parse` before relying on it.
- - Next steps, in order (each is small; sources named):
-   1. Factor the scale derivation out of `decoder::entropy::decode_component` (HSD + gain add +
-      quality map + `likely` + RVS + `skip_mask`) into one function and call it from both sides
-      (= `encoder_get_scales`); the decoder tests must stay bit-identical.
-   2. `ContextModel::compress` in `model/mcm.rs` (`context.py::forward/pred`): per stage
-      `diff = y_s - mean`; `q = diff * scaler[ch]` (f32, `tools::gain`; RVS / quality map multiply
-      in later); zero where the stage's mask is false; clamp to i16; `round_ties_even`;
-      `dq = q / (scaler + 1e-9)`; cube flag of the stage = `max |dq - diff|` over all channels and
-      an 8x8 block `<= skip_cube_thr (1)`, after zeroing the padded last row (stages 1, 3) /
-      column (stages 1, 2) of odd latents; where the flag is false OR the full mask in and
-      quantise again; `y_hat_s = dq + mean` feeds the next stages. Stage → flag channel:
-      0→0, 1→3, 2→1, 3→2 (already what `tools::skip::skip_mask` expects). Chroma has no context
-      model: mean = `upshuffle_psi`, cube flags from `skip_mode.py::gen_skip_cubeflag` on the
-      down-shuffled 4C tensor. Afterwards `residual_q[!mask] = 0`
-      (`encoder_skip_and_cubeflag_for_tiles`). Gate 2 oracle: `y.y`, `y.psi`, `mcm_y.0.mean*`,
-      `y.residual_quant`, `y.cube_flag` in the `enc2` dumps. Low rates (beta -300) are needed to
-      see a false cube flag; generate those vectors first.
-   3. Stream assembly: `PictureHeader::write` / `ToolHeader` / `RenderingInfo` exist; ANS:
-      one `AnsEncoder` per substream, `encode_residual` once over all `num_chs` channels of a
-      region in `[ch][y][x]` order (the decoder's channel chunks exist only so that chunk sizes
-      are multiples of `4 * threads`), SOZ = chroma `encode_z` first, then luma (the encoder runs
-      backwards). Sigma index per sample = `distribution_index(scale_log)` (private in
-      `decoder/entropy.rs`). Gate 3: decode with `zenjpegai::Decoder` and
-      `python -m src.reco.coders.decoder`.
-   4. Then CLI `encode`, analysis tiling (`tile_manager_enc`: 1024 / overlap 64 luma, 512 / 32
-      chroma; `z_hat` is also computed per tile and merged by core areas: see the tile log in
-      `img01_base_off_bpp050/encoder.log`), `bitrate_matcher/`, tools, benchmarks.
-   - `z`: clamp to `[-31, 31]`, round half to even, symbol = `z + 31` (checked exact).
+- **D1** eICCI on 4:2:0 / 4:2:2 (in progress on a SWE-2 agent; needs forced-flag vectors).
+- **D2** Speed: Winograd F(2x2,3x3) or int8-VNNI for the 3x3 convolutions, padding-free
+  transposed convolution, SIMD `exp` for HOP's ELU gate; re-run `scripts/bench/decode_end_to_end.sh`
+  and commit the TSV after each.
 
+### History of agent notes
 
-### Zen codec standards (state 2026-09-18, agent `standards2`; missing first)
-
-User instruction: "apply all zen codec standards including whereat, enough, zencodec traits, bounded and
-minimized mem use, and fast build times." Seven deliverables were scoped; all seven landed.
-
-**Landed (on origin/main)**
-
-- **Build times**: DONE 2026-09-18, `benchmarks/build_time_2026-09-18.md`. Fully-clean release
-  build (no cache at all): default features 5.18 s / 430 MB peak RSS, `cli,zencodec` 10.84 s /
-  469 MB, `zenjpegai-gpu` (wgpu's own dependency tree, not this crate's code) the outlier at
-  15.48 s / 909 MB. With deps cached, rebuilding just this crate from scratch is ~3.4 s
-  regardless of feature set; incremental (`touch src/lib.rs`) is 0.36 s. `cargo llvm-lines
-  --release`: 271,274 total IR lines, 5,196 symbols, no function with more than 2 monomorphized
-  copies crate-wide. The `nn/fast/conv.rs` / `int_conv.rs` tier x block x stride family (the
-  open audit item) is present — roughly a dozen `conv_row_s::<Tier, V, B, STRIDE>` /
-  `int_row::<Tier, V, B, SHIFT>` instantiations, ~271-389 lines each, ~2-3% of the binary's IR —
-  but that is normal archmage/magetypes one-instantiation-per-tier fan-out, not bloat; the
-  largest functions by line count are ordinary parsing/business logic
-  (`weights::pickle::load` 4,985 lines, `Encoder::encode_from_latents` 2,822,
-  `PictureHeader::parse` 2,186), not generics. Verdict: no cheap win found, none taken — the
-  numbers do not motivate a build-time optimization pass.
-
-- **CI** (`.github/workflows/ci.yml`, all 10 jobs green on the first real run —
-  `https://github.com/imazen/zenjpegai/actions/runs/35290942272`): `fmt` (ubuntu, once); `test` matrix
-  (clippy `--all-targets --features cli,zencodec -D warnings` + `cargo test --lib --tests` on ubuntu-latest,
-  windows-11-arm, macos-15-intel, macos-latest); `i686` via `cross` (clippy + test, same feature set, under
-  QEMU); `no-std` (native + `wasm32-unknown-unknown` check + clippy for `--no-default-features`, plus a
-  "public API only" `cargo clippy --lib -- -D warnings` on default features — this is where
-  `#![warn(missing_docs)]` gets enforced); `gpu` (`cargo check -p zenjpegai-gpu`); `wasm` (`cargo check -p
-  zenjpegai-wasm --target wasm32-unknown-unknown` on the pinned `nightly-2026-09-02`); `msrv` pinned to
-  `1.89.0`. `reference-tests` is never enabled in CI (no oracle data there). MSRV verified by bisecting
-  installed rustc 1.85/1.89/1.90/1.91/1.92/1.93: `cargo check` (default features) first succeeds at 1.89,
-  matching `Cargo.toml`'s declared `rust-version`; `--all-features` needs 1.93 because `cli` pulls in zenpng
-  0.1.4 (its own, separate MSRV floor — documented in the workflow, not a misconfiguration of this crate's
-  own `rust-version`). Two real cross-arch clippy bugs were caught and fixed by testing every required target
-  locally before pushing: an `f32x16` import gated `cfg(feature = "avx512")` instead of
-  `cfg(all(target_arch = "x86_64", feature = "avx512"))` (unused-import on aarch64/i686 with default
-  features), and `archmage::prelude::*` fully unused on i686 (no SIMD tier exists there) collapsing
-  `Tier::available()` to a single unconditional push (`clippy::vec_init_then_push`). Badges added to
-  `README.md`.
-- **no_std + alloc**: `cargo check --no-default-features` (native and `--target wasm32-unknown-unknown`) and
-  `cargo clippy --no-default-features -- -D warnings` all pass clean — the float call sites already route
-  through `libm` (nothing left to convert); the only defect was one `unused_variables` warning in
-  `nn/fast/tensor.rs::BTensor::scratch` (the overflow-checked size was computed but only consumed by the
-  `std`-gated pool path), fixed with a `cfg_attr` on the binding. Wired into `justfile` (`just no-std`, and
-  `just check`) and `.github/workflows/ci.yml` (`no-std` job).
-- **zencodec traits** (feature `zencodec`, new `src/codec.rs`, ~650 lines): `JpegAiDecoderConfig` /
-  `JpegAiDecodeJob` / `JpegAiDecoder` implement `zencodec::decode::{DecoderConfig, DecodeJob, Decode}` over the
-  existing `Decoder`. Registers as `ImageFormat::Custom` (magic = `FF 80 FF 82`, SOC immediately followed by
-  PIH — verified against a real stream's first bytes; no built-in `ImageFormat` variant exists for this
-  format, same pattern as `zensvg`). `impl zencodec::CategorizedError for crate::error::Error` maps every
-  variant to a category (best-effort string match for `Error::LimitExceeded`'s untyped reason, since it isn't
-  a typed kind internally — a real, documented imprecision, not a bug); the `At<CodecError>` bridge follows
-  `zenjp2`'s Pattern B (`From<Error> for At<CodecError>` for bare errors via `.start_at()`, `CodecError::of`
-  for already-located `At<Error>` values — the orphan rule forbids `From<At<Error>>` directly, same reasoning
-  `zenjp2`'s error.rs documents). Targets zencodec 0.1.26 / zenpixels 0.2.16 (current lib.rs latest, matches
-  what the rest of the workspace already pins). RGB output only (`decode_with`, not `decode_picture_with`): a
-  YUV-coded stream surfaces as `Error::Unsupported`, same as the plain API; 1..=8-bit depths narrow to
-  `RGB8_SRGB` (lossless, values already `<= 255`), 9..=16-bit stay `RGB16_SRGB` with the sample left in the
-  low bits (not rescaled to fill 16 bits — PNG/TIFF's convention for sub-16-bit-in-u16, lossless). CICP
-  forwarded from `RDI` with `matrix_coefficients` forced to 0 (output here is already RGB). Three design
-  mismatches recorded in the module doc: (1) `DecoderConfig::formats()` is a pure function of the type but
-  decode needs an external model source, so a default-constructed config (`NoModelSource`) can `probe` but
-  not `decode` — exercised by a unit test; (2) `estimate_decode_resources` cannot call the crate's calibrated
-  `estimate_memory` (`ImageCharacteristics` carries no operating point or tiling), so it reproduces that
-  formula's untiled/worst-case shape directly, uncalibrated for this entry point specifically; (3)
-  `DecodeJob::with_limits` overrides are enforced as an independent header/input check layered on the shared
-  `Arc<Decoder>` (whose own `Limits` are fixed at construction so the model cache can be shared across jobs),
-  not threaded into the shared decoder's internal buffer-pool sizing. `tests/codec_ref.rs` (reference-gated):
-  the zencodec-driven decode produces bit-for-bit identical RGB pixels to `Decoder::decode` on
-  `img01_base_off_bpp050`, plus an order-of-magnitude check on the resource estimate against the calibrated
-  one. 5 unit tests in `src/codec.rs` need no reference data (format detection, error category mapping,
-  limit-kind string matching, the default-config gap).
-- **Public API hygiene**: `nn`, `model`, `tools`, `mans`, `bitio`, `container`, `tensor`, `weights` and
-  `filters` are `pub(crate)` by default; the `unstable-internals` feature makes them `pub` (paths unchanged —
-  `#[cfg(feature = "unstable-internals")] pub mod x; #[cfg(not(..))] pub(crate) mod x;` in `src/lib.rs` only).
-  `cli` and `zencodec` both imply it (the CLI reaches `nn::fast::{Engine, Tier, set_pool_limit}`, `model::*`,
-  `weights::packed::*`; `JpegAiDecoderConfig`'s own public API takes `model::ModelSource` + `nn::fast::Engine`
-  directly). `Decoder::with_engine` / `Decoder::engine` are always-public (`std`-gated only) and take/return
-  `nn::fast::Engine`, so `Engine` alone is re-exported at the crate root unconditionally (`pub use
-  nn::fast::Engine;`) — otherwise those two methods would take a type external callers could not name.
-  `required-features = ["unstable-internals"]` on every `[[test]]` / `[[example]]` / the bench that imports
-  internals (all of `tests/*.rs` except `api_ref.rs` and the zencodec-gated `codec_ref.rs`); `justfile`'s
-  `test` / `test-ref` / `test-wasi` recipes and `CONTRIBUTING.md`'s documented commands updated to match.
-  `gpu/Cargo.toml` and `wasm/Cargo.toml` both needed `"unstable-internals"` added to their `zenjpegai`
-  dependency features (both crates use internal modules directly in their own source — this broke without
-  it, confirmed by `cargo check -p zenjpegai-gpu` before the fix). `#![cfg_attr(not(feature =
-  "unstable-internals"), warn(missing_docs))]`: doc-completeness is enforced on the committed public API only
-  (`Decoder` + `header` + the error/limit types + `codec` once `zencodec` is on — that one is fully
-  documented already, verified by force-enabling `-D missing_docs` under `--features zencodec` and grepping
-  for `codec.rs`: zero hits). 63 missing-doc items across `decoder/api.rs`, `decoder/output.rs` and
-  `header.rs` (the always-public surface) were filled in. Internal modules made `pub` by
-  `unstable-internals` are NOT held to this bar (132 items would be flagged there today — mostly
-  public-API-only convenience wrappers like `ModelDir::load_common` and in-progress encoder scaffolding with
-  zero internal caller, i.e. real `dead_code` signal once made `pub(crate)`, silenced with a matching
-  `#[cfg_attr(not(unstable-internals), allow(dead_code, unused_imports))]` — see the comment in `src/lib.rs`
-  for the full reasoning). Full reference-gated suite green after this change (152 tests, no regressions;
-  `tiers_and_threads` also re-run since `src/nn` was touched for the CI cross-arch fixes).
-
-- `enough::Stop`: `Decoder::decode_with` / `decode_picture_with`, `Error::Cancelled(StopReason)`; checks per
-  component / region / channel chunk (entropy), per region and layer (hyper-decoder, context model), per synthesis
-  tile and layer, between output stages, and (2026-09-18) once per enabled post-filter plus once per eICCI tile
-  (`FilterContext` gained a `stop` field; `filters::apply` checks it per filter, `filters::icci::filter` checks
-  it per tile since a tile runs a whole luma/chroma network — the most expensive unit of work there). Not
-  covered: inside a single convolution. Tests `tests/api_ref.rs` (reference-gated):
-  `stop_aborts_a_large_decode_early` (a 2096x1400 decode performs >= 40 checks, aborts at exactly the tripping
-  one) and `stop_aborts_a_filtered_decode_early` (same, on `img01_base_eiccitiles_lef_bpp050`: tiled eICCI +
-  LEF, exercising the new checks specifically).
-- `Limits` + `estimate_memory` + lower peak memory; numbers in `benchmarks/memory_2026-09-17.{tsv,meta}`.
-  Still open here: (1) the default 1 GiB buffer pool dominates HOP (1190 MB peak vs 442 MB held by the decode
-  itself at 560x888); `BTensor::zeros` / `pad_par` never reuse parked buffers, so padded maps park and are rarely
-  taken again: letting `zeros` take (and clear) a pooled buffer, or not parking buffers that came from `zeros`,
-  needs a timing study on a quiet machine before the default changes; (2) the output stage (`finish`) holds the
-  float planes and the result together, an in-place colour conversion (`output::to_rgb_planes_owned`, kept but
-  unused after the 10-bit / YUV rewrite) would save 12 B per sample; (3) `estimate_memory` is calibrated on four
-  8-bit 4:4:4 streams without post-filters (0.5 MP untiled SOP / BOP / HOP, 2.9 MP tiled BOP): post-filters,
-  10-bit and subsampled output are not modelled or measured; (4) under `max_memory_bytes` the decoder shrinks the
-  process-wide pool and never grows it back.
-
-Appended by the first encoder agent, 2026-09-17. Landed `model::analysis` (BOP + HOP),
-`model::hyper_encoder`, their loaders, `tests/encode_ref.rs` and `dump_encode.py --enc2`; its
-work queue is superseded by item 1 above, which the second encoder agent completed through
-stream assembly. Reference facts it verified that are still worth having written down:
-
-- Stock `tools_off` streams carry `use_cube_flags = 0` at the reference's own rates, level_idc 52,
-  `synthesis_transforms` `[Bop, Sop]` (base) / `[Sop]` (simple) / `[Hop, Bop, Sop]` (high), TON and
-  RDI present (RDI one zero byte). File order is PIH, TON, RDI, SORP, SORS, SOZ, EOC
-  (`reverse_encode_order = 1`): the residual substreams precede SOZ.
-- The simple profile is coded with the **BOP** analysis transform
-  (`cfg/oper_point/bopEnc_sopDec.json`); only the synthesis side is SOP.
-- Within the one SOZ payload the encoder writes the chroma `z` first and the luma `z` second,
-  because ANS is last-in-first-out and the decoder reads luma first
-  (`ccs_sgmm_tool.py::encode` iterates `reversed(models_list)`).
-- `z`: clamp to `[-31, 31]`, round half to even, symbol = `z + 31` (checked exact).
-
-Appended by the second encoder agent, 2026-09-18. The encoder now exists end to end; the rows
-`encoder`, `encoder::tiles`, `encoder::rate`, `tools::rvs` (encode), `tools::qualmap` (encode)
-and `model::mcm` (compress) above say exactly how far each piece goes.
-
-- Landed: `src/encoder/` (colour pre-processing, the compress pipeline, analysis tiling, rate
-  matching, region partitioning, header + container assembly), `ContextModel::compress` and the
-  `mcm::Quantiser` trait, the encode direction of `tools::rvs` and `tools::qualmap`,
-  `decoder::entropy::{ComponentScales, component_scales(_with), dequantize_residual,
-  channel_step, distribution_index}` factored out of `decode_component` (the decoder's output is
-  unchanged and its tests stay bit-identical), the `encode` subcommand with
-  `--model/--beta-disp/--op/--bpp/--rvs/--grfs/--lsbs/--ans-threads/--regions/--quality-map`,
-  `examples/dbg_encode`, ten more `encoder` vectors, `scripts/bench/{encode_end_to_end.sh,
-  ref_encode.py}` + `benchmarks/encode_end_to_end_2026-09-18.{tsv,meta}`, and the gates in
-  `tests/encode_ref.rs`. `reference_decoder_accepts_our_streams` is `#[ignore]`d because it
-  shells out to the reference's Python decoder; run it with
-  `cargo test --all-features --test encode_ref reference_decoder -- --ignored`.
-- Open: items 1-4 above (post-filters, subsampled / 10-bit / YUV sources, the rate matcher's
-  likelihood estimator, encoder memory). The encoder is also **not** wired into `zencodec` (that
-  crate's `Encode` traits), has no `Limits` of its own, and is not in CI (`reference-tests` needs
-  the 3.4 GB upstream checkout).
-- Watch out for: `compress_regions` is the mirror of
-  `decoder::reconstruct::reconstruct_latent_with` and must stay one - when that function changes,
-  change this one with it. The same holds for `ContextModel::{compress, decompress}` and for
-  `ComponentScales::{quantize, dequantize}`, whose tool order is each other's reverse.
+Earlier per-agent appendices (browser 2026-09-17, GPU passes, encoder groundwork) were folded
+into the rows above and the items here; their numbers live in `benchmarks/` and the crate READMEs.

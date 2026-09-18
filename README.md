@@ -8,15 +8,20 @@ the [JPEG AI reference software](https://gitlab.com/wg1/jpeg-ai/jpeg-ai-referenc
 with `#![forbid(unsafe_code)]`, SIMD through [archmage](https://lib.rs/crates/archmage) and
 [magetypes](https://lib.rs/crates/magetypes), and no Python or PyTorch at runtime.
 
-**Status: work in progress — a partial decoder, no encoder.** Missing first: two of the four post-filters (eICCI, LEF),
-custom colour transforms, and the
-entire encoder above the entropy coder. Streams that need any of these are rejected with
-`Error::Unsupported`; nothing is silently approximated.
-
-What works: RGB (BT.709) and YUV streams, 4:4:4 / 4:2:2 / 4:2:0, 8 and 10 bit, at the simple, base and high operating points, at any
-picture size, with or without region partitioning, multiple ANS threads, residual variance
-scaling (RVS), channel gain flags (GRFS), latent scaling (LSBS) and quality maps. The entropy stage is bit-exact; the reconstructed 8-bit picture differs from the
+**Status: decoder complete for the reference's feature set, encoder complete for RGB 4:4:4
+sources.** Decoder: SOP / BOP / HOP operating points, any picture size (synthesis tiling, dependent
+and independent regions), RGB (BT.709) and YUV streams in 4:4:4 / 4:2:2 / 4:2:0 at 8 and 10 bit,
+RVS, GRFS, LSBS, quality maps, cube flags, progressive decode, all four post-filters (EFE linear,
+EFE non-linear, eICCI, LEF), UDI. Encoder: the same coding tools and regions, tiling above 1 MP,
+fixed-model and target-bpp rate control; it reproduces the reference encoder's streams byte for
+byte on 13 of 17 fixed-model vectors (same length on the rest). Not ported: post-filter decisions
+on the encode side, subsampled / 10-bit / YUV encoder inputs, the user-defined colour transform
+(the reference's own implementation is inconsistent — see `PORTING.md`), eICCI on subsampled
+pictures. Anything unsupported is rejected with `Error::Unsupported`; nothing is silently
+approximated. The entropy stage is bit-exact; the reconstructed 8-bit picture differs from the
 reference decoder's in about 0.005 % of samples, each by one step (convolution summation order).
+Also here: a WebAssembly build with a browser polyfill and demo (`web/`, live at
+https://imazen.github.io/zenjpegai/) and a wgpu compute backend (`gpu/`).
 `PORTING.md` tracks every module, what is missing, and which test proves each piece.
 
 New here? Start with [`CONTRIBUTING.md`](CONTRIBUTING.md): setup, code map, how parity is proven, what to do next.
