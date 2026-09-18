@@ -30,11 +30,19 @@ parallel = ["std", "dep:rayon"]
 reference-tests = []
 # AVX-512 kernels (archmage v4 tier).
 avx512 = ["archmage/avx512", "magetypes/avx512"]
-# The `zenjpegai` command line tool (PNG output through zenpng).
-cli = ["std", "dep:zenpng", "dep:imgref", "dep:rgb"]
+# `nn`, `model`, `tools`, `mans`, `bitio`, `container`, `tensor`, `weights` and `filters` as
+# `pub` instead of `pub(crate)`: not a committed public API (module layout and signatures may
+# still change), but the escape hatch this crate's own CLI/tests/benches and the `gpu`/`wasm`
+# sibling crates need. See PORTING.md "API hygiene".
+unstable-internals = []
+# The `zenjpegai` command line tool (PNG output through zenpng). Needs unstable-internals: the
+# CLI reaches nn::fast::{Engine, Tier, set_pool_limit}, model::*, weights::packed::*.
+cli = ["std", "dep:zenpng", "dep:imgref", "dep:rgb", "unstable-internals"]
 # zencodec trait implementations (DecoderConfig / DecodeJob / Decode) for dispatch through
 # zencodecs and other zencodec-driven pipelines. RGB output only today (see src/codec.rs).
-zencodec = ["std", "dep:zencodec", "dep:zenpixels"]
+# Needs unstable-internals: JpegAiDecoderConfig's public API takes model::ModelSource +
+# nn::fast::Engine.
+zencodec = ["std", "dep:zencodec", "dep:zenpixels", "unstable-internals"]
 
 [dependencies]
 archmage = { version = "0.9.29", features = ["macros"] }
@@ -53,6 +61,28 @@ zenpixels = { version = "0.2.16", optional = true }
 name = "make_roi_mask"
 required-features = ["cli"]
 
+# The rest of examples/ debug/profile against internal modules directly (entropy stage,
+# reconstruction, filters).
+[[example]]
+name = "dbg_entropy"
+required-features = ["unstable-internals"]
+
+[[example]]
+name = "dbg_recon"
+required-features = ["unstable-internals"]
+
+[[example]]
+name = "prof_entropy"
+required-features = ["unstable-internals"]
+
+[[example]]
+name = "prof_filters_efe"
+required-features = ["unstable-internals"]
+
+[[example]]
+name = "prof_filters_lef_icci"
+required-features = ["unstable-internals"]
+
 [[bin]]
 name = "zenjpegai"
 required-features = ["cli"]
@@ -63,6 +93,57 @@ zenbench = "0.1.9"
 [[bench]]
 name = "conv_kernels"
 harness = false
+required-features = ["unstable-internals"]
+
+# `tests/api_ref.rs` and `tests/codec_ref.rs` need no entry here: the former uses only the
+# public API, the latter's own `required-features` come from being behind the `zencodec`
+# feature (which implies `unstable-internals`) via its `#![cfg(...)]`. Every other
+# integration test imports internal modules (`nn`, `model`, `mans`, `decoder::{entropy,
+# reconstruct, output}`, `filters`, `container`, `tensor`, `weights`) directly and needs the
+# feature enabled just to compile — see PORTING.md "API hygiene".
+[[test]]
+name = "decode_ref"
+required-features = ["unstable-internals"]
+
+[[test]]
+name = "encode_ref"
+required-features = ["unstable-internals"]
+
+[[test]]
+name = "entropy_ref"
+required-features = ["unstable-internals"]
+
+[[test]]
+name = "fast_vs_reference"
+required-features = ["unstable-internals"]
+
+[[test]]
+name = "filters_efe_ref"
+required-features = ["unstable-internals"]
+
+[[test]]
+name = "filters_lef_icci_ref"
+required-features = ["unstable-internals"]
+
+[[test]]
+name = "mans_vectors"
+required-features = ["unstable-internals"]
+
+[[test]]
+name = "math_tiers"
+required-features = ["unstable-internals"]
+
+[[test]]
+name = "nn_vectors"
+required-features = ["unstable-internals"]
+
+[[test]]
+name = "packed_bundle"
+required-features = ["unstable-internals"]
+
+[[test]]
+name = "weights_ref"
+required-features = ["unstable-internals"]
 
 # The float layers are unusable unoptimised (a 0.5 MP decode takes minutes); tests need them.
 [profile.dev]

@@ -17,12 +17,14 @@ no-std:
 # Upstream reference checkout (models/ + the Python oracle). Override with ZENJPEGAI_REF=...
 ref := env_var_or_default("ZENJPEGAI_REF", env_var("HOME") / "work/zen/jpeg-ai-reference-software")
 
+# `unstable-internals` (not reference-tests): every test/example that only needs internal-module
+# access, no upstream checkout.
 test:
-    cargo test --lib --tests --examples 2>&1 | tee ~/tmp/zenjpegai-test.log
+    cargo test --lib --tests --examples --features unstable-internals 2>&1 | tee ~/tmp/zenjpegai-test.log
 
 # Tests that read the upstream checkpoints / reference vectors. Missing data fails loudly.
 test-ref:
-    ZENJPEGAI_REF={{ref}} cargo test --lib --tests --examples --features reference-tests 2>&1 | tee ~/tmp/zenjpegai-test-ref.log
+    ZENJPEGAI_REF={{ref}} cargo test --lib --tests --examples --features reference-tests,zencodec 2>&1 | tee ~/tmp/zenjpegai-test-ref.log
 
 build-release:
     ~/work/zen/scripts/run-heavy -- cargo build --release 2>&1 | tee ~/tmp/zenjpegai-build.log
@@ -35,7 +37,7 @@ gpu-test:
 
 # The test suite on wasm32-wasip1 under node (Wasm128 tier, unfused multiply-add policy).
 test-wasi:
-    CARGO_TARGET_WASM32_WASIP1_RUNNER="node --no-warnings {{justfile_directory()}}/scripts/wasm/run_wasi.mjs" RUSTFLAGS="-Ctarget-feature=+simd128" ZENJPEGAI_REF={{ref}} cargo test --target wasm32-wasip1 --no-default-features --features std,reference-tests --lib --tests 2>&1 | tee ~/tmp/zenjpegai-test-wasi.log
+    CARGO_TARGET_WASM32_WASIP1_RUNNER="node --no-warnings {{justfile_directory()}}/scripts/wasm/run_wasi.mjs" RUSTFLAGS="-Ctarget-feature=+simd128" ZENJPEGAI_REF={{ref}} cargo test --target wasm32-wasip1 --no-default-features --features std,reference-tests,unstable-internals --lib --tests 2>&1 | tee ~/tmp/zenjpegai-test-wasi.log
 
 # Wasm-vs-reference-vs-native 8-bit parity table.
 wasm-parity:

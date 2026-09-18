@@ -91,6 +91,11 @@ jobs:
       - run: cargo check --no-default-features
       - run: cargo clippy --no-default-features -- -D warnings
       - run: cargo check --no-default-features --target wasm32-unknown-unknown
+      # Default features (std, parallel, avx512; no unstable-internals/cli/zencodec): the
+      # committed public API only. Without unstable-internals `#![warn(missing_docs)]` is live
+      # (src/lib.rs) — this is where that gets enforced.
+      - name: Clippy (public API only)
+        run: cargo clippy --lib -- -D warnings
 
   # zenjpegai-gpu (wgpu synthesis backend): only needs to type-check in CI (no GPU adapter here).
   gpu:

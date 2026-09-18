@@ -55,6 +55,8 @@ impl Decoder {
         Self::with_engine(models_dir, Engine::new())
     }
 
+    /// [`Decoder::new`] with an explicit [`Engine`] (SIMD tier, threading) instead of the
+    /// best one this CPU supports.
     pub fn with_engine(models_dir: impl Into<std::path::PathBuf>, engine: Engine) -> Self {
         Self::with_source(Box::new(ModelDir::new(models_dir)), engine)
     }
@@ -102,6 +104,7 @@ impl Decoder {
         Ok(crate::estimate_memory(&headers.picture, op))
     }
 
+    /// The [`Engine`] (SIMD tier, threading) this decoder runs the float networks on.
     pub fn engine(&self) -> &Engine {
         &self.engine
     }

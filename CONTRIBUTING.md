@@ -23,7 +23,8 @@ convolutional networks whose weights come from upstream's PyTorch checkpoints.
 ## Everyday commands
 
 ```
-cargo test --lib --tests                                   # no reference data needed
+cargo test --lib --tests                                   # public API only, no reference data
+cargo test --lib --tests --features unstable-internals      # + internal-module tests, still no reference data
 just test-ref                                              # everything, needs steps 2 + 3
 cargo clippy --all-targets --all-features -- -D warnings
 cargo build --release --features cli
@@ -32,6 +33,12 @@ target/release/zenjpegai encode in.png out.bits --model 1 --beta-disp 0 --op bop
 target/release/zenjpegai info X.bits                        # every header field
 scripts/bench/decode_end_to_end.sh > benchmarks/decode_end_to_end_$(date +%F).tsv
 ```
+
+`nn`, `model`, `tools`, `mans`, `bitio`, `container`, `tensor`, `weights` and `filters` are
+`pub(crate)` by default (the committed public API is `Decoder` + `header` + the `codec`
+zencodec bridge); `--features unstable-internals` makes them `pub` for tests/benches/tools that
+need direct access. `cli` and `zencodec` both imply it. See `src/lib.rs` and PORTING.md "API
+hygiene".
 
 ## Code map (decode order)
 

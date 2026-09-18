@@ -19,7 +19,7 @@ avx512 = ["zenjpegai/avx512"]
 gpu-tests = []
 
 [dependencies]
-zenjpegai = { path = "..", default-features = false, features = ["std"] }
+zenjpegai = { path = "..", default-features = false, features = ["std", "unstable-internals"] }
 enough = { version = "0.4.4", default-features = false }
 wgpu = { version = "30.0.1", default-features = false, features = ["std", "wgsl", "vulkan", "metal", "dx12", "webgpu"] }
 bytemuck = { version = "1.25.2", features = ["derive"] }

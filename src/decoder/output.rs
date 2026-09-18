@@ -38,8 +38,11 @@ fn convert_range(x: f32, in_max: f32, out_max: f32) -> f32 {
 /// Final picture: interleaved RGB samples, one `u16` per sample (8- and 10-bit share it).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RgbImage {
+    /// Picture width in samples.
     pub width: usize,
+    /// Picture height in samples.
     pub height: usize,
+    /// Bits per sample (values in `[0, 2^bit_depth - 1]`).
     pub bit_depth: u8,
     /// `[r, g, b, r, g, b, ...]`, row-major.
     pub data: Vec<u16>,
@@ -201,20 +204,31 @@ pub fn to_rgb_planes_owned(hdr: &PictureHeader, planes: Planes) -> Result<RgbPla
 /// in the source's subsampling, one `u16` per sample.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct YuvImage {
+    /// Luma plane width in samples.
     pub width: usize,
+    /// Luma plane height in samples.
     pub height: usize,
+    /// Chroma plane width in samples (equals `width` at 4:4:4, halved at 4:2:2 / 4:2:0).
     pub chroma_width: usize,
+    /// Chroma plane height in samples (equals `height` at 4:4:4 / 4:2:2, halved at 4:2:0).
     pub chroma_height: usize,
+    /// Bits per sample (values in `[0, 2^bit_depth - 1]`), shared by all three planes.
     pub bit_depth: u8,
+    /// Luma plane, row-major.
     pub y: Vec<u16>,
+    /// Cb/U chroma plane, row-major, `chroma_width x chroma_height`.
     pub u: Vec<u16>,
+    /// Cr/V chroma plane, row-major, `chroma_width x chroma_height`.
     pub v: Vec<u16>,
 }
 
 /// What a stream decodes to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Picture {
+    /// Interleaved RGB (the common case: `colour_transform_idx != 0`, or a YUV source
+    /// colour-converted on decode).
     Rgb(RgbImage),
+    /// Planar YUV in the source's chroma subsampling (`colour_transform_idx == 0`).
     Yuv(YuvImage),
 }
 

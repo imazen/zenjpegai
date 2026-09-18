@@ -1,4 +1,7 @@
-# zenjpegai
+# zenjpegai ![CI](https://img.shields.io/github/actions/workflow/status/imazen/zenjpegai/ci.yml?style=flat-square&label=CI)
+
+Not yet published to crates.io (version 0.0.1) — the crates.io / lib.rs / docs.rs / license
+badges land at first publish.
 
 zenjpegai is a JPEG AI (ISO/IEC 6048-1 | ITU-T T.840.1) image codec in safe Rust: a port of
 the [JPEG AI reference software](https://gitlab.com/wg1/jpeg-ai/jpeg-ai-reference-software)

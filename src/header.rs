@@ -64,13 +64,20 @@ pub enum ColourTransform {
     /// 1: BT.709 YCbCr, converted to RGB on output.
     Bt709,
     /// 2: user-defined 3x3 matrix and offsets (8 bits each).
-    Custom { matrix: [u8; 9], offset: [u8; 3] },
+    Custom {
+        /// Row-major 3x3 colour transform matrix, 8-bit fixed-point entries.
+        matrix: [u8; 9],
+        /// Per-channel offset applied after the matrix, 8-bit fixed-point.
+        offset: [u8; 3],
+    },
 }
 
 /// Region partitioning of the residual substreams.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Regions {
+    /// Number of region rows.
     pub num_ver: u8,
+    /// Number of region columns.
     pub num_hor: u8,
     /// `region_residual_in_its_own_substream_flag`.
     pub independent: bool,
@@ -98,15 +105,18 @@ pub struct ComponentHeader {
     pub num_chs: u16,
     /// Skip-mode cube flags, `[phase][cube_y][cube_x]` flattened; `None` means all cubes skip.
     pub cube_flags: Option<Vec<bool>>,
+    /// Whether residual variance scaling ([`crate::tools::rvs`]) is enabled for this component.
     pub rvs_enabled: bool,
     /// Channel-wise gain flags (`grfs_channel_flag`), one per coded channel, if enabled.
     pub grfs_channel_flags: Option<Vec<bool>>,
+    /// Synthesis tiling for this component, if the stream tiles it.
     pub synthesis_tiling: Option<SynthesisTiling>,
 }
 
 /// Quality-map (spatially varying quantisation) signalling.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct QualityMapHeader {
+    /// ANS threads of the quality-map substream: 1, 2, 4, 8 or 16.
     pub num_threads: u8,
     /// `quality_map_entropy_index`: selects the sigma used to code the map.
     pub entropy_index: u8,
@@ -115,33 +125,45 @@ pub struct QualityMapHeader {
 /// Decoded picture header.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PictureHeader {
+    /// Stream profile indicator (`stream_profile_idc`).
     pub stream_profile_idc: u8,
     /// 0 simple, 1 base, 2 high.
     pub decoder_profile_id: u8,
     /// Synthesis transforms the stream may be decoded with; the first is the default.
     pub synthesis_transforms: Vec<OperatingPoint>,
+    /// Conformance level indicator (`level_idc`).
     pub level_idc: u8,
     /// Coded picture size in luma samples.
     pub width: u32,
+    /// Coded picture height in luma samples.
     pub height: u32,
     /// Columns / rows at the right / bottom of the coded picture that are not displayed.
     pub diff_display_width: u8,
+    /// See `diff_display_width`, for the bottom rows.
     pub diff_display_height: u8,
+    /// Bits per sample (values in `[0, 2^bit_depth - 1]`).
     pub bit_depth: u8,
     /// Source chroma subsampling factors (1 or 2).
     pub s_ver: u8,
+    /// See `s_ver`, horizontal factor.
     pub s_hor: u8,
     /// Coded chroma subsampling factors (1 or 2).
     pub c_ver: u8,
+    /// See `c_ver`, horizontal factor.
     pub c_hor: u8,
+    /// How the coded components map to displayed colour.
     pub colour_transform: ColourTransform,
     /// Index of the trained model (beta) the stream was coded with.
     pub model_id: u8,
+    /// ANS threads of the hyper-latent (`z`) substream: 1, 2, 4, 8 or 16.
     pub num_threads_z: u8,
     /// `beta_displacement_log` per component (already offset by -2048).
     pub beta_displacement_log: [i32; 2],
+    /// Region partitioning of the residual substreams, if the stream uses regions.
     pub regions: Option<Regions>,
+    /// Per-component (luma, chroma) header, in that order.
     pub components: [ComponentHeader; 2],
+    /// Spatially varying quantisation signalling, if the stream uses a quality map.
     pub quality_map: Option<QualityMapHeader>,
 }
 
@@ -201,6 +223,7 @@ impl PictureHeader {
         4 * cube_h * cube_w
     }
 
+    /// Parse a `PIH` substream payload.
     pub fn parse(payload: &[u8]) -> Result<Self> {
         let mut r = BitReader::new(payload);
 
@@ -332,6 +355,7 @@ impl PictureHeader {
         Ok(hdr)
     }
 
+    /// Serialise back to a `PIH` substream payload (round-trips through [`Self::parse`]).
     pub fn write(&self) -> Result<Vec<u8>> {
         let mut w = BitWriter::new();
         let n = self.synthesis_transforms.len();
@@ -595,6 +619,7 @@ pub struct EfeLinearSet {
     pub filter_len: [u8; 2],
     /// Offset of the coded weight symbols (`minSymbol`) and their range (`maxSymbol`).
     pub min_symbol: u16,
+    /// See `min_symbol`.
     pub max_symbol: u16,
     /// Per plane, per split: chroma weights as 16-bit integer codes. `4 * fL * fL` values (the
     /// four sub-sampling phases), or `fL * fL` when the picture is coded 4:4:4 (one filter
@@ -619,7 +644,9 @@ pub struct EfeLinearHeader {
 /// EFE non-linear filter parameters (`EFE_nonlinear_filter_enabled_flag`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct EfeNonlinearHeader {
+    /// Offset of the coded weight symbols (`minSymbol`).
     pub min_symbol: u16,
+    /// Range of the coded weight symbols (`maxSymbol`).
     pub max_symbol: u16,
     /// `bS`, `len_mask_y`, `len_mask_x`: present when at least one mask is.
     pub mask_geometry: Option<(u16, u16, u16)>,
@@ -630,12 +657,16 @@ pub struct EfeNonlinearHeader {
     pub nonlinear: Option<EfeNonlinearTiles>,
 }
 
+/// Per-tile luma range gating of the EFE non-linear filter.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct EfeNonlinearTiles {
+    /// Tile width in luma samples.
     pub tile_width: u16,
+    /// Tile height in luma samples.
     pub tile_height: u16,
     /// `minLuma` / `maxLuma`, one per tile.
     pub luma_min: Vec<u16>,
+    /// See `luma_min`.
     pub luma_max: Vec<u16>,
     /// `A1` weight codes per plane (`None` = filter off for that plane).
     pub weights: [Option<Vec<u32>>; 2],
@@ -651,6 +682,7 @@ pub struct IcciTile {
     pub short_list: bool,
     /// `icci_model_signalled_idx[..][Y]` / `[UV]`; meaningful when the planes are filtered.
     pub index_y: u8,
+    /// See `index_y`, chroma (U and V share one index).
     pub index_uv: u8,
 }
 
@@ -787,8 +819,11 @@ impl IcciHeader {
 pub struct ToolHeader {
     /// Latent scaling before synthesis, per component.
     pub lsbs_enabled: [bool; 2],
+    /// EFE linear filter parameters, if enabled.
     pub efe_linear: Option<EfeLinearHeader>,
+    /// eICCI parameters, if enabled.
     pub icci: Option<IcciHeader>,
+    /// EFE non-linear filter parameters, if enabled.
     pub efe_nonlinear: Option<EfeNonlinearHeader>,
     /// `LEF_chIdx`: the latent channel whose scale map steers the LEF.
     pub lef_channel: Option<u8>,
@@ -1021,6 +1056,7 @@ impl ToolHeader {
         Ok(t)
     }
 
+    /// Serialise back to a `TON` substream payload (round-trips through [`Self::parse`]).
     pub fn write(&self, pih: &PictureHeader) -> Result<Vec<u8>> {
         let mut w = BitWriter::new();
         w.write_bit(self.lsbs_enabled[0]);
@@ -1069,10 +1105,15 @@ impl ToolHeader {
 /// CICP colour description (`cicp_info_present_flag`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Cicp {
+    /// `colour_primaries` (ITU-T H.273 code point).
     pub colour_primaries: u8,
+    /// `transfer_characteristics` (ITU-T H.273 code point).
     pub transfer_characteristics: u8,
+    /// `matrix_coefficients` (ITU-T H.273 code point).
     pub matrix_coefficients: u8,
+    /// Full-range (`true`) vs studio/limited-range (`false`) samples.
     pub full_range: bool,
+    /// 4:2:0 chroma sample location type (ITU-T H.273).
     pub chroma420_sample_loc_type: u8,
 }
 
@@ -1081,29 +1122,38 @@ pub struct Cicp {
 pub struct Mdcv {
     /// `(x, y)` chromaticity of the three primaries.
     pub primaries: [(u16, u16); 3],
+    /// `(x, y)` chromaticity of the white point.
     pub white_point: (u16, u16),
+    /// Mastering display maximum luminance, in units of 0.0001 cd/m^2.
     pub max_luminance: u32,
+    /// Mastering display minimum luminance, in units of 0.0001 cd/m^2.
     pub min_luminance: u32,
 }
 
 /// Content light level (`clli_info_present_flag`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Clli {
+    /// Maximum content light level (CEA-861.3 MaxCLL), cd/m^2.
     pub max_content_light_level: u16,
+    /// Maximum frame-average light level (CEA-861.3 MaxFALL), cd/m^2.
     pub max_frame_average_light_level: u16,
 }
 
 /// Rendering information substream. Absent substream == nothing present.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RenderingInfo {
+    /// CICP colour description, if present.
     pub cicp: Option<Cicp>,
+    /// Mastering display colour volume, if present.
     pub mdcv: Option<Mdcv>,
+    /// Content light level, if present.
     pub clli: Option<Clli>,
     /// `(dm_type, dm_data)`: opaque display-mapping payload.
     pub display_mapping: Option<(u8, Vec<u8>)>,
 }
 
 impl RenderingInfo {
+    /// Parse an `RDI` substream payload.
     pub fn parse(payload: &[u8]) -> Result<Self> {
         let mut r = BitReader::new(payload);
         let cicp_present = r.read_bit()?;
@@ -1157,6 +1207,7 @@ impl RenderingInfo {
         Ok(info)
     }
 
+    /// Serialise back to an `RDI` substream payload (round-trips through [`Self::parse`]).
     pub fn write(&self) -> Result<Vec<u8>> {
         let mut w = BitWriter::new();
         w.write_bit(self.cicp.is_some());

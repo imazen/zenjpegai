@@ -110,12 +110,15 @@ impl Tier {
 /// Execution context of the fast layers.
 #[derive(Clone, Copy, Debug)]
 pub struct Engine {
+    /// SIMD tier the fast layers dispatch to.
     pub tier: Tier,
     /// Spread rows over the rayon pool (needs the `parallel` feature).
     pub parallel: bool,
 }
 
 impl Engine {
+    /// The best tier this CPU supports ([`Tier::detect`]), parallel iff the `parallel` feature
+    /// is compiled in.
     pub fn new() -> Self {
         Self {
             tier: Tier::detect(),
@@ -123,6 +126,7 @@ impl Engine {
         }
     }
 
+    /// An engine with an explicit tier and threading choice (tests, benchmarks).
     pub fn with(tier: Tier, parallel: bool) -> Self {
         Self { tier, parallel }
     }
