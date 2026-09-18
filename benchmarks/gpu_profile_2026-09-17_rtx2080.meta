@@ -1,0 +1,42 @@
+gpu_profile_2026-09-17_rtx2080.tsv
+
+Where the GPU time of one synthesis goes, per kernel, before and after the tuning of 711233ad.
+This is the file the tuning was chosen from, and the before / after pair quoted in
+gpu/README.md: both sides were run back to back on an otherwise idle card, each size in a fresh
+context, so they are comparable in a way the size sweep (which drives the card continuously and
+therefore at sustained clocks) is not.
+
+adapter: NVIDIA GeForce RTX 2080 [Vulkan DiscreteGpu; NVIDIA 580.178.04]
+wgpu: 30.0.1
+host: dev (Ryzen 9 9950X3D), Ubuntu, kernel 7.0.0-31-generic
+commands: gpu_bench --adapter "NVIDIA GeForce RTX 2080" --profile --rounds 5
+  "before" from a binary whose gpu/ is 417be423, "after" from 711233ad.
+commit: 711233ad
+
+Method: `Workspace::set_profile(true)` records each dispatch as its own compute pass with a
+begin / end timestamp pair, so `device_ms` is the device's own clock per kernel, summed over the
+dispatches of one picture and taken as the median of five pictures. Splitting the pass costs
+almost nothing here — the summed total is within 1% of the same picture timed as a single pass
+(`gpu_bench --profile` prints both) — but it is still a measurement mode, not how the decoder
+runs. Rows are the per-kernel aggregate; the raw per-dispatch table is 136 KB and regenerable
+with `just gpu-profile`.
+
+columns: side (before / after), op, width, height, kernel (the pipeline key: kernel, geometry,
+  output blocks per invocation, fused activation, fused ReLU6 on the input, fused second
+  operand), dispatches in one picture, device_ms summed over them, pct of the picture,
+  picture_ms for the whole picture.
+
+What it showed, HOP 1024x1024 (635.0 ms before): 1x1 convolution 162.4 ms in 35 dispatches,
+depthwise 3x3 134.3 ms in 20, the 3x3 family 231.6 ms in 27, transposed 3x3 stride 2 36.5 ms in
+6, the ELU gate 25.7 ms in 8, all of attention 20.3 ms in 32. So the tuning went after the
+depthwise (memory-bound: one multiply-add per 16 bytes read — 134.3 -> 64.8 ms) and the
+transposed convolution (three quarters of its taps were multiplied out by a divisibility test —
+36.5 -> 28.1 ms), and the fused gate / residual removed dispatches everywhere.
+
+What it says is still wrong, and is the next job: the convolutions run at 4-7% of the card's f32
+peak. The 3x3 stride-2 of HOP's CAB is 9.66 G multiply-adds (256x256 output, 128 channels in and
+out) in 48.9 ms = 0.39 TFLOP/s against roughly 10 TFLOP/s of fp32. Weight traffic does not
+explain it (the 64 threads of a workgroup read the same weights, i.e. a broadcast) and neither
+does DRAM bandwidth (about 0.4 bytes per multiply-add reaches the card's memory, a quarter of
+what 450 GB/s would allow). Finding out what does explain it — occupancy, warp stall reasons —
+comes before writing another kernel; `ncu` is usable now that the proprietary driver is here.

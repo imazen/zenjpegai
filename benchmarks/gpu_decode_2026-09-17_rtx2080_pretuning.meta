@@ -1,0 +1,24 @@
+gpu_decode_2026-09-17_rtx2080_pretuning.tsv
+
+The "before" of the kernel tuning in commit 711233ad: `gpu/` exactly as it was at 417be423.
+The "after" is gpu_decode_2026-09-17_rtx2080.tsv, same host, same day, same command.
+
+adapter: NVIDIA GeForce RTX 2080 [Vulkan DiscreteGpu; NVIDIA 580.178.04] (proprietary driver,
+  nouveau blacklisted; the box has no other discrete GPU). Vulkan instance 1.4.341,
+  libvulkan1 1.4.341.0-1. 8 GiB, SM clock 1515 MHz and memory 7000 MHz under load
+  (`nvidia-smi --query-gpu=clocks.sm,clocks.mem`), so the card was not stuck at idle clocks.
+wgpu: 30.0.1
+host: dev (Ryzen 9 9950X3D, 32 threads), Ubuntu, kernel 7.0.0-31-generic. **Shared with other
+  agents while this ran**: see the noise note below.
+command: RAYON_NUM_THREADS=8 nice -n 19 gpu_bench --adapter GeForce --rounds 7 --max-size 4096
+  --out <this file>
+commit: gpu/ contents of 417be423 (binary built from that tree); everything else of the working
+  copy that became 711233ad.
+columns: header comment of gpu/examples/gpu_bench.rs. cpu_mt_ms is the crate's CPU engine with
+  RAYON_NUM_THREADS=8, not all 32 threads of the box, so it understates a full-box CPU run;
+  cpu_1t_ms is one thread.
+
+Noise: the box runs several agents. Medians over 7 interleaved rounds absorb most of it, but not
+all: the Hop 384x384 row (78.73 ms device) is a clear outlier — it is 3.9x the 256x256 row where
+the pixel count only grows 2.25x, and the same cell measures 42.93 ms in the "after" file, which
+sits on the smooth curve. Treat single rows with suspicion; the curve shape is sound.

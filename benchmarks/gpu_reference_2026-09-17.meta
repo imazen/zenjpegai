@@ -1,0 +1,49 @@
+gpu_reference_2026-09-17.tsv
+
+The JPEG AI reference software decoding the same four streams on the CPU and on the GPU, so the
+port's GPU backend has something to be measured against. Produced by
+`scripts/bench/reference_gpu.sh 3`.
+
+reference: ~/work/zen/jpeg-ai-reference-software at b9e573f, its .venv with torch 1.10.2+cu113
+  (CUDA 11.3 runtime) on the NVIDIA 580.178.04 driver, CUDA 12.4 toolkit installed on the host.
+gpu: NVIDIA GeForce RTX 2080, 8 GiB. cpu: Ryzen 9 9950X3D.
+host: dev, Ubuntu, kernel 7.0.0-31-generic, shared with other agents.
+commit (of this repo, for the rows it is compared against): 711233ad
+
+How to read `total_s`: it is the reference's own "TOTAL", the wall time of `decode_stream` —
+headers, entropy decoding, the networks and the output stage, but not model loading, hashing or
+PNG writing. `process_decoder` calls `torch.cuda.synchronize()` before stopping that clock when
+the device is the GPU (src/reco/coders/decoder.py), and calls `init_cuda()` before starting it,
+so it is a synchronised measurement of GPU work, not a host timer reporting submission.
+
+Three things worth knowing, all verified here:
+
+1. **`-target_device gpu` alone is not enough.** `Coder.setup_device_param`
+   (src/codec/coders/coder.py) forces `target_device` back to `cpu` unless `CUDA_VISIBLE_DEVICES`
+   is set and non-empty, and says nothing when it does. A run without it produces CPU timings and
+   CPU MD5s under a `gpu` command line. The script always sets `CUDA_VISIBLE_DEVICES=0`; a run
+   really on the GPU shows the process in `nvidia-smi --query-compute-apps` holding ~1.4 GiB.
+2. **The GPU path is deterministic** — three runs per stream, identical MD5 triples each time —
+   **but it does not reproduce the CPU path's output**: every stream's GPU MD5 differs from its
+   CPU MD5. cuDNN and oneDNN do not sum in the same order; the reference has no bit-exactness
+   between its own two devices, which is the same class of difference this port records against
+   it in PORTING.md.
+3. **The reference's CPU path is single-threaded** — `decode_stream` calls
+   `torch.set_num_threads(1)` for `target_device == cpu` — so its CPU column is a 1-thread
+   number and belongs next to this crate's `cpu_1t_ms`, not `cpu_mt_ms`.
+
+Medians of the three runs, seconds, against gpu_decode_2026-09-17_rtx2080.tsv's `decode` rows
+(whole codestream to 8-bit output, same streams, same box):
+
+  stream                  size       ref CPU 1T  ref GPU  ours CPU 1T  ours CPU 8T  ours GPU
+  img30_simple (SOP)      560x888         0.133    0.087        0.056        0.016     0.016
+  img30_base   (BOP)      560x888         0.221    0.093        0.092        0.024     0.022
+  img30_high   (HOP)      560x888         2.358    0.160        1.382        0.401     0.257
+  img01_base   (BOP)     2096x1400        1.224    0.288        0.536        0.168     0.148
+
+The reference's GPU path has a floor of about 85 ms per picture (SOP, where there is almost no
+work to do) that is Python and torch per-call overhead, not arithmetic; that is most of why the
+two light operating points look so different. HOP is where the comparison is about kernels, and
+there the reference's cuDNN path is 1.6x faster than this crate's WGSL kernels (0.160 s against
+0.257 s) on the same card, while this crate's CPU engine is 5.9x faster than the reference's CPU
+engine (0.401 s against 2.358 s, and 1.7x at equal thread count).

@@ -1,0 +1,25 @@
+stream	device	run	total_s	md5	log
+img30_simple_off_bpp050	cpu	1	0.141	(e1a3f92336d0341cc1ceff6c10e697fd, 09a1d5759a74d553051936e1a07eed47, b8a575035cfb5eca295d5581ea2bed07)	/home/lilith/tmp/refgpu-img30_simple_off_bpp050-cpu-1.log
+img30_simple_off_bpp050	cpu	2	0.133	(e1a3f92336d0341cc1ceff6c10e697fd, 09a1d5759a74d553051936e1a07eed47, b8a575035cfb5eca295d5581ea2bed07)	/home/lilith/tmp/refgpu-img30_simple_off_bpp050-cpu-2.log
+img30_simple_off_bpp050	cpu	3	0.128	(e1a3f92336d0341cc1ceff6c10e697fd, 09a1d5759a74d553051936e1a07eed47, b8a575035cfb5eca295d5581ea2bed07)	/home/lilith/tmp/refgpu-img30_simple_off_bpp050-cpu-3.log
+img30_simple_off_bpp050	gpu	1	0.100	(eff201df2a623bae314b3010f659fe49, 67fc3bc1e1bd92d0bf5f368cabd24a0a, 6a3b99591a8cd73ddef9c93787a909a6)	/home/lilith/tmp/refgpu-img30_simple_off_bpp050-gpu-1.log
+img30_simple_off_bpp050	gpu	2	0.086	(eff201df2a623bae314b3010f659fe49, 67fc3bc1e1bd92d0bf5f368cabd24a0a, 6a3b99591a8cd73ddef9c93787a909a6)	/home/lilith/tmp/refgpu-img30_simple_off_bpp050-gpu-2.log
+img30_simple_off_bpp050	gpu	3	0.087	(eff201df2a623bae314b3010f659fe49, 67fc3bc1e1bd92d0bf5f368cabd24a0a, 6a3b99591a8cd73ddef9c93787a909a6)	/home/lilith/tmp/refgpu-img30_simple_off_bpp050-gpu-3.log
+img30_base_off_bpp050	cpu	1	0.221	(0cb95f2a0fa05565f98adac72b0f83df, 6940a4dc1b34d15c13a92ae02b7d5a90, e12db466f2885a6a65505027bb167bab)	/home/lilith/tmp/refgpu-img30_base_off_bpp050-cpu-1.log
+img30_base_off_bpp050	cpu	2	0.223	(0cb95f2a0fa05565f98adac72b0f83df, 6940a4dc1b34d15c13a92ae02b7d5a90, e12db466f2885a6a65505027bb167bab)	/home/lilith/tmp/refgpu-img30_base_off_bpp050-cpu-2.log
+img30_base_off_bpp050	cpu	3	0.217	(0cb95f2a0fa05565f98adac72b0f83df, 6940a4dc1b34d15c13a92ae02b7d5a90, e12db466f2885a6a65505027bb167bab)	/home/lilith/tmp/refgpu-img30_base_off_bpp050-cpu-3.log
+img30_base_off_bpp050	gpu	1	0.093	(51cf2e8d84d5c61f5c4cc976ba3badd9, 8f465e82937a94a561ad2fea6b4a2723, cabdcba7c3aa367f8b2211593de2fbd0)	/home/lilith/tmp/refgpu-img30_base_off_bpp050-gpu-1.log
+img30_base_off_bpp050	gpu	2	0.093	(51cf2e8d84d5c61f5c4cc976ba3badd9, 8f465e82937a94a561ad2fea6b4a2723, cabdcba7c3aa367f8b2211593de2fbd0)	/home/lilith/tmp/refgpu-img30_base_off_bpp050-gpu-2.log
+img30_base_off_bpp050	gpu	3	0.095	(51cf2e8d84d5c61f5c4cc976ba3badd9, 8f465e82937a94a561ad2fea6b4a2723, cabdcba7c3aa367f8b2211593de2fbd0)	/home/lilith/tmp/refgpu-img30_base_off_bpp050-gpu-3.log
+img30_high_off_bpp050	cpu	1	2.335	(0947678838332a0d6d8deb26cadaea13, 2877ff5c5ebe522e0198d87c0357eaf8, b4dd600b4d951b9b172f3e203c1c7e0a)	/home/lilith/tmp/refgpu-img30_high_off_bpp050-cpu-1.log
+img30_high_off_bpp050	cpu	2	2.364	(0947678838332a0d6d8deb26cadaea13, 2877ff5c5ebe522e0198d87c0357eaf8, b4dd600b4d951b9b172f3e203c1c7e0a)	/home/lilith/tmp/refgpu-img30_high_off_bpp050-cpu-2.log
+img30_high_off_bpp050	cpu	3	2.358	(0947678838332a0d6d8deb26cadaea13, 2877ff5c5ebe522e0198d87c0357eaf8, b4dd600b4d951b9b172f3e203c1c7e0a)	/home/lilith/tmp/refgpu-img30_high_off_bpp050-cpu-3.log
+img30_high_off_bpp050	gpu	1	0.164	(768b5f27811af6744f02759f6dfe4142, c8df8d6a7e6dc0aff1be32f924f7cdf5, f5cbd58673f4f733aaee070e3f97a92c)	/home/lilith/tmp/refgpu-img30_high_off_bpp050-gpu-1.log
+img30_high_off_bpp050	gpu	2	0.160	(768b5f27811af6744f02759f6dfe4142, c8df8d6a7e6dc0aff1be32f924f7cdf5, f5cbd58673f4f733aaee070e3f97a92c)	/home/lilith/tmp/refgpu-img30_high_off_bpp050-gpu-2.log
+img30_high_off_bpp050	gpu	3	0.157	(768b5f27811af6744f02759f6dfe4142, c8df8d6a7e6dc0aff1be32f924f7cdf5, f5cbd58673f4f733aaee070e3f97a92c)	/home/lilith/tmp/refgpu-img30_high_off_bpp050-gpu-3.log
+img01_base_off_bpp050	cpu	1	1.246	(4950f006dd62404dccb960188f747000, 134274704ded814d2b667edad7f314a3, e9271e89a57cebb1e116d139116114d4)	/home/lilith/tmp/refgpu-img01_base_off_bpp050-cpu-1.log
+img01_base_off_bpp050	cpu	2	1.224	(4950f006dd62404dccb960188f747000, 134274704ded814d2b667edad7f314a3, e9271e89a57cebb1e116d139116114d4)	/home/lilith/tmp/refgpu-img01_base_off_bpp050-cpu-2.log
+img01_base_off_bpp050	cpu	3	1.215	(4950f006dd62404dccb960188f747000, 134274704ded814d2b667edad7f314a3, e9271e89a57cebb1e116d139116114d4)	/home/lilith/tmp/refgpu-img01_base_off_bpp050-cpu-3.log
+img01_base_off_bpp050	gpu	1	0.292	(e3bd5eed457ab69b1ebea75f4e67ad34, bbc12d3cd141428da86813a7acb35618, 39c555123a219eb29e023cebeb641450)	/home/lilith/tmp/refgpu-img01_base_off_bpp050-gpu-1.log
+img01_base_off_bpp050	gpu	2	0.282	(e3bd5eed457ab69b1ebea75f4e67ad34, bbc12d3cd141428da86813a7acb35618, 39c555123a219eb29e023cebeb641450)	/home/lilith/tmp/refgpu-img01_base_off_bpp050-gpu-2.log
+img01_base_off_bpp050	gpu	3	0.288	(e3bd5eed457ab69b1ebea75f4e67ad34, bbc12d3cd141428da86813a7acb35618, 39c555123a219eb29e023cebeb641450)	/home/lilith/tmp/refgpu-img01_base_off_bpp050-gpu-3.log

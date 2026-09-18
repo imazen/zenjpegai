@@ -1,0 +1,33 @@
+gpu_decode_2026-09-17_radv_igpu.tsv
+
+Second hardware adapter: the Ryzen 9 9950X3D's integrated Radeon, Mesa RADV. Two partial runs
+concatenated (SOP first, then BOP) because a full sweep does not survive on this driver — see
+below. The file is a data point about the *adapter*, not a sweep: it has no HOP rows and no
+squares above 512.
+
+adapter: AMD Ryzen 9 9950X3D 16-Core Processor (RADV RAPHAEL_MENDOCINO)
+  [Vulkan IntegratedGpu; radv Mesa 26.0.8-1ubuntu0.3]. The name contains no "Radeon", so select
+  it with `--adapter RADV`. Its render node (/dev/dri/renderD128) is root:render, so the run
+  needs the `render` group, unlike the NVIDIA device whose nodes are world-readable.
+wgpu: 30.0.1
+host: dev (Ryzen 9 9950X3D, 32 threads), Ubuntu, kernel 7.0.0-31-generic, shared with other
+  agents. The iGPU shares the CPU's memory controller, so its numbers and the cpu_* columns of
+  the same rows contend with each other.
+commands:
+  gpu_bench --adapter RADV --ops sop --rounds 3 --max-size 256
+  gpu_bench --adapter RADV --ops bop --rounds 3 --max-size 64
+  (both under `sudo -u lilith -g render env HOME=/home/lilith RAYON_NUM_THREADS=8 nice -n 19`)
+commit: 711233ad
+
+What it says: the iGPU runs the transforms correctly but is not a useful target for them. SOP
+560x888 takes 88.9 ms of device time against 4.5 ms on the RTX 2080 (20x) and 11.0 ms on the
+crate's own 8-thread CPU engine (8x) — the CPU path is the right fallback on a machine like
+this, which is what `ContextOptions::allow_software = false` already implies for software
+rasterisers and should arguably imply for integrated ones too.
+
+**Driver limit found:** `--ops sop,bop,hop --max-size 512` lost the device
+("Error in Device::poll: Validation Error / Parent device is lost") after finishing the SOP
+sizes, i.e. inside BOP at a square between 128 and 512. BOP at 64x64, 560x888 and the whole
+2096x1400 six-tile stream complete, so it is not a size limit as such; the likely cause is the
+kernel-submission watchdog on a compute pass that holds the iGPU for a long time while it is
+also driving the desktop. Not investigated further.

@@ -1,0 +1,44 @@
+gpu_decode_2026-09-17_rtx2080.tsv
+
+First sweep of this crate's GPU backend on a hardware GPU. The "before" of the same sweep, with
+`gpu/` as it was at 417be423, is gpu_decode_2026-09-17_rtx2080_pretuning.tsv.
+
+adapter: NVIDIA GeForce RTX 2080 [Vulkan DiscreteGpu; NVIDIA 580.178.04] (proprietary driver;
+  nouveau blacklisted, /dev/nvidia* world-readable, nvidia_uvm loaded, persistence mode on).
+  8 GiB. Vulkan instance 1.4.341 (libvulkan1 1.4.341.0-1). Under load `nvidia-smi` reports SM
+  1515 MHz and memory 7000 MHz, so the card was not stuck at idle clocks.
+wgpu: 30.0.1
+host: dev (Ryzen 9 9950X3D, 32 threads, 60 GiB), Ubuntu, kernel 7.0.0-31-generic. Shared with
+  other agents.
+command: RAYON_NUM_THREADS=8 nice -n 19 gpu_bench --adapter "NVIDIA GeForce RTX 2080"
+  --rounds 7 --max-size 4096 --out <this file>
+commit: 711233ad
+columns: header comment of gpu/examples/gpu_bench.rs. `gpu_device_ms` is the sum of the tiles'
+  compute-pass durations from GPU timestamp queries; `gpu_wall_ms` adds the latent upload, the
+  submit and the readback of three f32 planes. cpu_mt_ms is this crate's CPU engine with
+  RAYON_NUM_THREADS=8 (not the box's 32 threads, so it understates a full-box CPU run);
+  cpu_1t_ms is one thread. Every number is the median of interleaved rounds.
+
+Crossover, GPU wall against the 8-thread CPU engine, from the `synthesis` rows:
+  SOP   between 256x256 (2.49 vs 1.89 ms, CPU wins) and 384x384 (2.92 vs 3.40, GPU wins)
+  BOP   between 128x128 (2.59 vs 1.10, CPU) and 256x256 (3.07 vs 2.96, GPU)
+  HOP   between 64x64 (9.63 vs 4.32, CPU) and 128x128 (10.42 vs 11.57, GPU)
+The heavier the transform, the smaller the picture at which the GPU wins; the GPU's floor is the
+25 to 160 dispatches a picture costs however small it is. At 1024x1024 the GPU is 2.2x (SOP),
+1.4x (BOP) and 1.2x (HOP) the 8-thread CPU, and 7x / 5.7x / 4x one thread.
+
+Two caveats, both visible in the file:
+
+* **Sustained clocks.** A size sweep drives the card continuously, so the later (bigger) rows run
+  at sustained rather than boost clocks. The same 1024x1024 HOP picture measures 742.7 ms here
+  and 552.2 ms in gpu_profile_2026-09-17_rtx2080.tsv, where each size gets a fresh context and
+  only two sizes are run. Both are honest; the sweep is the number for a decoder under load, the
+  profile is the number for one picture. Before / after comparisons in gpu/README.md use the
+  profile pair, measured back to back under identical conditions.
+* **Shared box.** A few rows are visibly off the curve (e.g. Hop 384x384 at 68.07 ms against
+  42.93 ms in an earlier run of the same binary; the pretuning file has its own outlier at the
+  same cell). Read the curve, not a single row.
+
+Readback, not arithmetic, dominates the largest pictures: SOP 4096x4096 is 139.0 ms of device
+time and 224.8 ms of wall, the difference being 201 MB of f32 planes over PCIe. The
+`decode_to_gpu` + `to_rgba_texture` path avoids that copy entirely.

@@ -66,41 +66,113 @@ Notes for the wasm build:
 - The first picture of each size compiles pipelines and builds bind groups (`Timing::plans_built`);
   later pictures of the same size replay cached plans.
 
-## Status (2026-09-17, stopped early on a budget change)
+## Status (2026-09-17, first hardware run and first tuning pass)
 
-Done and gated (`just gpu-test`, numbers in `PORTING.md`): kernel set, SOP / BOP / HOP synthesis
-with tiling and regions, `GpuDecoder`, presentation path, wasm32 build, benchmark harness.
+Done and gated (`just gpu-test` on an RTX 2080, numbers in `PORTING.md`): kernel set,
+SOP / BOP / HOP synthesis with tiling and regions, `GpuDecoder`, presentation path, wasm32
+build, benchmark harness, per-dispatch profiling.
+
+### What the hardware says
+
+`benchmarks/gpu_decode_2026-09-17_rtx2080.{tsv,meta}` (RTX 2080, NVIDIA 580.178.04),
+`..._rtx2080_pretuning.tsv` for the same sweep before the tuning commit, `..._radv_igpu.tsv` for
+the machine's integrated Radeon, `gpu_reference_2026-09-17.{tsv,meta}` for the reference
+software on the same card. The box is shared with other agents; medians over seven interleaved
+rounds absorb most of that but not all, and the `.meta` files name the rows that are visibly off.
+
+- **The driver is the single biggest factor.** The same card on Mesa NVK (open) needs 20.4 ms of
+  device time for a 64 x 64 SOP synthesis — i.e. per-dispatch overhead only — against 1.1 ms on
+  the proprietary driver, and 28.8 ms against 3.7 ms at 560 x 888. Conclusions about this code
+  cannot be drawn from an NVK run.
+- **Crossover against the crate's own CPU engine** (8 rayon threads on a 9950X3D, so a
+  conservative CPU): SOP from about 384 x 384, BOP from about 256 x 256, HOP from about
+  128 x 128 — the heavier the transform, the smaller the picture at which the GPU wins. Below
+  that the GPU's fixed cost (a whole-picture synthesis is 25 to 160 dispatches however small the
+  picture) dominates: SOP 64 x 64 is 1.4 ms on the GPU against 0.5 ms on the CPU.
+- **The win is modest, not a rout**: at 1024 x 1024 the GPU is 2.2x the 8-thread CPU for SOP,
+  1.4x for BOP, 1.1x for HOP. Against a single CPU thread it is 7x / 5.7x / 4x.
+- **Cold start is Vulkan, not shader compilation.** Creating the instance, adapter and device
+  costs 180-210 ms once per process (884 ms on the very first process after a driver load);
+  compiling all the pipelines of an operating point and building its plans costs 2.8 ms (BOP,
+  9 pipelines) to 8.3 ms (HOP, 23). A pipeline cache would therefore buy single-digit
+  milliseconds, and `wgpu::Device::create_pipeline_cache` is `unsafe`, which this crate forbids.
+
+### Tuning done, with numbers
+
+Three changes, chosen from the per-dispatch profile (`gpu_bench --profile`, committed as
+`benchmarks/gpu_profile_2026-09-17_rtx2080.{tsv,meta}` for both sides). All numbers below are
+device time from the two profile runs, taken back to back on an otherwise idle card:
+
+| change | what it does | HOP 1024 x 1024 |
+| --- | --- | --- |
+| `Graph::conv_res` | computes the ResAU gate and the residual add in the convolution's store instead of a pointwise dispatch over the whole map | dispatches per picture SOP 36 -> 30, BOP 33 -> 27, HOP 172 -> 158 |
+| transposed convolution | visits only the taps whose divisibility test used to pass: 4 of 16 at k=4 stride 2, at most 4 of 9 at k=3 | `convt_k3_s2` 36.5 -> 28.1 ms |
+| depthwise 3x3 | stages its `(WG+2)^2` halo in workgroup memory, 1600 bytes, one channel block per workgroup: 9 reads per output pixel become 1.56 | `depthwise3x3` 134.3 -> 64.8 ms |
+
+Whole-picture device time, same two runs:
+
+| | SOP 560x888 | SOP 1024² | BOP 560x888 | BOP 1024² | HOP 560x888 | HOP 1024² |
+| --- | --- | --- | --- | --- | --- | --- |
+| before | 4.54 ms | 8.47 ms | 10.72 ms | 23.80 ms | 259.1 ms | 635.0 ms |
+| after | 3.73 ms | 7.36 ms | 9.91 ms | 22.36 ms | 237.0 ms | 552.2 ms |
+
+Every one of the three keeps each output's summation order, so `just gpu-test` reports exactly
+the same parity numbers before and after — that is the check that they are speed-ups and not
+approximations.
+
+Also fixed on hardware: the presentation path now rounds in the shader (half to even, like the
+CPU output stage) instead of trusting the driver's float-to-`rgba8unorm` rounding, which on
+NVIDIA disagreed on 46533 of 1491840 samples (28 after the fix, all by one step). llvmpipe had
+agreed, so this only appeared on hardware.
+
+**Falsified, do not re-try as-is:** register tiling over *pixels* in the convolution (2x2 and
+2x1 outputs per invocation, which amortises the `4 * ob` weight loads of each tap). It helps SOP
+(1024 x 1024: 8.48 -> 7.23 ms) and loses where it matters — BOP 22.4 -> 26.3 ms, HOP 555 -> 711
+ms — and a rule that only tiles convolutions with few input blocks is worse than not tiling at
+all. The cost tracks `ob * px * py` accumulators, i.e. register pressure, so the next thing to
+try is a *smaller* `ob` together with a pixel tile, not a bigger tile.
 
 **Open, in order:**
 
-1. **No hardware GPU has run this code.** On the dev box the render nodes (`/dev/dri/renderD12*`,
-   an RTX 2080 on nouveau/NVK and the Radeon iGPU) are not accessible to the login user (not in
-   the `render` group), so Vulkan only offers llvmpipe. All parity numbers and the committed
-   `benchmarks/gpu_decode_2026-09-17_llvmpipe.tsv` come from that software rasteriser: they prove
-   correctness and that the harness works, and say nothing about GPU speed or the CPU / GPU
-   crossover size. Next: `sudo usermod -aG render,video $USER` (new login), then
-   `ZENJPEGAI_GPU_ADAPTER=<name> just gpu-test` and
-   `cargo run --release -p zenjpegai-gpu --example gpu_bench -- --adapter <name> --out benchmarks/gpu_decode_<date>.tsv`
-   (+ a `.meta` with GPU, driver, wgpu version, commit).
-2. **Kernel tuning has not started** (it needs item 1): `OB` (output blocks per invocation,
-   `layers.rs::pick_ob`, now at most 4), workgroup size (`kernels.rs::WG`), a specialised
-   stride-2 transposed convolution without the parity branches, fusing the ResAU gate into the
-   1x1 convolution, `nsys` / timestamp breakdown per layer. `shader-f16` is not implemented.
-3. **Browser**: never run in a browser (no WebGPU-capable browser on the box). The web build has to
-   call the API below; nothing in `wasm/` or `web/` references this crate yet.
-4. Latent upload converts planar to HWC4 on the CPU per picture (0.4 ms for 560 x 888); the
-   float readback is 12 bytes per pixel (use the texture path to avoid it).
+1. **The convolutions run at 4-7% of the card's f32 peak** (e.g. the 3x3 stride-2 of HOP's CAB:
+   9.7 G multiply-adds in 48.9 ms = 0.39 TFLOP/s against ~10 TFLOP/s). The profile says HOP is
+   27% 1x1 convolution, 12% depthwise, 41% the 3x3 family. Neither weight bandwidth nor
+   arithmetic explains the gap, so the next step is to find what does (occupancy and stall
+   reasons per kernel; `nsys`/`ncu` are usable now that the proprietary driver is installed,
+   which they were not on NVK) before writing another kernel. Candidates named but not measured:
+   workgroup-memory tiling for the 3x3 (needs input-channel chunking, which changes the
+   summation order — the parity gate would have to be re-measured), a GEMM-shaped 1x1 with
+   workgroup-staged weights, `WG` other than 8, `OB` other than `layers.rs::pick_ob`'s at-most-4,
+   `shader-f16` (not implemented; parity would have to be re-measured).
+2. **Readback dominates large pictures**: 4096 x 4096 SOP is 139 ms of device time and 225 ms of
+   wall, the difference being 201 MB of `f32` planes over PCIe. The texture path
+   (`decode_to_gpu` + `to_rgba_texture`) avoids it; the plane path could read back 8-bit instead.
+3. **Browser**: never run in a browser (no WebGPU-capable browser on the box). The web build has
+   to call the API below; nothing in `wasm/` or `web/` references this crate yet.
+4. Latent upload converts planar to HWC4 on the CPU per picture (0.4 ms for 560 x 888).
 5. No cancellation (`enough::Stop`) on the GPU path; `GpuDecoder` has no `max_channels`
    (progressive decode) option.
+6. The integrated Radeon (RADV) loses the device during a BOP size sweep; see
+   `benchmarks/gpu_decode_2026-09-17_radv_igpu.meta`. It is 8x slower than the crate's own CPU
+   engine anyway, so the useful fix is probably to decline integrated adapters by default rather
+   than to chase the hang.
 
 ## Tests and benchmarks
 
 ```
 just gpu-test                          # needs an adapter, the checkpoints and the reference vectors
-ZENJPEGAI_GPU_ADAPTER=nvidia just gpu-test
+ZENJPEGAI_GPU_ADAPTER=GeForce just gpu-test
 ZENJPEGAI_GPU_ALLOW_SOFTWARE=1 just gpu-test   # llvmpipe / SwiftShader / WARP
 cargo run --release -p zenjpegai-gpu --example gpu_bench -- --out benchmarks/gpu_decode_<date>.tsv
+just gpu-profile GeForce               # per-dispatch device time, one compute pass per dispatch
+scripts/bench/reference_gpu.sh 3       # the reference software, CPU and GPU, on the same streams
 ```
+
+`--adapter` matches a substring of the adapter *name*: the integrated Radeon of a Ryzen calls
+itself "AMD Ryzen 9 9950X3D 16-Core Processor (RADV RAPHAEL_MENDOCINO)", so `--adapter RADV`,
+not `--adapter Radeon`. Its render node is `root:render` while the NVIDIA nodes are
+world-readable, so a run on it needs the `render` group
+(`sudo -u <user> -g render env HOME=... gpu_bench ...` works without a new login).
 
 `tests/kernels.rs` checks every kernel against the core crate's plain-loop oracle;
 `tests/decode_ref.rs` runs whole reference streams (same gate as the CPU engine) and the

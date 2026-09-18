@@ -50,7 +50,7 @@ against reference-produced data passes. "stub" and "partial" mean what they say.
 | `filters::efe_nonlinear` | `filters/EFEnonlinear/EFEnonlinear.py`: `decompress`, `LumaAidedAdaptiveNonlinearFilter_apply`, `apply_OnoffSwitch`, `downsample`, `deinteger` | ported: per-tile two-layer 1x1 network (1 and 4 tiles checked), U-only / V-only / both, on/off masks with values 0, 1, 2 and block sizes 112 / 96, 4:4:4 / 4:2:2 / 4:2:0 sources, odd sizes. Same `Unsupported` formats as EFE linear | `tests/filters_efe_ref.rs`: **bit-identical** to the reference on all 16 streams that enable it (max abs error 0); `tests/decode_ref.rs` as above |
 | `filters::lef` | `filters/LEF/LEFfilter.py` (`decompress`, `adptive_sharpness`), nearest up-sampling as `torch.nn.functional.interpolate` does it (`floor(dst * (in / out))` in f32) | ported: luma only, so every chroma format takes the same path. **Unverified: bit depths other than 8** (the range is taken as `2^bit_depth - 1`; the decoder rejects 10-bit streams before it gets here) | `tests/filters_lef_icci_ref.rs`: fed the reference's own input plane, the output is **bit-identical** to the reference's on 4 streams (`model_id` 1 and 2: two of the four constant rows are exercised), on every tier, threaded or not. `tests/decode_ref.rs::img30_base_lef_bpp050` and `decoder_api_on_filter_streams`: whole decode |
 | `filters::icci` + `model::icci` | `filters/eICCI/{icci_filter.py, icci_models.py, model_idxes.py, params.py}`, `base_layers/conv_layers.py::ResidualBlock_BN_RectKernel`, `tiling.py::_adjust_boundary_tiles`, short lists from `cfg/pipeline.json` | ported for 4:4:4: per-tile network selection (long and short lists, all three operating points' banks), the filter's own overlapping tiling with the 176-sample boundary adjustment, two-level Haar transform, both trunks on `nn::fast` (batch norm and residual scales folded into the convolutions), networks cached in `Decoder`. **Missing: 4:2:0 / 4:2:2 (`Unsupported`; the reference encoder never enables eICCI there, so no oracle), tiling combined with a non-displayed border (`Unsupported`, unverified), HOP bank and long-list indices (code path shared, no oracle stream selects them), bit depths other than 8** | `tests/filters_lef_icci_ref.rs`: fed the reference's input planes, output within 1.1e-4 (0..255) on 4 streams incl. a 2096x1400 one with six filter tiles; bit-identical across tiers. `tests/decode_ref.rs`: `img30_base_eicci_bpp050`, `img01_base_eiccitiles_lef_bpp050` |
-| `gpu/` (`zenjpegai-gpu`, separate workspace member; the core crate does not depend on wgpu) | same sources as `model::synthesis` / `model::attention`; runs them as WGSL compute shaders through wgpu 30 | ported: SOP, BOP, HOP synthesis (luma + chroma), synthesis tiling and independent regions, `GpuDecoder` (CPU entropy / latent stage and output stage, GPU synthesis), readback-free `rgba8unorm` presentation; builds for wasm32. **Never run on a hardware GPU or in a browser; no kernel tuning, no f16** (`gpu/README.md` "Status") | `gpu/tests/kernels.rs`: every kernel vs `nn::reference` / `nn::fast::math`, max relative error 1.7e-6 (conv, transposed conv), 2.5e-7 (attention), exact copies / shuffles. `gpu/tests/decode_ref.rs`: planes vs reference 3.2e-4 (SOP), 4.3e-4 (BOP), 3.4e-4 (HOP), 6.6e-4 / 5.6e-4 (2096x1400, 6 tiles / 12 tiles in 2 independent regions), bound 3e-3; 8-bit output differs by 1 in 50 / 59 / 35 of 1,491,840 and 348 / 373 of 8,803,200 samples; vs the CPU engine planes differ by at most 9.2e-4. All measured on llvmpipe (Mesa 26.0.8), feature `gpu-tests`, `just gpu-test` |
+| `gpu/` (`zenjpegai-gpu`, separate workspace member; the core crate does not depend on wgpu) | same sources as `model::synthesis` / `model::attention`; runs them as WGSL compute shaders through wgpu 30 | ported: SOP, BOP, HOP synthesis (luma + chroma), synthesis tiling and independent regions, `GpuDecoder` (CPU entropy / latent stage and output stage, GPU synthesis), readback-free `rgba8unorm` presentation; builds for wasm32. **Never run in a browser; no f16**; one tuning pass done, the convolutions still run at 4-7% of the card's f32 peak (`gpu/README.md` "Status") | `gpu/tests/kernels.rs`: every kernel vs `nn::reference` / `nn::fast::math`, max relative error 1.7e-6 (conv, transposed conv), 2.5e-7 (attention), exact copies / shuffles. `gpu/tests/decode_ref.rs`: planes vs reference 3.2e-4 (SOP), 4.3e-4 (BOP), 3.4e-4 (HOP), 6.6e-4 / 5.6e-4 (2096x1400, 6 tiles / 12 tiles in 2 independent regions), bound 3e-3; 8-bit output differs by 1 in 50 / 59 / 35 of 1,491,840 and 348 / 373 of 8,803,200 samples; vs the CPU engine planes differ by at most 9.2e-4. All measured on an **RTX 2080** (NVIDIA 580.178.04, `ZENJPEGAI_GPU_ADAPTER=GeForce just gpu-test`), feature `gpu-tests`; the numbers above are that run and are unchanged by the tuning of 711233ad, which keeps every output's summation order. 8-bit output differs by 1 in 53 / 54 / 33 of 1,491,840 (SOP / BOP / HOP) and 348 / 365 of 8,803,200 (2096x1400, 6 tiles / 12 tiles in 2 independent regions) samples; the `rgba8unorm` presentation texture differs from the CPU output stage in 28 of 1,491,840 samples, all by one step (it was 46,533 until the shader rounded half-to-even itself instead of trusting the driver's float-to-unorm conversion — llvmpipe had agreed, NVIDIA did not). Timings: `benchmarks/gpu_decode_2026-09-17_rtx2080.{tsv,meta}`, `gpu_profile_2026-09-17_rtx2080.{tsv,meta}`, reference software on the same card `gpu_reference_2026-09-17.{tsv,meta}` |
 
 ## Accuracy of the float path (measured, 560x888 test image 00030, upstream b9e573f, torch 1.10.2 CPU)
 
@@ -441,15 +441,29 @@ Appended by the browser (`wasm`) agent, 2026-09-17, stopped early on a budget ch
 - Post-filter weight loaders must call `model::with_checkpoint` or `pack-models` cannot see
   their tensors (bundles hold no post-filter checkpoints today).
 
-Appended by the GPU (`gpu`) agent, 2026-09-17, stopped early on a budget change:
+Appended by the GPU (`gpu`) agent, 2026-09-17; second pass, on hardware:
 
-- Landed: `gpu/` crate (kernels, plans, SOP / BOP / HOP synthesis, `GpuDecoder`, presentation,
-  benchmark harness, wasm32 build); gates and numbers in the `gpu/` row above.
-- Open: every number so far is from llvmpipe, because the box's render nodes are not accessible
-  to the login user. First step for whoever continues: get a hardware adapter
-  (`sudo usermod -aG render,video $USER`), run `just gpu-test` and `gpu_bench` on it, commit
-  `benchmarks/gpu_decode_<date>.tsv` + `.meta`, report the CPU / GPU crossover size; then tune
-  (list in `gpu/README.md` "Status"); then wire into `wasm/` / `web/` and run it in a browser.
+- Landed: the whole backend now runs on a real GPU (RTX 2080, NVIDIA 580.178.04). `just gpu-test`
+  passes there with the parity numbers in the `gpu/` row above; the llvmpipe numbers it replaces
+  were equal or looser. Full size sweep 64 to 4096 plus the reference streams:
+  `benchmarks/gpu_decode_2026-09-17_rtx2080.{tsv,meta}` (before the tuning:
+  `..._rtx2080_pretuning.tsv`; the integrated Radeon: `..._radv_igpu.{tsv,meta}`).
+  Per-dispatch device time before and after tuning: `gpu_profile_2026-09-17_rtx2080.{tsv,meta}`.
+  The reference software decoding the same streams on CPU and GPU:
+  `gpu_reference_2026-09-17.{tsv,meta}` + `scripts/bench/reference_gpu.sh`.
+- Crossover against this crate's own CPU engine (8 threads of a 9950X3D): SOP about 384x384,
+  BOP about 256x256, HOP about 128x128. At 1024x1024 the GPU is 2.2x / 1.4x / 1.2x that CPU and
+  7x / 5.7x / 4x a single thread.
+- Against the reference software on the same card (whole stream, 560x888): reference CPU
+  (1 thread, which is what it forces) 0.133 / 0.221 / 2.358 s for SOP / BOP / HOP, reference GPU
+  0.087 / 0.093 / 0.160 s, this crate's CPU engine at 8 threads 0.016 / 0.024 / 0.401 s, this
+  crate's GPU 0.016 / 0.022 / 0.257 s. The reference's GPU path has an ~85 ms per-picture Python
+  floor, so only HOP compares kernels: there cuDNN is 1.6x faster than these WGSL kernels.
+- Open, in order (detail in `gpu/README.md` "Status"): find out why the convolutions only reach
+  4-7% of the card's f32 peak (`ncu` works now) before writing another kernel; 8-bit instead of
+  f32 readback for large pictures; wire into `wasm/` / `web/` and run it in a browser; `f16`;
+  cancellation and `max_channels`. Falsified and recorded there: pixel register tiling in the
+  convolution (helps SOP, loses on BOP and HOP).
 
 Appended by the encoder agent, 2026-09-17, stopped early on a budget change. **There is no
  encoder yet**: deliverable 1 of 7 landed (networks + Gate 1), nothing of 2..7.
