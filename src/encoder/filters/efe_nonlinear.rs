@@ -34,15 +34,10 @@ use crate::header::{EfeNonlinearHeader, EfeNonlinearTiles};
 use crate::nn::fast::Engine;
 use crate::tensor::Tensor;
 
-use super::efe_linear::{lstsq, psnr};
+use super::efe_linear::{BETAS, WEIGHT_PRECISION, lstsq, psnr};
 
-/// `base_model_beta` (`core_models/CCS_SGMM/params.py`): the PSNR weight of the filter loss,
-/// indexed by the model in use.
-const BASE_MODEL_BETA: [f64; 4] = [0.002, 0.012, 0.075, 0.5];
 /// `lossModifier` — 1.5 for the non-linear filter (`EFElinear` uses 0.5).
 const LOSS_MODIFIER: f64 = 1.5;
-/// `wP`, the signalled weight precision.
-const WEIGHT_PRECISION: f64 = 16.0;
 /// `NonlinearFilter_tile_width_base` / `_height_base`.
 const TILE_BASE: usize = 1200;
 /// `bSizes`: the on/off mask block size per model.
@@ -55,7 +50,7 @@ pub struct EfeNonlinearInput<'a> {
     pub eng: &'a Engine,
     /// Source chroma format (`s_ver` / `s_hor`) — the filter's `d_ver` / `d_hor`.
     pub meta: &'a SourceMeta,
-    /// `get_base_model_id()`: the active model, selecting `BASE_MODEL_BETA` and `BLOCK_SIZES`.
+    /// `get_base_model_id()`: the active model, selecting `BETAS` and `BLOCK_SIZES`.
     pub model_id: usize,
     /// `org_img_i` converted to YUV at the reconstruction's range (`img.to_YUV_()` +
     /// `convert_range_`): the source's planes at the source's chroma resolution.
@@ -292,7 +287,7 @@ pub fn decide(i: &EfeNonlinearInput<'_>) -> Result<EfeNonlinearOutput> {
             "EFE non-linear: reconstruction and source sizes differ",
         ));
     }
-    let beta = BASE_MODEL_BETA[i.model_id.min(BASE_MODEL_BETA.len() - 1)];
+    let beta = BETAS[i.model_id.min(BETAS.len() - 1)];
 
     // `LumaAidedAdaptiveNonlinearFilter_encoder` + `_apply` on `ans = rec`.
     let solve = solve_tiles(&rec_y, org, rec)?;

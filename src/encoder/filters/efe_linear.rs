@@ -620,12 +620,13 @@ pub(crate) fn lstsq(a: &[f64], b: &[f64], m: usize, n: usize) -> Result<Vec<f64>
 // `SplitDecide` / `searchCore` / `LumaAidedUpsampler_encoder`.
 // ---------------------------------------------------------------------------
 
-/// `betalist` (`SplitDecide`): the per-model weight of the PSNR term in the filter loss.
-const BETAS: [f64; 4] = [0.002, 0.012, 0.075, 0.5];
+/// `betalist` (`SplitDecide`) / `base_model_beta` (`EFEnonlinear`): the per-model weight
+/// of the PSNR term in the filter loss — the same `core_models/CCS_SGMM` table.
+pub(crate) const BETAS: [f64; 4] = [0.002, 0.012, 0.075, 0.5];
 /// `lossModifier`.
 const LOSS_MODIFIER: f64 = 0.5;
-/// `wP`, the signalled weight precision.
-const WEIGHT_PRECISION: f64 = 16.0;
+/// `wP`, the signalled weight precision (16 bits for EFE linear *and* non-linear).
+pub(crate) const WEIGHT_PRECISION: f64 = 16.0;
 /// `max_samples` of `linearSolve`: above it the design matrix is subsampled.
 const MAX_SOLVE_SAMPLES: f64 = 2_000_000.0;
 

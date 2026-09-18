@@ -106,6 +106,7 @@ struct Args {
     efe_linear: bool,
     efe_dctif_only: bool,
     efe_nonlinear: bool,
+    tools_on: bool,
     ans_threads: u8,
     regions: Option<zenjpegai::encoder::RegionMode>,
     quality_map: Option<PathBuf>,
@@ -141,6 +142,7 @@ fn parse_args() -> Result<Args, String> {
         efe_linear: false,
         efe_dctif_only: false,
         efe_nonlinear: false,
+        tools_on: false,
         ans_threads: 1,
         regions: None,
         quality_map: None,
@@ -218,15 +220,7 @@ fn parse_args() -> Result<Args, String> {
                         .map_err(|e| format!("--eicci-tile-samples: {e}"))?
                 };
             }
-            "--tools-on" => {
-                a.rvs = true;
-                a.grfs = true;
-                a.lsbs = true;
-                a.lef = true;
-                a.efe_linear = true;
-                a.efe_nonlinear = true;
-                a.eicci.get_or_insert_with(Default::default);
-            }
+            "--tools-on" => a.tools_on = true,
             "--efe-linear" => a.efe_linear = true,
             "--efe-dctif-only" => {
                 a.efe_linear = true;
@@ -420,26 +414,32 @@ fn run() -> Result<(), String> {
                     zenjpegai::encoder::read_png_rgb(&bytes).map_err(|e| format!("{e:?}"))?,
                 )
             };
-            let params = EncodeParams {
-                model_id: args.model_ids.first().copied().unwrap_or(1) as u8,
-                beta_displacement_log: [args.beta_disp; 2],
-                op: args.op.unwrap_or(OperatingPoint::Bop),
-                rvs: args.rvs,
-                grfs: args.grfs,
-                lsbs: args.lsbs,
-                lef: args.lef,
-                eicci: args.eicci,
-                efe_linear: args.efe_linear,
-                efe_dctif_only: args.efe_dctif_only,
-                efe_nonlinear: args.efe_nonlinear,
-                num_threads_z: args.ans_threads,
-                num_threads_r: args.ans_threads,
-                regions: args.regions,
-                c_ver: args.c_ver,
-                c_hor: args.c_hor,
-                diff_display: args.diff_display,
-                rate_estimate: args.rate_estimate,
+            // The tool set comes from `EncodeParams::tools_on` itself, so a tool added to
+            // the preset reaches `--tools-on` without another list to keep in sync; the
+            // individual `--rvs`/`--eicci`/… flags then layer on top.
+            let mut params = if args.tools_on {
+                EncodeParams::tools_on()
+            } else {
+                EncodeParams::default()
             };
+            params.model_id = args.model_ids.first().copied().unwrap_or(1) as u8;
+            params.beta_displacement_log = [args.beta_disp; 2];
+            params.op = args.op.unwrap_or(OperatingPoint::Bop);
+            params.rvs |= args.rvs;
+            params.grfs |= args.grfs;
+            params.lsbs |= args.lsbs;
+            params.lef |= args.lef;
+            params.eicci = args.eicci.or(params.eicci);
+            params.efe_linear |= args.efe_linear;
+            params.efe_dctif_only |= args.efe_dctif_only;
+            params.efe_nonlinear |= args.efe_nonlinear;
+            params.num_threads_z = args.ans_threads;
+            params.num_threads_r = args.ans_threads;
+            params.regions = args.regions;
+            params.c_ver = args.c_ver;
+            params.c_hor = args.c_hor;
+            params.diff_display = args.diff_display;
+            params.rate_estimate = args.rate_estimate;
             // `--quality-map`: an RGB mask at picture resolution, white = region of interest.
             let quality_map = match &args.quality_map {
                 None => None,
