@@ -11,6 +11,11 @@ pub mod math;
 mod simd;
 mod tensor;
 
+#[cfg(any(
+    target_arch = "x86_64",
+    target_arch = "aarch64",
+    target_arch = "wasm32"
+))]
 use archmage::prelude::*;
 
 pub(crate) use conv::for_each_row;
@@ -66,6 +71,10 @@ impl Tier {
     }
 
     /// Every tier this CPU supports, best first (for tests and benchmarks).
+    // On targets with no SIMD tier (e.g. i686) every `push` above is compiled out, leaving only
+    // the trailing `Tier::Scalar` push; clippy would rather that be a `vec![]` literal, but the
+    // `mut`/`push` shape is required on every other target.
+    #[allow(clippy::vec_init_then_push)]
     pub fn available() -> alloc::vec::Vec<Self> {
         let mut tiers = alloc::vec::Vec::new();
         #[cfg(all(target_arch = "x86_64", feature = "avx512"))]

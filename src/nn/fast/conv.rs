@@ -19,7 +19,7 @@ use archmage::prelude::*;
     target_arch = "wasm32"
 ))]
 use magetypes::simd::generic::f32x8;
-#[cfg(feature = "avx512")]
+#[cfg(all(target_arch = "x86_64", feature = "avx512"))]
 use magetypes::simd::generic::f32x16;
 
 use super::simd::{Lanes8, SimdF32};
