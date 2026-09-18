@@ -14,8 +14,11 @@
 //! Tiles are filtered **in place**, in raster order, exactly like the reference decoder: a tile
 //! reads the cores its predecessors already wrote inside its overlap margin (see `PORTING.md`).
 //!
-//! 4:2:0 / 4:2:2 pictures are rejected: the reference encoder never enables the filter for them
-//! and its decoder path for them (up-sample, filter, down-sample) cannot be produced as an oracle.
+//! Chroma-subsampled pictures (`4:2:0`, `4:2:2` sources): the reference up-samples the chroma
+//! planes to the luma size (`Image.to_444_`, bicubic), filters at 4:4:4, then down-samples back
+//! (`Image.to_format_`, bilinear); [`resize_bilinear`] reproduces its kernel bit for bit.
+//! `4:2:0` can never be *signalled* (`icci_enable_flag` is not coded for `s_ver == s_hor == 2`),
+//! but the filter path itself is exercised by a forced stream (see `PORTING.md`).
 
 use alloc::vec::Vec;
 
@@ -151,6 +154,55 @@ fn selection(
     Ok((y, uv))
 }
 
+/// Source index pair and blend weights of one output coordinate for `mode="bilinear"`,
+/// `align_corners=True` (`compute_source_index_and_lambda` in PyTorch's upsample kernel: a
+/// same-size axis just copies; otherwise `l1 = real - trunc(real)`, `l0 = 1 - l1`).
+fn linear_taps(dst: usize, in_len: usize, out_len: usize) -> (usize, usize, f32, f32) {
+    if out_len == in_len {
+        return (dst, dst, 1.0, 0.0);
+    }
+    let scale = if out_len > 1 {
+        (in_len - 1) as f32 / (out_len - 1) as f32
+    } else {
+        0.0
+    };
+    let real = scale * dst as f32;
+    let i0 = real as usize; // `static_cast<int64_t>`: truncates, and `real` is never negative
+    let i1 = i0 + usize::from(i0 + 1 < in_len);
+    let l1 = real - i0 as f32;
+    (i0, i1, 1.0 - l1, l1)
+}
+
+/// `F.interpolate(x, size, mode="bilinear", align_corners=True)` as PyTorch's CPU kernel
+/// computes it for the single-channel planes `Image.to_420_`/`to_422_` resize (a (1,1,H,W)
+/// tensor is contiguous in channels-last order, so the specialised kernel runs):
+/// `fma(h1*w1, i11, fma(h1*w0, i10, fma(h0*w0, i00, (h0*w1)*i01)))` — the weight products are
+/// rounded once, then each taps into the sum via a fused multiply-add. Verified bit for bit
+/// against `torch` 1.10.2 over every size this filter needs.
+fn resize_bilinear(src: &Tensor<f32>, out_h: usize, out_w: usize) -> Result<Tensor<f32>> {
+    if src.h == 0 || src.w == 0 {
+        return Err(Error::InvalidArgument("resize: empty input"));
+    }
+    let mut out = Tensor::<f32>::zeros(src.c, out_h, out_w)?;
+    let xs: Vec<(usize, usize, f32, f32)> =
+        (0..out_w).map(|x| linear_taps(x, src.w, out_w)).collect();
+    for c in 0..src.c {
+        let plane = src.plane(c);
+        for y in 0..out_h {
+            let (y0, y1, h0, h1) = linear_taps(y, src.h, out_h);
+            let row0 = &plane[y0 * src.w..][..src.w];
+            let row1 = &plane[y1 * src.w..][..src.w];
+            let dst = &mut out.plane_mut(c)[y * out_w..][..out_w];
+            for (d, &(x0, x1, w0, w1)) in dst.iter_mut().zip(&xs) {
+                let acc = libm::fmaf(h0 * w0, row0[x0], (h0 * w1) * row0[x1]);
+                let acc = libm::fmaf(h1 * w0, row1[x0], acc);
+                *d = libm::fmaf(h1 * w1, row1[x1], acc);
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// The core of a filtered tile (`full`: the tile at padded size) written back to `plane`.
 fn write_core(plane: &mut Tensor<f32>, tile: &FilterTile, full: &Tensor<f32>) {
     let (ox, oy) = tile.core_offset;
@@ -178,14 +230,39 @@ pub fn filter(
     stop: &dyn enough::Stop,
 ) -> Result<Planes> {
     let (ph, pw) = (image.y.h, image.y.w);
-    let same = |p: &Tensor<f32>| p.c == 1 && p.h == ph && p.w == pw;
-    if hdr.s_ver != 1 || hdr.s_hor != 1 || !same(&image.u) || !same(&image.v) {
-        return Err(Error::Unsupported(
-            "eICCI post-filter on a chroma-subsampled picture",
-        ));
-    }
     if image.y.c != 1 || ph == 0 || pw == 0 {
         return Err(Error::InvalidArgument("eICCI: empty picture"));
+    }
+    // `Image.to_444_()`: a subsampled source's chroma planes are bicubic-upsampled to the luma
+    // size and the filter runs at 4:4:4; `to_format_()` after the filter bilinear-downsamples
+    // them back. The header gives the source subsampling, the plane sizes must agree with it.
+    let chroma = match (hdr.s_ver, hdr.s_hor) {
+        (1, 1) => None,
+        (2, 2) => Some((ph.div_ceil(2), pw.div_ceil(2))),
+        (1, 2) => Some((ph, pw.div_ceil(2))),
+        _ => {
+            return Err(Error::Unsupported(
+                "eICCI post-filter on a chroma format other than 4:2:0 / 4:2:2",
+            ));
+        }
+    };
+    let same = |p: &Tensor<f32>| p.c == 1 && p.h == ph && p.w == pw;
+    if let Some((uh, uw)) = chroma {
+        if image.u.c != 1
+            || image.v.c != 1
+            || (image.u.h, image.u.w) != (uh, uw)
+            || (image.v.h, image.v.w) != (uh, uw)
+        {
+            return Err(Error::InvalidData(
+                "eICCI: chroma planes do not match the source subsampling",
+            ));
+        }
+        image.u = crate::decoder::output::resize_bicubic(&image.u, ph, pw)?;
+        image.v = crate::decoder::output::resize_bicubic(&image.v, ph, pw)?;
+    } else if !same(&image.u) || !same(&image.v) {
+        return Err(Error::InvalidData(
+            "eICCI: chroma planes do not match the source subsampling",
+        ));
     }
     if !(1..=16).contains(&hdr.bit_depth) {
         return Err(Error::InvalidArgument("eICCI: bit depth"));
@@ -253,6 +330,11 @@ pub fn filter(
         for s in &mut p.data {
             *s = s.clamp(0.0, 1.0) * range;
         }
+    }
+    // `img_flt.to_format_(source subsampling)`: chroma back down to its planes' size.
+    if let Some((uh, uw)) = chroma {
+        image.u = resize_bilinear(&image.u, uh, uw)?;
+        image.v = resize_bilinear(&image.v, uh, uw)?;
     }
     Ok(image)
 }
