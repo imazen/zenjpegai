@@ -484,16 +484,24 @@ Appended by the encoder agent, 2026-09-17, stopped early on a budget change. **T
 ### Zen codec standards (state 2026-09-18, agent `standards2`; missing first)
 
 User instruction: "apply all zen codec standards including whereat, enough, zencodec traits, bounded and
-minimized mem use, and fast build times." Seven deliverables were scoped; six landed, one open.
-
-**Not started**
-
-- **Build times**: only one data point exists: clean `cargo build --release --features cli -j 8 --timings` of
-  663b86d took 7.6 s wall on the 9950X3D (incremental release profile). `cargo llvm-lines` (installed) was not run;
-  the `nn/fast/conv.rs` tier x block x stride instantiation audit is open. Nothing was recorded under
-  `benchmarks/build_time_*`.
+minimized mem use, and fast build times." Seven deliverables were scoped; all seven landed.
 
 **Landed (on origin/main)**
+
+- **Build times**: DONE 2026-09-18, `benchmarks/build_time_2026-09-18.md`. Fully-clean release
+  build (no cache at all): default features 5.18 s / 430 MB peak RSS, `cli,zencodec` 10.84 s /
+  469 MB, `zenjpegai-gpu` (wgpu's own dependency tree, not this crate's code) the outlier at
+  15.48 s / 909 MB. With deps cached, rebuilding just this crate from scratch is ~3.4 s
+  regardless of feature set; incremental (`touch src/lib.rs`) is 0.36 s. `cargo llvm-lines
+  --release`: 271,274 total IR lines, 5,196 symbols, no function with more than 2 monomorphized
+  copies crate-wide. The `nn/fast/conv.rs` / `int_conv.rs` tier x block x stride family (the
+  open audit item) is present — roughly a dozen `conv_row_s::<Tier, V, B, STRIDE>` /
+  `int_row::<Tier, V, B, SHIFT>` instantiations, ~271-389 lines each, ~2-3% of the binary's IR —
+  but that is normal archmage/magetypes one-instantiation-per-tier fan-out, not bloat; the
+  largest functions by line count are ordinary parsing/business logic
+  (`weights::pickle::load` 4,985 lines, `Encoder::encode_from_latents` 2,822,
+  `PictureHeader::parse` 2,186), not generics. Verdict: no cheap win found, none taken — the
+  numbers do not motivate a build-time optimization pass.
 
 - **CI** (`.github/workflows/ci.yml`, all 10 jobs green on the first real run —
   `https://github.com/imazen/zenjpegai/actions/runs/35290942272`): `fmt` (ubuntu, once); `test` matrix

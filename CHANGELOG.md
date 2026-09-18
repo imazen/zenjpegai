@@ -6,6 +6,24 @@
 <!-- Breaking changes that will ship together in the next major (or minor for 0.x) release. -->
 
 ### Added
+- CI (`.github/workflows/ci.yml`): fmt, clippy `-D warnings` + tests on ubuntu-latest /
+  windows-11-arm / macos-15-intel / macos-latest, `i686-unknown-linux-gnu` via `cross`, a
+  no_std check (native + `wasm32-unknown-unknown`) with a dedicated "public API only" lint step,
+  `zenjpegai-gpu` / `zenjpegai-wasm` type-checks, and an MSRV job pinned to the verified `1.89.0`.
+  README CI badge.
+- `no_std` + `alloc` verified clean (`cargo check`/`clippy --no-default-features`, native and
+  `wasm32-unknown-unknown`); `just no-std`.
+- `zencodec` feature (`src/codec.rs`): `JpegAiDecoderConfig` / `JpegAiDecodeJob` / `JpegAiDecoder`
+  implement `zencodec::decode::{DecoderConfig, DecodeJob, Decode}` over `Decoder` (RGB output;
+  format registers as `ImageFormat::Custom`, magic `FF 80 FF 82`).
+- `unstable-internals` feature: `nn`/`model`/`tools`/`mans`/`bitio`/`container`/`tensor`/
+  `weights`/`filters` (most of `decoder`) are `pub(crate)` by default, `pub` under this feature
+  (implied by `cli` and `zencodec`). `#![warn(missing_docs)]` on the committed public API without
+  it.
+- `enough::Stop` checked in the post-filters (`filters::apply`, once per enabled filter; eICCI
+  additionally once per tile).
+- `benchmarks/build_time_2026-09-18.md`: clean/incremental build times + `cargo llvm-lines`
+  survey (no build-time issue found).
 - **Encoder** (`encoder::Encoder`, `zenjpegai encode in.png out.bits --model N --beta-disp B [--op sop|bop|hop]`): colour pre-processing, analysis transforms, hyper-encoder, `z` quantisation, the shared scale derivation, the context model's compress direction (per-stage quantise / cube flag / requantise), skip mode, residual quantisation, header and container assembly, one `AnsEncoder` per substream. Fixed model and operating point, one tile, one region, one ANS thread, tools off, 8-bit RGB 4:4:4. On all seven reference vectors the integer stage (`z_hat`, both scale maps, cube flags) equals the reference encoder's, six of seven streams are **byte-identical** to the reference's (the seventh, 178 KB at beta +400, moves 42 of 501,760 residual symbols by 1), and the reference decoder reads every one of them, differing from our own decode in 51-59 of 1,491,840 samples, all by 1. 0.12 s of process wall time against the reference encoder's 2.0 s at 560x888.
 - Encoder: coding tools - RVS, GRFS (the gain flags derived as `analyzeCWG` does), LSBS and 1..16 ANS threads per substream (`EncodeParams`, `zenjpegai encode --rvs --grfs --lsbs --ans-threads N`). All five reference encodes that use them come out byte-identical.
 - Encoder: analysis tiling (`encoder::tiles`) - above 1 MP the analysis transform and the hyper-encoder run per tile (1024 / overlap 64 luma, 512 / 32 chroma) and the picture header carries the synthesis tiling; the 2096x1400 reference encode comes out at the reference's byte count with one residual symbol moved.
