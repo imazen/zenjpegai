@@ -5,8 +5,11 @@
 // - cross-origin isolated page: ONE persistent `threads`-variant worker — the rayon build
 //   already spreads one decode across `navigator.hardwareConcurrency`, so exactly one decode
 //   is in flight at a time and everything else waits in the queue.
-// - otherwise: up to `min(navigator.hardwareConcurrency, maxWorkers)` single-threaded `simd`
-//   workers, and never more decodes in flight than workers.
+// - otherwise: up to `min(navigator.hardwareConcurrency - 1, maxWorkers)` single-threaded
+//   `simd` workers — leaving one hardware thread for the page's main thread and the browser,
+//   because at exactly `hardwareConcurrency` busy decode workers a 4-core box pushed each
+//   decode past 2x its solo time (measured on a 4-vCPU GitHub runner: 3815 ms vs 1776 ms
+//   solo). Never more decodes in flight than workers.
 // - ALL decodes go through one shared queue here; a job is posted to a worker only when that
 //   worker is idle (the earlier round-robin assigned jobs to workers immediately, so a job
 //   could sit behind a busy worker's backlog while a sibling idled, and nothing could be
@@ -26,7 +29,8 @@ export class DecoderPool {
     // resolve against `worker.js`'s directory instead of the page that constructed this pool.
     this.modelsBaseUrl = new URL(modelsBaseUrl, typeof location !== 'undefined' ? location.href : undefined).href;
     this.isolated = typeof crossOriginIsolated !== 'undefined' && crossOriginIsolated === true;
-    this.size = this.isolated ? 1 : Math.max(1, Math.min(maxWorkers, (typeof navigator !== 'undefined' && navigator.hardwareConcurrency) || 4));
+    const hwc = (typeof navigator !== 'undefined' && navigator.hardwareConcurrency) || 4;
+    this.size = this.isolated ? 1 : Math.max(1, Math.min(maxWorkers, hwc - 1));
     this.workers = [];
     this.readyInfo = [];
     this._idle = []; // workers with no in-flight decode, in spawn order

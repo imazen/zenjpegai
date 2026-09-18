@@ -101,7 +101,7 @@ after `sudo npx playwright install-deps` for `libmanette-0.2-0`), **33 passed in
   `securitypolicyviolation`), `img` mode's `blob:` load is blocked and reported as an `img-src`
   violation, exactly as designed.
 - `scheduling.spec.ts`: the decode-scheduling contract — bounded concurrency
-  (`maxInflight <= min(navigator.hardwareConcurrency, 4)` on the simd pool, exactly 1 on the
+  (`maxInflight <= min(navigator.hardwareConcurrency - 1, 4)` on the simd pool, exactly 1 on the
   threads pool), viewport-gated demo decodes with pre-sized placeholders, first-image bound,
   and "per-image decode under 8x load stays <= 2x a solo decode". Appends to
   `benchmarks/wasm_demo_scheduling_<date>.tsv`; chromium-only. `JAI_BASE_PLAIN` /

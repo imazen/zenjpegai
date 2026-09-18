@@ -1,5 +1,5 @@
 // Decode scheduling (user report 2026-09-18: "with all images decoding at once each takes
-// about a second"). The pool must throttle: at most min(navigator.hardwareConcurrency, N)
+// about a second"). The pool must throttle: at most min(navigator.hardwareConcurrency - 1, N)
 // concurrent single-thread (simd) workers behind ONE shared queue, exactly one decode in
 // flight on the threads build (it already spans all cores), and the demo/polyfill must
 // decode in visibility order, only once an image is within one viewport height, with a
@@ -106,12 +106,12 @@ test.describe('decode scheduling', () => {
     metrics.total_ms = tTotal;
     console.log(`[metric] total_ms=${tTotal}`);
 
-    // Pool self-report: concurrency never exceeded min(hardwareConcurrency, 4).
+    // Pool self-report: concurrency never exceeded the simd cap (min(4, hwc - 1)).
     const stats = await page.evaluate(() => window.__poolStats?.() ?? null);
     if (stats) {
       const hwc = await page.evaluate(() => navigator.hardwareConcurrency);
       console.log(`[metric] max_inflight=${stats.maxInflight} hwc=${hwc} isolated=${stats.isolated}`);
-      expect(stats.maxInflight).toBeLessThanOrEqual(Math.min(hwc, 4));
+      expect(stats.maxInflight).toBeLessThanOrEqual(stats.size);
       expect(stats.maxInflight).toBeGreaterThan(0);
     }
   });
@@ -132,12 +132,13 @@ test.describe('decode scheduling', () => {
       metrics.first_ms_simd = Date.now() - t0;
       console.log(`[metric] first_image_simd_ms=${metrics.first_ms_simd}`);
 
-      // Pool self-report (post-fix only; the pre-fix pool exposes no stats hook).
+      // Pool self-report (post-fix only; the pre-fix pool exposes no stats hook). The simd
+      // pool leaves one hardware thread for the page's main thread: min(4, hwc - 1).
       const hwc = await page.evaluate(() => navigator.hardwareConcurrency);
       const stats0 = await page.evaluate(() => window.__poolStats?.() ?? null);
       if (stats0) {
         expect(stats0.isolated).toBe(false);
-        expect(stats0.size).toBe(Math.min(hwc, 4));
+        expect(stats0.size).toBe(Math.max(1, Math.min(4, hwc - 1)));
       }
 
       await scrollThrough(page);

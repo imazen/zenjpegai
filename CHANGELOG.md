@@ -89,7 +89,8 @@
 ### Fixed
 - Browser decode scheduling (`web/`): `DecoderPool` now runs all decodes through one shared
   priority queue instead of posting every job to a worker at once — at most
-  `min(navigator.hardwareConcurrency, N)` in-flight on the simd build and exactly one on the
+  `min(navigator.hardwareConcurrency - 1, N)` in-flight on the simd build (one hardware thread
+  left for the page's main thread) and exactly one on the
   threads build — and the polyfill + demo only enqueue an image once it is within one viewport
   height of the viewport, in visibility order (`IntersectionObserver`, re-evaluated function
   priorities), with a pre-sized placeholder while queued. `pool.stats()` and

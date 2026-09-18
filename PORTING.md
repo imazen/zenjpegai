@@ -467,7 +467,9 @@ measured numbers in the status table above when you close an item.
 - **B1** WebGPU synthesis in the worker/polyfill/demo behind feature detection (in progress on a
   SWE-2 agent; `gpu/README.md` has the API). **B2 done 2026-09-18** — demo throttling +
   viewport-priority queue landed: one shared queue in `web/src/pool.js` (threads build: exactly
-  one decode in flight; simd build: at most `min(navigator.hardwareConcurrency, 4)`), the
+  one decode in flight; simd build: at most `min(navigator.hardwareConcurrency - 1, 4)` —
+  one hardware thread is left for the page's main thread, because `hwc` busy workers on a
+  4-vCPU runner pushed per-image decode past 2x solo), the
   polyfill and demo only enqueue decodes once an image is within one viewport height
   (`IntersectionObserver`, `rootMargin '100% 0px'`, visibility-ordered, re-evaluated function
   priorities), and every queued image shows a pre-sized placeholder. The AIC artwork swap also
