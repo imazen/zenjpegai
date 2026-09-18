@@ -39,25 +39,63 @@ const SELECTOR = [
  * @property {Document|ShadowRoot} [root] - defaults to `document`.
  */
 
+// Scheduling (see pool.js's contract): every decode enters the pool's shared queue ordered by
+// `priority`, and the priority here is visibility order. `visRank` records the order in which
+// images first came within one viewport height of the viewport — by a synchronous rect check
+// at handle time (the observer's first callback lands a frame later, after the first jobs are
+// already dispatched) or by the observer once the user scrolls. A queued job's function
+// priority is re-evaluated at every dispatch, so an eager image that scrolls into view while
+// still waiting is promoted ahead of offscreen work. `loading="lazy"` images are only enqueued
+// at all once they intersect (same one-viewport-height margin); everything else enqueues at
+// scan time, ordered by that rank. `data-jai-state` tracks pending -> queued -> decoding ->
+// (attribute removed on swap) / "error" so a page can style the queued placeholder.
+const FAR_PRIORITY = 1_000_000_000;
+
 /** @param {PolyfillOptions} options */
 export function installJpegAiPolyfill(options) {
   const opts = { renderMode: 'canvas', root: document, ...options };
   const pool = new DecoderPool({ modelsBaseUrl: opts.modelsBaseUrl, maxWorkers: opts.maxWorkers, workerUrl: opts.workerUrl });
 
+  const visRank = new WeakMap();
+  let rankSeq = 0;
+  let domSeq = 0;
+  const lazyRun = new Map(); // img -> run(), for images waiting on intersection
+  const io =
+    'IntersectionObserver' in globalThis
+      ? new IntersectionObserver(
+          (entries) => {
+            for (const e of entries) {
+              if (!e.isIntersecting) continue;
+              const img = e.target;
+              io.unobserve(img);
+              if (!visRank.has(img)) visRank.set(img, rankSeq++);
+              const run = lazyRun.get(img);
+              if (run) {
+                lazyRun.delete(img);
+                run();
+              }
+            }
+          },
+          // One viewport height of lookahead in the scroll axis.
+          { rootMargin: '100% 0px' },
+        )
+      : null;
+
   const scan = () => {
-    for (const el of opts.root.querySelectorAll(SELECTOR)) handle(el, pool, opts);
+    for (const el of opts.root.querySelectorAll(SELECTOR)) handle(el, pool, opts, { visRank, nextRank: () => rankSeq++, nextDom: () => domSeq++, io, lazyRun });
   };
   scan();
 
   const observer = new MutationObserver((mutations) => {
+    const sched = { visRank, nextRank: () => rankSeq++, nextDom: () => domSeq++, io, lazyRun };
     for (const m of mutations) {
       for (const node of m.addedNodes) {
         if (node.nodeType !== Node.ELEMENT_NODE) continue;
-        if (node.matches?.(SELECTOR)) handle(node, pool, opts);
-        node.querySelectorAll?.(SELECTOR).forEach((el) => handle(el, pool, opts));
+        if (node.matches?.(SELECTOR)) handle(node, pool, opts, sched);
+        node.querySelectorAll?.(SELECTOR).forEach((el) => handle(el, pool, opts, sched));
       }
       if (m.type === 'attributes' && m.target.nodeType === Node.ELEMENT_NODE && m.target.matches?.(SELECTOR)) {
-        handle(m.target, pool, opts);
+        handle(m.target, pool, opts, sched);
       }
     }
   });
@@ -68,30 +106,44 @@ export function installJpegAiPolyfill(options) {
     attributeFilter: ['src', 'srcset', 'data-src', 'data-srcset'],
   });
 
-  return { pool, observer, stop: () => observer.disconnect() };
+  return { pool, observer, stop: () => { observer.disconnect(); io?.disconnect(); } };
 }
 
-function handle(el, pool, opts) {
+// True when the element's box is within one viewport height of the viewport, in either
+// direction — the synchronous twin of the observer's '100% 0px' margin, used to rank images
+// that are already near-visible when handle() runs (before the first observer callback).
+function nearViewport(el) {
+  const vh = globalThis.innerHeight || 1024;
+  const r = el.getBoundingClientRect();
+  return r.bottom > -vh && r.top < 2 * vh;
+}
+
+function handle(el, pool, opts, sched) {
   const img = el.tagName === 'SOURCE' ? el.closest('picture')?.querySelector('img') : el;
   if (!img || img.hasAttribute(ATTR_HANDLED)) return;
   const url = resolveUrl(el, img);
   if (!url) return;
   img.setAttribute(ATTR_HANDLED, '1');
+  img.setAttribute('data-jai-state', 'pending');
+  const domIdx = sched.nextDom();
+  if (sched.io) {
+    sched.io.observe(img);
+    if (nearViewport(img) && !sched.visRank.has(img)) sched.visRank.set(img, sched.nextRank());
+  }
 
-  const run = () => decodeAndSwap(img, url, pool, opts).catch((err) => {
-    img.dispatchEvent(new CustomEvent('jpegaierror', { detail: { error: err, url } }));
-  });
+  const run = () => {
+    img.setAttribute('data-jai-state', 'queued');
+    decodeAndSwap(img, url, pool, opts, {
+      priority: () => sched.visRank.get(img) ?? FAR_PRIORITY + domIdx,
+      onDispatch: () => img.setAttribute('data-jai-state', 'decoding'),
+    }).catch((err) => {
+      img.setAttribute('data-jai-state', 'error');
+      img.dispatchEvent(new CustomEvent('jpegaierror', { detail: { error: err, url } }));
+    });
+  };
 
-  if (img.loading === 'lazy' && 'IntersectionObserver' in globalThis) {
-    const io = new IntersectionObserver((entries) => {
-      for (const e of entries) {
-        if (e.isIntersecting) {
-          io.disconnect();
-          run();
-        }
-      }
-    }, { rootMargin: '200px' });
-    io.observe(img);
+  if (img.loading === 'lazy' && sched.io) {
+    sched.lazyRun.set(img, run);
   } else {
     run();
   }
@@ -127,13 +179,14 @@ function pickFromSrcset(srcset, img) {
   return candidates[candidates.length - 1].url;
 }
 
-async function decodeAndSwap(img, url, pool, opts) {
+async function decodeAndSwap(img, url, pool, opts, decodeOpts = {}) {
   const t0 = performance.now();
   const res = await fetch(url);
   if (!res.ok) throw new Error(`fetch ${url} failed: ${res.status}`);
   const bytes = await res.arrayBuffer();
   const t1 = performance.now();
-  const { width, height, rgba, timings } = await pool.decode(bytes);
+  const { width, height, rgba, timings } = await pool.decode(bytes, decodeOpts);
+  img.removeAttribute('data-jai-state');
   const t2 = performance.now();
   const mode = img.getAttribute('data-jai-render') || opts.renderMode;
   const alt = img.getAttribute('alt') ?? '';
