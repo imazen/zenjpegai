@@ -22,11 +22,15 @@ and per-rate bytes/width/height/`modelId`.
 | `car` | `1000-lilith-photos-general/1000_..._4032x3024.jpg` | everyday photo | PD-own (lilith) |
 | `mountain` | `1400-lilith-nature/1400_..._4608x3456.jpg` | landscape | PD-own (lilith) |
 | `dumplings` | `1600-lilith-food/1600_..._4032x3024.jpg` | food | PD-own (lilith) |
-| `artwork` | `3000-art-institute-of-chicago-photos/3000_aic_for-sunday-s-dinner_111377_1269x2250.jpg` | open-access artwork reproduction | CC0 (Art Institute of Chicago) |
+| `artwork` | `3000-art-institute-of-chicago-photos/3008_..._4000x2883.jpg` | open-access artwork reproduction | CC0 (Art Institute of Chicago) |
 | `brochure` | `5000-national-park-service-brochures/color/5000_nps_bibe-2023-wild-and-scenic-rivers_color_p01_4961x7016.png` | born-digital document page | PD-USGov (NPS) |
 | `patent-scan` | `6000-lilith-scans-public-patents/lynn_conway_us5046022_1bitoriginal/6000_..._p001_2320x3408.png` | bilevel scan (rescanned colour render) | PD (USPTO) |
 | `line-plot` | `7000-lilith-plots/aliased-line-patterns/7000_plots_line-00056-s6bcec02a_1024x1024.png` | synthetic hard-edge line art | PD-own (lilith, generated) |
 | `clipart` | `9000-lilith-ai-clipart/9000_gen_clipart_avocado-half_1024x1536.png` | AI-generated flat/transparent graphic | PD-own (lilith, AI-generated) |
+
+The `artwork` pick changed 2026-09-18: the previous AIC still life (3000) was removed from the
+corpus (imazen-26 issue 3), so the slot now uses 3008, the Van der Spelt flower-garland
+trompe-l'oeil — same category, same licence.
 
 Full per-category license text and attribution: imazen-26 `README.md`
 ("Licensing status"). Model weights inside every `.zjb`: upstream JPEG AI reference software,
