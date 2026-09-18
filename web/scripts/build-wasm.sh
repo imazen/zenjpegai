@@ -41,8 +41,14 @@ for v in "${variants[@]}"; do
         --profile wasm-release --target-dir target/wasm-simd -Z build-std=panic_abort,std >&2
       in=target/wasm-simd/wasm32-unknown-unknown/wasm-release/zenjpegai_wasm.wasm ;;
     threads)
-      # Shared memory: 1 GiB maximum (a shared memory must declare one).
-      RUSTFLAGS="-Ctarget-feature=+simd128,+atomics,+bulk-memory,+mutable-globals,+nontrapping-fptoint,+sign-ext -Clink-arg=--max-memory=2147483648" \
+      # Shared memory: 1 GiB maximum (a shared memory must declare one), and wasm-ld needs
+      # --shared-memory explicitly — +atomics plus --max-memory alone still links a NON-shared
+      # memory, which is not structured-cloneable: wasm-bindgen-rayon's own worker spawner
+      # (workerHelpers.no-bundler.js, `worker.postMessage({memory, ...})`) then throws
+      # "Failed to execute 'postMessage' on 'Worker': #<Memory> could not be cloned" the moment
+      # initThreadPool tries to spin up a second worker (caught 2026-09-17 running this build in
+      # a real browser for the first time; see web/README.md).
+      RUSTFLAGS="-Ctarget-feature=+simd128,+atomics,+bulk-memory,+mutable-globals,+nontrapping-fptoint,+sign-ext -Clink-arg=--max-memory=2147483648 -Clink-arg=--shared-memory -Clink-arg=--import-memory -Clink-arg=--export=__wasm_init_tls -Clink-arg=--export=__tls_size -Clink-arg=--export=__tls_align -Clink-arg=--export=__tls_base" \
         nice -n 19 cargo +"$NIGHTLY" build -j "$JOBS" -p zenjpegai-wasm --features threads \
         --target wasm32-unknown-unknown --profile wasm-release --target-dir target/wasm-threads \
         -Z build-std=panic_abort,std >&2
