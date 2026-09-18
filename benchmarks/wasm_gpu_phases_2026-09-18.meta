@@ -1,0 +1,5 @@
+same_run	wasm_decode_2026-09-18_gpu.meta
+commit	ea88bb92fdbc
+adapter	nvidia/turing
+date	2026-09-18
+columns	gpu.* timings of the webgpu package; all *_ms are host-side (browser performance clock), gpu_ns is device timestamp-query time

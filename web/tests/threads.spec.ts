@@ -48,7 +48,7 @@ const DECODE_ALL = `async (threads) => {
 // scaling runs prohibitively long.
 test('rayon thread scaling on the threads package', async ({ page, browserName, browser }, testInfo) => {
   test.setTimeout(600_000);
-  await page.goto(`http://127.0.0.1:${PORTS.isolated}/decode.html`);
+  await page.goto(`http://127.0.0.1:${PORTS.isolated}/decode.html?gpu=off`);
   await page.evaluate(() => window.__ready);
   const version = browser.version();
   const os = process.platform;
@@ -81,7 +81,7 @@ test('rayon thread scaling on the threads package', async ({ page, browserName, 
   // Non-isolated baseline: the single-threaded `simd` package on the plain server.
   const plain = await browser.newPage();
   try {
-    await plain.goto(`http://127.0.0.1:${PORTS.plain}/decode.html`);
+    await plain.goto(`http://127.0.0.1:${PORTS.plain}/decode.html?gpu=off`);
     await plain.evaluate(() => window.__ready);
     const results = (await plain.evaluate(decodeAll, undefined)) as Array<Record<string, number | string>>;
     for (const r of results) {

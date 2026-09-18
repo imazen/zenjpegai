@@ -1,7 +1,7 @@
 // WebGPU synthesis path coverage. `decode.html?gpu=<mode>` picks the pool's adapter policy:
-//   auto            default — the CPU packages (measured: hardware GPU does not beat the
-//                   threads engine at demo sizes, web/README §7)
-//   on              GPU opt-in — pkg-webgpu on a non-software adapter, else the CPU packages
+//   auto            default — the webgpu package on a non-software adapter (measured faster
+//                   than both CPU packages on RTX 2080/Dawn, web/README §7), CPU otherwise
+//   on              GPU opt-in — a webgpu package on a non-software adapter, else the CPU packages
 //   software        accept software adapters too (Dawn SwiftShader on GPU-less hosts)
 //   off             never load pkg-webgpu
 // `path` in each decode's timings says what actually ran ('gpu' = WebGPU synthesis, 'cpu' =

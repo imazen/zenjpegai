@@ -245,4 +245,35 @@ impl GpuContext {
             .map_err(|_| GpuError::Device("map callback dropped".into()))?
             .map_err(|e| GpuError::Device(e.to_string()))
     }
+
+    /// `map_read` for two buffers, issuing both map requests before waiting on either — one
+    /// device-drain round-trip serves both instead of two sequential ones.
+    pub(crate) async fn map_read2(
+        &self,
+        a: &wgpu::Buffer,
+        a_bytes: u64,
+        b: &wgpu::Buffer,
+        b_bytes: u64,
+    ) -> Result<()> {
+        let (tx_a, rx_a) = futures_channel::oneshot::channel();
+        a.slice(0..a_bytes)
+            .map_async(wgpu::MapMode::Read, move |r| {
+                let _ = tx_a.send(r);
+            });
+        let (tx_b, rx_b) = futures_channel::oneshot::channel();
+        b.slice(0..b_bytes)
+            .map_async(wgpu::MapMode::Read, move |r| {
+                let _ = tx_b.send(r);
+            });
+        #[cfg(not(target_arch = "wasm32"))]
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .map_err(|e| GpuError::Device(e.to_string()))?;
+        for rx in [rx_a, rx_b] {
+            rx.await
+                .map_err(|_| GpuError::Device("map callback dropped".into()))?
+                .map_err(|e| GpuError::Device(e.to_string()))?;
+        }
+        Ok(())
+    }
 }

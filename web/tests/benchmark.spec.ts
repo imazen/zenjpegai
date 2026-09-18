@@ -18,7 +18,7 @@ const HEADER = ['browser', 'browser_version', 'os', 'slug', 'bpp', 'model_id', '
 
 test('decode every demo stream and record timings', async ({ page, browserName, browser }, testInfo) => {
   test.setTimeout(180_000);
-  await page.goto(`http://127.0.0.1:${PORTS.isolated}/decode.html`);
+  await page.goto(`http://127.0.0.1:${PORTS.isolated}/decode.html?gpu=off`);
   await page.evaluate(() => window.__ready);
   const version = browser.version();
   const os = process.platform;

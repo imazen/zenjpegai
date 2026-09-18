@@ -21,7 +21,7 @@ use std::sync::Arc;
 use wasm_bindgen::prelude::*;
 use zenjpegai::Picture;
 use zenjpegai::nn::fast::{Engine, Tier};
-use zenjpegai_gpu::{Blitter, ContextOptions, GpuContext, GpuDecoder, GpuError, Timing};
+use zenjpegai_gpu::{Blitter, ContextOptions, GpuContext, GpuDecoder, GpuError, GpuOut, Timing};
 
 use crate::{decode_cpu, js_err, rgb_to_rgba, set, set_rgba, state};
 
@@ -35,6 +35,7 @@ struct GpuInner {
     instance: wgpu::Instance,
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     adapter: wgpu::Adapter,
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     ctx: Arc<GpuContext>,
     decoder: GpuDecoder,
     adapter_name: String,
@@ -200,25 +201,34 @@ pub async fn decode(stream: &[u8]) -> Result<js_sys::Object, JsError> {
     }
 }
 
-/// `{width, height, rgba, path:"gpu", gpu:{tiles,dispatches,plansBuilt,gpuNs?}}`.
+/// `{width, height, rgba, path:"gpu", gpu:{tiles,dispatches,plansBuilt,gpuNs?,*Ms}}`.
 async fn decode_on_gpu(g: &GpuInner, stream: &[u8]) -> Result<js_sys::Object, GpuError> {
-    let decoded = g.decoder.decode_to_gpu(stream)?;
+    // `RgbaReadback`: the RGBA conversion and its staged copy ride in the decode's single
+    // submission (presentable streams), so the map below is the only GPU wait.
+    let mut decoded = g.decoder.decode_to_gpu_with(stream, GpuOut::RgbaReadback)?;
     let out = js_sys::Object::new();
+    let mut ph = Phases::default();
     if decoded.presentable_on_gpu() {
-        // 8-bit 4:4:4 BT.709, no post-filters: convert to RGBA on the GPU and read back
-        // 4 bytes per pixel instead of the 12 the float planes would cost.
+        // 8-bit 4:4:4 BT.709, no post-filters: RGBA is already converted and staged on the
+        // GPU — `to_rgba_texture` returns the stored texture, `read_rgba` is one map.
         let (h, w) = decoded.display_size();
-        let tex = decoded.to_rgba_texture()?;
-        let rgba = zenjpegai_gpu::read_rgba8(&g.ctx, &tex).await?;
-        let gpu_ns = decoded.picture.gpu_time().await.ok().flatten();
+        let t = now_ms();
+        let _tex = decoded.to_rgba_texture()?;
+        ph.convert_ms = now_ms() - t;
+        let t = now_ms();
+        let rgba = decoded.picture.read_rgba().await?;
+        ph.readback_ms = now_ms() - t;
+        let gpu_ns = decoded.picture.timing.gpu_ns;
         set(&out, "width", w as u32);
         set(&out, "height", h as u32);
         set_rgba(&out, &rgba);
-        set_timing(&out, &decoded.picture.timing, gpu_ns);
+        set_timing(&out, &decoded.picture.timing, gpu_ns, ph);
     } else {
         // Post-filters / subsampled chroma / 10 bit: read the planes back once and finish
         // exactly as the CPU decoder does.
+        let t = now_ms();
         let (picture, _planes, timing) = g.decoder.finish(decoded).await?;
+        ph.finish_ms = now_ms() - t;
         let gpu_ns = timing.gpu_ns;
         let Picture::Rgb(img) = picture else {
             return Err(GpuError::Unsupported(
@@ -228,13 +238,35 @@ async fn decode_on_gpu(g: &GpuInner, stream: &[u8]) -> Result<js_sys::Object, Gp
         set(&out, "width", img.width as u32);
         set(&out, "height", img.height as u32);
         set_rgba(&out, &rgb_to_rgba(&img));
-        set_timing(&out, &timing, gpu_ns);
+        set_timing(&out, &timing, gpu_ns, ph);
     }
     set(&out, "path", "gpu");
     Ok(out)
 }
 
-fn set_timing(out: &js_sys::Object, t: &Timing, gpu_ns: Option<u64>) {
+/// The async boundary waits around a decode, ms — measured by the caller around the awaits so
+/// the numbers are the browser's own view of them.
+#[derive(Default)]
+struct Phases {
+    /// `to_rgba_texture`: ~0 when the run's tail already converted (the texture is stored on
+    /// the picture); a submit when it converts on demand.
+    convert_ms: f64,
+    /// `read_rgba`/`read_rgba8`: the staging-buffer map (the GPU drain + IPC), plus the
+    /// timestamp-query map — issued concurrently, so one device round-trip serves both.
+    readback_ms: f64,
+    /// `gpu_time` when it is its own wait (`present`): the timestamp-query buffer map.
+    wait_ms: f64,
+    /// `GpuDecoder::finish` (non-presentable pictures): planes readback + CPU post-filters.
+    finish_ms: f64,
+    /// `present_texture`: surface create/configure + blit submit + present.
+    present_ms: f64,
+}
+
+fn now_ms() -> f64 {
+    js_sys::Date::now()
+}
+
+fn set_timing(out: &js_sys::Object, t: &Timing, gpu_ns: Option<u64>, ph: Phases) {
     let tm = js_sys::Object::new();
     set(&tm, "tiles", t.tiles as u32);
     set(&tm, "dispatches", t.dispatches as u32);
@@ -242,6 +274,21 @@ fn set_timing(out: &js_sys::Object, t: &Timing, gpu_ns: Option<u64>) {
     if let Some(ns) = gpu_ns {
         set(&tm, "gpuNs", ns as f64);
     }
+    // Host-side split of `decode_to_gpu`, ms.
+    let ms = |ns: u64| ns as f64 / 1e6;
+    set(&tm, "headersMs", ms(t.headers_host_ns));
+    set(&tm, "commonMs", ms(t.common_host_ns));
+    set(&tm, "weightsMs", ms(t.weights_host_ns));
+    set(&tm, "entropyMs", ms(t.entropy_host_ns));
+    set(&tm, "latentMs", ms(t.latent_host_ns));
+    set(&tm, "uploadMs", ms(t.upload_host_ns));
+    set(&tm, "planMs", ms(t.plan_host_ns));
+    set(&tm, "submitMs", ms(t.submit_host_ns));
+    set(&tm, "convertMs", ph.convert_ms);
+    set(&tm, "readbackMs", ph.readback_ms);
+    set(&tm, "waitMs", ph.wait_ms);
+    set(&tm, "finishMs", ph.finish_ms);
+    set(&tm, "presentMs", ph.present_ms);
     set(out, "gpu", tm);
 }
 
@@ -260,27 +307,50 @@ pub async fn present(
             .unwrap_or_else(|| "initGpu has not run".to_string());
         JsError::new(&format!("no GPU context: {why}"))
     })?;
-    let decoded = g.decoder.decode_to_gpu(stream.as_slice()).map_err(js_err)?;
+    // `Rgba`: the conversion is part of the decode's single submission; `to_rgba_texture`
+    // returns the already-queued texture.
+    let decoded = g
+        .decoder
+        .decode_to_gpu_with(stream.as_slice(), GpuOut::Rgba)
+        .map_err(js_err)?;
     if !decoded.presentable_on_gpu() {
         return Err(JsError::new(
             "GPU canvas presentation needs an 8-bit 4:4:4 BT.709 picture without post-filters",
         ));
     }
     let (h, w) = decoded.display_size();
+    let t = now_ms();
     let tex = decoded.to_rgba_texture().map_err(js_err)?;
-    // Waits for the GPU (the blit below is queued behind the synthesis work regardless);
-    // fills in `gpuNs` for the timing report.
+    let convert_ms = now_ms() - t;
+    // Drain the GPU BEFORE touching the canvas: `present_texture`'s surface configure binds
+    // the canvas to WebGPU irreversibly, and once bound the caller's `decode`+2d fallback
+    // cannot draw on it. A device lost during synthesis must reject here — while the canvas
+    // is still a plain 2d canvas — not after the bind. (Also fills in `gpuNs`.)
+    let t = now_ms();
     let gpu_ns = decoded.picture.gpu_time().await.map_err(js_err)?;
+    let wait_ms = now_ms() - t;
     let timing = decoded.picture.timing;
     canvas.set_width(w as u32);
     canvas.set_height(h as u32);
+    let t = now_ms();
     present_texture(&g, canvas, &tex).map_err(js_err)?;
+    let present_ms = now_ms() - t;
     let out = js_sys::Object::new();
     set(&out, "width", w as u32);
     set(&out, "height", h as u32);
     set(&out, "path", "gpu");
     set(&out, "presented", "gpu");
-    set_timing(&out, &timing, gpu_ns);
+    set_timing(
+        &out,
+        &timing,
+        gpu_ns,
+        Phases {
+            convert_ms,
+            wait_ms,
+            present_ms,
+            ..Phases::default()
+        },
+    );
     Ok(out)
 }
 

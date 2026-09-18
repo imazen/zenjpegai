@@ -2,15 +2,24 @@
 //
 // Package selection: the `?gpu=` query param on the worker URL (set by `pool.js`) chooses
 //   off             -> `threads` (cross-origin isolated) or `simd`, exactly the historical choice
-//   auto (default)  -> same CPU packages: measured on an RTX 2080 (2026-09-18, demo streams
-//                      ~1 MP) the WebGPU path's wall-clock decode does not beat the threads
-//                      engine, so `auto` does not pay the pkg-webgpu download (see web/README §7)
-//   on              -> try `pkg-webgpu` + `initGpu(0)`; a non-software adapter keeps that
+//   auto (default)  -> the webgpu package when `navigator.gpu` offers a NON-software adapter,
+//                      else the CPU packages: measured on an RTX 2080 through Dawn/Vulkan
+//                      (2026-09-18, demo streams ~1 MP, benchmarks/wasm_gpu_phases_2026-09-18.tsv)
+//                      warm GPU decode ~52-65 ms vs ~88-104 ms on `threads` and ~632-773 ms on
+//                      `simd` — the GPU wins on isolated AND non-isolated pages on this
+//                      hardware class. A software adapter alone keeps the CPU packages (a CPU
+//                      rasteriser is slower than this decoder's own engine).
+//   on              -> try the webgpu package + `initGpu(0)`; a non-software adapter keeps that
 //                      package, anything else falls back to the CPU packages
-//   software        -> `pkg-webgpu` + `initGpu(1)`: software adapters accepted (test/debug mode —
-//                      the GPU code path runs even on a GPU-less host, slower than the CPU engine)
-//   force-software  -> `pkg-webgpu` + `initGpu(2)`: additionally passes WebGPU's
+//   software        -> webgpu package + `initGpu(1)`: software adapters accepted (test/debug
+//                      mode — the GPU code path runs even on a GPU-less host, slower than the
+//                      CPU engine)
+//   force-software  -> webgpu package + `initGpu(2)`: additionally passes WebGPU's
 //                      forceFallbackAdapter, so the software adapter is used even next to a GPU
+// The webgpu package is `pkg-webgpu-threads` on a cross-origin isolated page (its CPU
+// entropy/latent stages then run on the rayon pool — the single-threaded latent stage is the
+// webgpu build's dominant cost, ~120 ms of a ~250 ms 1 MP decode on RTX 2080/Dawn,
+// benchmarks/wasm_gpu_phases_2026-09-18.tsv) and `pkg-webgpu` elsewhere.
 // A failed `initGpu` discards the webgpu module and loads the CPU package: its decode() falls
 // back to the CPU engine internally anyway, but the threads package's CPU engine is faster.
 //
@@ -162,21 +171,39 @@ const ready = (async () => {
             }
           : null;
         const fallbackOnly = !!adapterProbe?.isFallbackAdapter;
-        const wantGpu = gpuMode === 'on' || gpuSoftwareMode >= 1;
+        // auto opts into the GPU only for a hardware adapter: measured faster than both CPU
+        // packages on RTX 2080/Dawn (see the header); software-only adapters stay on CPU.
+        const wantGpu = gpuMode === 'on' || gpuSoftwareMode >= 1 || gpuMode === 'auto';
         if (probe && wantGpu && (gpuSoftwareMode >= 1 || !fallbackOnly)) {
           try {
-            const m = await import(new URL('../dist/pkg-webgpu/zenjpegai.js', import.meta.url).href);
+            // Isolated pages get the rayon build (parallel CPU entropy/latent stages);
+            // `pkg-webgpu` is the non-isolated build, and also the fallback if a deployment
+            // was assembled without `pkg-webgpu-threads`.
+            let m;
+            let pkg = null;
+            const names = isolated ? ['pkg-webgpu-threads', 'pkg-webgpu'] : ['pkg-webgpu'];
+            for (const name of names) {
+              try {
+                m = await import(new URL(`../dist/${name}/zenjpegai.js`, import.meta.url).href);
+                pkg = name;
+                break;
+              } catch { /* package not built into this site; try the next */ }
+            }
+            if (!m) throw new Error(`none of ${names.join(', ')} is served`);
             await m.default(); // fetches `zenjpegai_bg.wasm` next to zenjpegai.js
+            if (typeof m.initThreadPool === 'function') {
+              await m.initThreadPool(rayonThreads());
+            }
             gpuInfo = await m.initGpu(gpuSoftwareMode);
             mod = m;
-            variant = 'webgpu';
+            variant = pkg.replace('pkg-', '');
           } catch (err) {
             gpuError = `no usable GPU context: ${String((err && err.message) || err)}`;
           }
         } else if (!probe) {
           gpuError = 'requestAdapter returned null';
         } else if (!wantGpu) {
-          gpuError = 'gpu=auto keeps the CPU engine (see web/README §7); ?gpu=on opts in';
+          gpuError = 'gpu=off keeps the CPU engine; ?gpu=on or auto opts in';
         } else {
           gpuError = `only a software WebGPU adapter (${probe.info?.description || 'fallback'})`;
         }

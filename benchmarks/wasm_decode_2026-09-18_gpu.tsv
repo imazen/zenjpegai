@@ -479,3 +479,387 @@ chromium	153.0.8010.12	linux	line-plot	0.25	0	1000	1000	32827	simd	Wasm128	off (
 chromium	153.0.8010.12	linux	line-plot	0.75	1	1000	1000	97944	simd	Wasm128	off (simd)	decode	cpu		cpu				1.10	0.10	708.80	710.00
 chromium	153.0.8010.12	linux	clipart	0.25	2	816	1225	28034	simd	Wasm128	off (simd)	decode	cpu		cpu				1.20	7.70	719.60	728.50
 chromium	153.0.8010.12	linux	clipart	0.75	3	816	1225	83202	simd	Wasm128	off (simd)	decode	cpu		cpu				1.00	47.70	725.00	773.70
+chromium	153.0.8010.12	linux	car	0.25	1	1155	866	33016	webgpu	Wasm128	on	decode	gpu		nvidia/turing	false	20309024		2.19	55.64	250.51	308.35
+chromium	153.0.8010.12	linux	car	0.25	1	1155	866	33016	webgpu	Wasm128	on	present	gpu	gpu	nvidia/turing	false	20133920		1.91	0.04	169.61	171.56
+chromium	153.0.8010.12	linux	car	0.75	2	1155	866	98890	webgpu	Wasm128	on	decode	gpu		nvidia/turing	false	20101120		11.29	52.94	180.34	244.57
+chromium	153.0.8010.12	linux	car	0.75	2	1155	866	98890	webgpu	Wasm128	on	present	gpu	gpu	nvidia/turing	false	20113408		1.59	0.05	166.75	168.38
+chromium	153.0.8010.12	linux	mountain	0.25	1	1155	866	32887	webgpu	Wasm128	on	decode	gpu		nvidia/turing	false	20127040		11.16	0.07	167.39	178.62
+chromium	153.0.8010.12	linux	mountain	0.25	1	1155	866	32887	webgpu	Wasm128	on	present	gpu	gpu	nvidia/turing	false	20088832		1.04	0.04	164.79	165.88
+chromium	153.0.8010.12	linux	mountain	0.75	2	1155	866	90684	webgpu	Wasm128	on	decode	gpu		nvidia/turing	false	20136352		11.13	0.04	167.72	178.88
+chromium	153.0.8010.12	linux	mountain	0.75	2	1155	866	90684	webgpu	Wasm128	on	present	gpu	gpu	nvidia/turing	false	20110944		1.23	0.04	165.62	166.89
+chromium	153.0.8010.12	linux	dumplings	0.25	1	1155	866	32928	webgpu	Wasm128	on	decode	gpu		nvidia/turing	false	22253568		10.87	0.06	169.59	180.52
+chromium	153.0.8010.12	linux	dumplings	0.25	1	1155	866	32928	webgpu	Wasm128	on	present	gpu	gpu	nvidia/turing	false	22286304		1.13	0.05	167.87	169.05
+chromium	153.0.8010.12	linux	dumplings	0.75	2	1155	866	93621	webgpu	Wasm128	on	decode	gpu		nvidia/turing	false	22319264		10.83	0.05	170.80	181.68
+chromium	153.0.8010.12	linux	dumplings	0.75	2	1155	866	93621	webgpu	Wasm128	on	present	gpu	gpu	nvidia/turing	false	22285248		1.21	0.04	167.60	168.84
+chromium	153.0.8010.12	linux	artwork	0.25	1	1178	849	32964	webgpu	Wasm128	on	decode	gpu		nvidia/turing	false	22438112		11.05	0.03	165.27	176.36
+chromium	153.0.8010.12	linux	artwork	0.25	1	1178	849	32964	webgpu	Wasm128	on	present	gpu	gpu	nvidia/turing	false	22280192		1.35	0.02	163.61	164.98
+chromium	153.0.8010.12	linux	artwork	0.75	2	1178	849	99407	webgpu	Wasm128	on	decode	gpu		nvidia/turing	false	22308512		2.51	0.04	165.37	167.92
+chromium	153.0.8010.12	linux	artwork	0.75	2	1178	849	99407	webgpu	Wasm128	on	present	gpu	gpu	nvidia/turing	false	22261760		1.45	0.03	164.16	165.64
+chromium	153.0.8010.12	linux	brochure	0.25	1	841	1189	32824	webgpu	Wasm128	on	decode	gpu		nvidia/turing	false	22386208		10.85	0.05	175.15	186.05
+chromium	153.0.8010.12	linux	brochure	0.25	1	841	1189	32824	webgpu	Wasm128	on	present	gpu	gpu	nvidia/turing	false	22288384		1.11	0.05	169.80	170.96
+chromium	153.0.8010.12	linux	brochure	0.75	1	841	1189	86466	webgpu	Wasm128	on	decode	gpu		nvidia/turing	false	33929568		11.14	0.02	183.07	194.24
+chromium	153.0.8010.12	linux	brochure	0.75	1	841	1189	86466	webgpu	Wasm128	on	present	gpu	gpu	nvidia/turing	false	35035424		1.28	0.03	183.49	184.79
+chromium	153.0.8010.12	linux	patent-scan	0.25	0	825	1212	28041	webgpu	Wasm128	on	decode	gpu		nvidia/turing	false	37835392		11.00	50.56	188.30	249.86
+chromium	153.0.8010.12	linux	patent-scan	0.25	0	825	1212	28041	webgpu	Wasm128	on	present	gpu	gpu	nvidia/turing	false	38379168		1.45	0.05	176.76	178.26
+chromium	153.0.8010.12	linux	patent-scan	0.75	1	825	1212	85887	webgpu	Wasm128	on	decode	gpu		nvidia/turing	false	38937856		11.18	0.03	177.99	189.20
+chromium	153.0.8010.12	linux	patent-scan	0.75	1	825	1212	85887	webgpu	Wasm128	on	present	gpu	gpu	nvidia/turing	false	40490144		1.62	0.03	178.59	180.24
+chromium	153.0.8010.12	linux	line-plot	0.25	0	1000	1000	32827	webgpu	Wasm128	on	decode	gpu		nvidia/turing	false	41610880		10.79	0.03	184.55	195.38
+chromium	153.0.8010.12	linux	line-plot	0.25	0	1000	1000	32827	webgpu	Wasm128	on	present	gpu	gpu	nvidia/turing	false	42447776		0.91	0.04	186.84	187.79
+chromium	153.0.8010.12	linux	line-plot	0.75	1	1000	1000	97944	webgpu	Wasm128	on	decode	gpu		nvidia/turing	false	44247072		11.21	0.06	188.25	199.52
+chromium	153.0.8010.12	linux	line-plot	0.75	1	1000	1000	97944	webgpu	Wasm128	on	present	gpu	gpu	nvidia/turing	false	46274560		1.60	0.05	188.15	189.80
+chromium	153.0.8010.12	linux	clipart	0.25	2	816	1225	28034	webgpu	Wasm128	on	decode	gpu		nvidia/turing	false	48537600		10.87	0.04	195.43	206.34
+chromium	153.0.8010.12	linux	clipart	0.25	2	816	1225	28034	webgpu	Wasm128	on	present	gpu	gpu	nvidia/turing	false	50996992		0.92	0.03	194.81	195.76
+chromium	153.0.8010.12	linux	clipart	0.75	3	816	1225	83202	webgpu	Wasm128	on	decode	gpu		nvidia/turing	false	53686272		11.12	50.44	207.27	268.83
+chromium	153.0.8010.12	linux	clipart	0.75	3	816	1225	83202	webgpu	Wasm128	on	present	gpu	gpu	nvidia/turing	false	99952544		3.75	0.04	241.76	245.55
+chromium	153.0.8010.12	linux	car	0.25	1	1155	866	33016	threads	Wasm128	off (threads)	decode	cpu		cpu				0.77	9.79	172.11	182.67
+chromium	153.0.8010.12	linux	car	0.75	2	1155	866	98890	threads	Wasm128	off (threads)	decode	cpu		cpu				1.39	10.58	103.06	115.04
+chromium	153.0.8010.12	linux	mountain	0.25	1	1155	866	32887	threads	Wasm128	off (threads)	decode	cpu		cpu				1.39	0.06	88.85	90.30
+chromium	153.0.8010.12	linux	mountain	0.75	2	1155	866	90684	threads	Wasm128	off (threads)	decode	cpu		cpu				2.03	0.09	95.32	97.44
+chromium	153.0.8010.12	linux	dumplings	0.25	1	1155	866	32928	threads	Wasm128	off (threads)	decode	cpu		cpu				1.77	0.06	103.52	105.35
+chromium	153.0.8010.12	linux	dumplings	0.75	2	1155	866	93621	threads	Wasm128	off (threads)	decode	cpu		cpu				1.56	0.05	105.58	107.19
+chromium	153.0.8010.12	linux	artwork	0.25	1	1178	849	32964	threads	Wasm128	off (threads)	decode	cpu		cpu				1.62	0.05	111.50	113.17
+chromium	153.0.8010.12	linux	artwork	0.75	2	1178	849	99407	threads	Wasm128	off (threads)	decode	cpu		cpu				1.37	0.06	117.21	118.63
+chromium	153.0.8010.12	linux	brochure	0.25	1	841	1189	32824	threads	Wasm128	off (threads)	decode	cpu		cpu				1.30	0.05	125.29	126.64
+chromium	153.0.8010.12	linux	brochure	0.75	1	841	1189	86466	threads	Wasm128	off (threads)	decode	cpu		cpu				1.50	0.06	120.77	122.33
+chromium	153.0.8010.12	linux	patent-scan	0.25	0	825	1212	28041	threads	Wasm128	off (threads)	decode	cpu		cpu				1.22	8.47	121.22	130.91
+chromium	153.0.8010.12	linux	patent-scan	0.75	1	825	1212	85887	threads	Wasm128	off (threads)	decode	cpu		cpu				1.75	0.04	98.48	100.27
+chromium	153.0.8010.12	linux	line-plot	0.25	0	1000	1000	32827	threads	Wasm128	off (threads)	decode	cpu		cpu				1.72	0.04	106.24	108.00
+chromium	153.0.8010.12	linux	line-plot	0.75	1	1000	1000	97944	threads	Wasm128	off (threads)	decode	cpu		cpu				1.39	0.05	103.12	104.56
+chromium	153.0.8010.12	linux	clipart	0.25	2	816	1225	28034	threads	Wasm128	off (threads)	decode	cpu		cpu				1.29	0.04	90.79	92.13
+chromium	153.0.8010.12	linux	clipart	0.75	3	816	1225	83202	threads	Wasm128	off (threads)	decode	cpu		cpu				1.69	9.08	102.49	113.25
+chromium	153.0.8010.12	linux	car	0.25	1	1155	866	33016	simd	Wasm128	off (simd)	decode	cpu		cpu				1.30	53.10	724.90	779.30
+chromium	153.0.8010.12	linux	car	0.75	2	1155	866	98890	simd	Wasm128	off (simd)	decode	cpu		cpu				1.60	49.40	675.30	726.30
+chromium	153.0.8010.12	linux	mountain	0.25	1	1155	866	32887	simd	Wasm128	off (simd)	decode	cpu		cpu				1.50	8.90	668.40	678.80
+chromium	153.0.8010.12	linux	mountain	0.75	2	1155	866	90684	simd	Wasm128	off (simd)	decode	cpu		cpu				2.10	8.50	669.60	680.20
+chromium	153.0.8010.12	linux	dumplings	0.25	1	1155	866	32928	simd	Wasm128	off (simd)	decode	cpu		cpu				1.30	0.10	642.40	643.80
+chromium	153.0.8010.12	linux	dumplings	0.75	2	1155	866	93621	simd	Wasm128	off (simd)	decode	cpu		cpu				1.50	0.00	643.90	645.40
+chromium	153.0.8010.12	linux	artwork	0.25	1	1178	849	32964	simd	Wasm128	off (simd)	decode	cpu		cpu				1.50	0.10	640.70	642.30
+chromium	153.0.8010.12	linux	artwork	0.75	2	1178	849	99407	simd	Wasm128	off (simd)	decode	cpu		cpu				1.30	0.00	639.10	640.40
+chromium	153.0.8010.12	linux	brochure	0.25	1	841	1189	32824	simd	Wasm128	off (simd)	decode	cpu		cpu				1.30	0.10	657.40	658.80
+chromium	153.0.8010.12	linux	brochure	0.75	1	841	1189	86466	simd	Wasm128	off (simd)	decode	cpu		cpu				1.90	8.00	664.50	674.40
+chromium	153.0.8010.12	linux	patent-scan	0.25	0	825	1212	28041	simd	Wasm128	off (simd)	decode	cpu		cpu				9.70	48.00	640.90	698.60
+chromium	153.0.8010.12	linux	patent-scan	0.75	1	825	1212	85887	simd	Wasm128	off (simd)	decode	cpu		cpu				1.50	7.40	643.90	652.80
+chromium	153.0.8010.12	linux	line-plot	0.25	0	1000	1000	32827	simd	Wasm128	off (simd)	decode	cpu		cpu				1.30	7.10	640.60	649.00
+chromium	153.0.8010.12	linux	line-plot	0.75	1	1000	1000	97944	simd	Wasm128	off (simd)	decode	cpu		cpu				1.40	0.10	639.90	641.40
+chromium	153.0.8010.12	linux	clipart	0.25	2	816	1225	28034	simd	Wasm128	off (simd)	decode	cpu		cpu				1.60	7.20	641.50	650.30
+chromium	153.0.8010.12	linux	clipart	0.75	3	816	1225	83202	simd	Wasm128	off (simd)	decode	cpu		cpu				1.60	44.30	646.70	692.60
+chromium	153.0.8010.12	linux	car	0.25	1	1155	866	33016	webgpu-threads	Wasm128	on	decode	gpu		nvidia/turing	false	20287488		2.08	53.82	141.61	197.50
+chromium	153.0.8010.12	linux	car	0.25	1	1155	866	33016	webgpu-threads	Wasm128	on	present	gpu	gpu	nvidia/turing	false	20133888		1.47	0.04	55.06	56.57
+chromium	153.0.8010.12	linux	car	0.75	2	1155	866	98890	webgpu-threads	Wasm128	on	decode	gpu		nvidia/turing	false	20132256		11.26	53.08	65.92	130.26
+chromium	153.0.8010.12	linux	car	0.75	2	1155	866	98890	webgpu-threads	Wasm128	on	present	gpu	gpu	nvidia/turing	false	20074272		1.54	0.05	53.62	55.21
+chromium	153.0.8010.12	linux	mountain	0.25	1	1155	866	32887	webgpu-threads	Wasm128	on	decode	gpu		nvidia/turing	false	20138208		11.12	0.06	55.97	67.14
+chromium	153.0.8010.12	linux	mountain	0.25	1	1155	866	32887	webgpu-threads	Wasm128	on	present	gpu	gpu	nvidia/turing	false	20106912		1.30	0.06	51.88	53.24
+chromium	153.0.8010.12	linux	mountain	0.75	2	1155	866	90684	webgpu-threads	Wasm128	on	decode	gpu		nvidia/turing	false	20118496		11.04	0.05	56.14	67.23
+chromium	153.0.8010.12	linux	mountain	0.75	2	1155	866	90684	webgpu-threads	Wasm128	on	present	gpu	gpu	nvidia/turing	false	20100416		1.40	0.05	52.45	53.90
+chromium	153.0.8010.12	linux	dumplings	0.25	1	1155	866	32928	webgpu-threads	Wasm128	on	decode	gpu		nvidia/turing	false	20074912		11.08	0.07	54.21	65.36
+chromium	153.0.8010.12	linux	dumplings	0.25	1	1155	866	32928	webgpu-threads	Wasm128	on	present	gpu	gpu	nvidia/turing	false	20152032		1.28	0.05	55.33	56.65
+chromium	153.0.8010.12	linux	dumplings	0.75	2	1155	866	93621	webgpu-threads	Wasm128	on	decode	gpu		nvidia/turing	false	20144576		11.14	0.05	57.78	68.98
+chromium	153.0.8010.12	linux	dumplings	0.75	2	1155	866	93621	webgpu-threads	Wasm128	on	present	gpu	gpu	nvidia/turing	false	20194912		1.20	0.04	55.55	56.79
+chromium	153.0.8010.12	linux	artwork	0.25	1	1178	849	32964	webgpu-threads	Wasm128	on	decode	gpu		nvidia/turing	false	20315328		11.17	0.05	58.18	69.40
+chromium	153.0.8010.12	linux	artwork	0.25	1	1178	849	32964	webgpu-threads	Wasm128	on	present	gpu	gpu	nvidia/turing	false	20129760		1.26	0.04	52.37	53.67
+chromium	153.0.8010.12	linux	artwork	0.75	2	1178	849	99407	webgpu-threads	Wasm128	on	decode	gpu		nvidia/turing	false	20150272		11.42	0.05	56.09	67.56
+chromium	153.0.8010.12	linux	artwork	0.75	2	1178	849	99407	webgpu-threads	Wasm128	on	present	gpu	gpu	nvidia/turing	false	20141984		1.38	0.02	57.37	58.77
+chromium	153.0.8010.12	linux	brochure	0.25	1	841	1189	32824	webgpu-threads	Wasm128	on	decode	gpu		nvidia/turing	false	20148064		10.90	0.04	59.76	70.71
+chromium	153.0.8010.12	linux	brochure	0.25	1	841	1189	32824	webgpu-threads	Wasm128	on	present	gpu	gpu	nvidia/turing	false	19990080		1.12	0.05	50.99	52.16
+chromium	153.0.8010.12	linux	brochure	0.75	1	841	1189	86466	webgpu-threads	Wasm128	on	decode	gpu		nvidia/turing	false	19992480		10.94	0.03	56.40	67.37
+chromium	153.0.8010.12	linux	brochure	0.75	1	841	1189	86466	webgpu-threads	Wasm128	on	present	gpu	gpu	nvidia/turing	false	19963136		0.93	0.03	55.07	56.03
+chromium	153.0.8010.12	linux	patent-scan	0.25	0	825	1212	28041	webgpu-threads	Wasm128	on	decode	gpu		nvidia/turing	false	20264768		10.92	55.73	64.89	131.54
+chromium	153.0.8010.12	linux	patent-scan	0.25	0	825	1212	28041	webgpu-threads	Wasm128	on	present	gpu	gpu	nvidia/turing	false	20286816		1.22	0.04	55.16	56.42
+chromium	153.0.8010.12	linux	patent-scan	0.75	1	825	1212	85887	webgpu-threads	Wasm128	on	decode	gpu		nvidia/turing	false	21330208		11.67	0.04	56.84	68.55
+chromium	153.0.8010.12	linux	patent-scan	0.75	1	825	1212	85887	webgpu-threads	Wasm128	on	present	gpu	gpu	nvidia/turing	false	21247904		1.57	0.04	52.30	53.91
+chromium	153.0.8010.12	linux	line-plot	0.25	0	1000	1000	32827	webgpu-threads	Wasm128	on	decode	gpu		nvidia/turing	false	20308992		11.38	0.04	54.91	66.33
+chromium	153.0.8010.12	linux	line-plot	0.25	0	1000	1000	32827	webgpu-threads	Wasm128	on	present	gpu	gpu	nvidia/turing	false	20414848		1.28	0.03	51.01	52.32
+chromium	153.0.8010.12	linux	line-plot	0.75	1	1000	1000	97944	webgpu-threads	Wasm128	on	decode	gpu		nvidia/turing	false	20430464		11.12	0.05	52.46	63.62
+chromium	153.0.8010.12	linux	line-plot	0.75	1	1000	1000	97944	webgpu-threads	Wasm128	on	present	gpu	gpu	nvidia/turing	false	20320864		1.20	0.05	53.15	54.40
+chromium	153.0.8010.12	linux	clipart	0.25	2	816	1225	28034	webgpu-threads	Wasm128	on	decode	gpu		nvidia/turing	false	21116928		11.10	0.06	54.63	65.78
+chromium	153.0.8010.12	linux	clipart	0.25	2	816	1225	28034	webgpu-threads	Wasm128	on	present	gpu	gpu	nvidia/turing	false	21118528		1.22	0.04	51.20	52.46
+chromium	153.0.8010.12	linux	clipart	0.75	3	816	1225	83202	webgpu-threads	Wasm128	on	decode	gpu		nvidia/turing	false	21183520		11.12	50.09	63.68	124.88
+chromium	153.0.8010.12	linux	clipart	0.75	3	816	1225	83202	webgpu-threads	Wasm128	on	present	gpu	gpu	nvidia/turing	false	21395552		3.04	0.04	53.44	56.52
+chromium	153.0.8010.12	linux	car	0.25	1	1155	866	33016	threads	Wasm128	off (threads)	decode	cpu		cpu				0.88	8.81	218.50	228.19
+chromium	153.0.8010.12	linux	car	0.75	2	1155	866	98890	threads	Wasm128	off (threads)	decode	cpu		cpu				1.71	7.15	108.74	117.59
+chromium	153.0.8010.12	linux	mountain	0.25	1	1155	866	32887	threads	Wasm128	off (threads)	decode	cpu		cpu				1.43	0.07	103.50	104.99
+chromium	153.0.8010.12	linux	mountain	0.75	2	1155	866	90684	threads	Wasm128	off (threads)	decode	cpu		cpu				1.54	0.06	89.12	90.72
+chromium	153.0.8010.12	linux	dumplings	0.25	1	1155	866	32928	threads	Wasm128	off (threads)	decode	cpu		cpu				1.28	0.05	93.95	95.27
+chromium	153.0.8010.12	linux	dumplings	0.75	2	1155	866	93621	threads	Wasm128	off (threads)	decode	cpu		cpu				1.65	0.06	90.17	91.88
+chromium	153.0.8010.12	linux	artwork	0.25	1	1178	849	32964	threads	Wasm128	off (threads)	decode	cpu		cpu				1.39	0.03	97.40	98.83
+chromium	153.0.8010.12	linux	artwork	0.75	2	1178	849	99407	threads	Wasm128	off (threads)	decode	cpu		cpu				1.28	0.05	88.65	89.99
+chromium	153.0.8010.12	linux	brochure	0.25	1	841	1189	32824	threads	Wasm128	off (threads)	decode	cpu		cpu				1.29	0.04	104.68	106.01
+chromium	153.0.8010.12	linux	brochure	0.75	1	841	1189	86466	threads	Wasm128	off (threads)	decode	cpu		cpu				1.36	0.05	97.63	99.04
+chromium	153.0.8010.12	linux	patent-scan	0.25	0	825	1212	28041	threads	Wasm128	off (threads)	decode	cpu		cpu				1.41	8.21	103.19	112.81
+chromium	153.0.8010.12	linux	patent-scan	0.75	1	825	1212	85887	threads	Wasm128	off (threads)	decode	cpu		cpu				1.91	0.08	89.88	91.87
+chromium	153.0.8010.12	linux	line-plot	0.25	0	1000	1000	32827	threads	Wasm128	off (threads)	decode	cpu		cpu				1.47	0.04	90.60	92.11
+chromium	153.0.8010.12	linux	line-plot	0.75	1	1000	1000	97944	threads	Wasm128	off (threads)	decode	cpu		cpu				1.72	0.05	89.27	91.04
+chromium	153.0.8010.12	linux	clipart	0.25	2	816	1225	28034	threads	Wasm128	off (threads)	decode	cpu		cpu				1.42	0.04	86.82	88.28
+chromium	153.0.8010.12	linux	clipart	0.75	3	816	1225	83202	threads	Wasm128	off (threads)	decode	cpu		cpu				1.58	9.03	96.75	107.37
+chromium	153.0.8010.12	linux	car	0.25	1	1155	866	33016	simd	Wasm128	off (simd)	decode	cpu		cpu				1.00	53.70	718.30	773.00
+chromium	153.0.8010.12	linux	car	0.75	2	1155	866	98890	simd	Wasm128	off (simd)	decode	cpu		cpu				9.20	49.90	672.50	731.60
+chromium	153.0.8010.12	linux	mountain	0.25	1	1155	866	32887	simd	Wasm128	off (simd)	decode	cpu		cpu				1.10	7.80	665.70	674.60
+chromium	153.0.8010.12	linux	mountain	0.75	2	1155	866	90684	simd	Wasm128	off (simd)	decode	cpu		cpu				1.70	8.80	667.60	678.10
+chromium	153.0.8010.12	linux	dumplings	0.25	1	1155	866	32928	simd	Wasm128	off (simd)	decode	cpu		cpu				1.60	0.00	639.20	640.80
+chromium	153.0.8010.12	linux	dumplings	0.75	2	1155	866	93621	simd	Wasm128	off (simd)	decode	cpu		cpu				1.50	0.10	643.90	645.50
+chromium	153.0.8010.12	linux	artwork	0.25	1	1178	849	32964	simd	Wasm128	off (simd)	decode	cpu		cpu				1.80	0.00	643.50	645.30
+chromium	153.0.8010.12	linux	artwork	0.75	2	1178	849	99407	simd	Wasm128	off (simd)	decode	cpu		cpu				1.70	0.10	640.30	642.10
+chromium	153.0.8010.12	linux	brochure	0.25	1	841	1189	32824	simd	Wasm128	off (simd)	decode	cpu		cpu				1.30	0.10	657.50	658.90
+chromium	153.0.8010.12	linux	brochure	0.75	1	841	1189	86466	simd	Wasm128	off (simd)	decode	cpu		cpu				1.40	8.30	666.70	676.40
+chromium	153.0.8010.12	linux	patent-scan	0.25	0	825	1212	28041	simd	Wasm128	off (simd)	decode	cpu		cpu				1.50	44.30	638.60	684.40
+chromium	153.0.8010.12	linux	patent-scan	0.75	1	825	1212	85887	simd	Wasm128	off (simd)	decode	cpu		cpu				1.30	7.40	638.10	646.80
+chromium	153.0.8010.12	linux	line-plot	0.25	0	1000	1000	32827	simd	Wasm128	off (simd)	decode	cpu		cpu				1.10	7.10	638.50	646.70
+chromium	153.0.8010.12	linux	line-plot	0.75	1	1000	1000	97944	simd	Wasm128	off (simd)	decode	cpu		cpu				1.10	0.00	631.30	632.40
+chromium	153.0.8010.12	linux	clipart	0.25	2	816	1225	28034	simd	Wasm128	off (simd)	decode	cpu		cpu				9.10	7.60	643.90	660.60
+chromium	153.0.8010.12	linux	clipart	0.75	3	816	1225	83202	simd	Wasm128	off (simd)	decode	cpu		cpu				1.40	44.20	646.50	692.10
+chromium	153.0.8010.12	linux	car	0.25	1	1155	866	33016	webgpu-threads	Wasm128	on	decode	gpu		nvidia/turing	false	20305920		11.50	50.87	139.59	201.96
+chromium	153.0.8010.12	linux	car	0.25	1	1155	866	33016	webgpu-threads	Wasm128	on	present	gpu	gpu	nvidia/turing	false	20154368		1.42	0.04	55.84	57.30
+chromium	153.0.8010.12	linux	car	0.75	2	1155	866	98890	webgpu-threads	Wasm128	on	decode	gpu		nvidia/turing	false	20160000		1.28	45.94	66.99	114.21
+chromium	153.0.8010.12	linux	car	0.75	2	1155	866	98890	webgpu-threads	Wasm128	on	present	gpu	gpu	nvidia/turing	false	20197568		1.70	0.05	54.34	56.10
+chromium	153.0.8010.12	linux	mountain	0.25	1	1155	866	32887	webgpu-threads	Wasm128	on	decode	gpu		nvidia/turing	false	20198528		1.02	0.08	53.40	54.50
+chromium	153.0.8010.12	linux	mountain	0.25	1	1155	866	32887	webgpu-threads	Wasm128	on	present	gpu	gpu	nvidia/turing	false	20176224		1.23	0.05	54.00	55.27
+chromium	153.0.8010.12	linux	mountain	0.75	2	1155	866	90684	webgpu-threads	Wasm128	on	decode	gpu		nvidia/turing	false	20184800		1.27	0.06	57.50	58.83
+chromium	153.0.8010.12	linux	mountain	0.75	2	1155	866	90684	webgpu-threads	Wasm128	on	present	gpu	gpu	nvidia/turing	false	20166368		1.25	0.05	54.20	55.50
+chromium	153.0.8010.12	linux	dumplings	0.25	1	1155	866	32928	webgpu-threads	Wasm128	on	decode	gpu		nvidia/turing	false	20203648		1.39	0.06	55.02	56.47
+chromium	153.0.8010.12	linux	dumplings	0.25	1	1155	866	32928	webgpu-threads	Wasm128	on	present	gpu	gpu	nvidia/turing	false	20191168		1.36	0.04	52.93	54.33
+chromium	153.0.8010.12	linux	dumplings	0.75	2	1155	866	93621	webgpu-threads	Wasm128	on	decode	gpu		nvidia/turing	false	20096832		1.49	0.04	54.65	56.18
+chromium	153.0.8010.12	linux	dumplings	0.75	2	1155	866	93621	webgpu-threads	Wasm128	on	present	gpu	gpu	nvidia/turing	false	20192544		1.22	0.06	53.00	54.28
+chromium	153.0.8010.12	linux	artwork	0.25	1	1178	849	32964	webgpu-threads	Wasm128	on	decode	gpu		nvidia/turing	false	20279008		1.45	0.02	52.34	53.81
+chromium	153.0.8010.12	linux	artwork	0.25	1	1178	849	32964	webgpu-threads	Wasm128	on	present	gpu	gpu	nvidia/turing	false	20086784		1.53	0.02	48.87	50.42
+chromium	153.0.8010.12	linux	artwork	0.75	2	1178	849	99407	webgpu-threads	Wasm128	on	decode	gpu		nvidia/turing	false	20108992		1.55	0.03	55.26	56.84
+chromium	153.0.8010.12	linux	artwork	0.75	2	1178	849	99407	webgpu-threads	Wasm128	on	present	gpu	gpu	nvidia/turing	false	20135840		1.46	0.04	53.05	54.55
+chromium	153.0.8010.12	linux	brochure	0.25	1	841	1189	32824	webgpu-threads	Wasm128	on	decode	gpu		nvidia/turing	false	20150688		1.24	0.03	57.31	58.58
+chromium	153.0.8010.12	linux	brochure	0.25	1	841	1189	32824	webgpu-threads	Wasm128	on	present	gpu	gpu	nvidia/turing	false	20007488		1.20	0.02	52.32	53.54
+chromium	153.0.8010.12	linux	brochure	0.75	1	841	1189	86466	webgpu-threads	Wasm128	on	decode	gpu		nvidia/turing	false	20012928		1.26	0.02	54.69	55.97
+chromium	153.0.8010.12	linux	brochure	0.75	1	841	1189	86466	webgpu-threads	Wasm128	on	present	gpu	gpu	nvidia/turing	false	19998624		1.36	0.06	53.62	55.04
+chromium	153.0.8010.12	linux	patent-scan	0.25	0	825	1212	28041	webgpu-threads	Wasm128	on	decode	gpu		nvidia/turing	false	20348128		1.23	45.25	62.60	109.08
+chromium	153.0.8010.12	linux	patent-scan	0.25	0	825	1212	28041	webgpu-threads	Wasm128	on	present	gpu	gpu	nvidia/turing	false	20344832		1.51	0.02	51.75	53.28
+chromium	153.0.8010.12	linux	patent-scan	0.75	1	825	1212	85887	webgpu-threads	Wasm128	on	decode	gpu		nvidia/turing	false	20320256		1.30	0.05	53.68	55.03
+chromium	153.0.8010.12	linux	patent-scan	0.75	1	825	1212	85887	webgpu-threads	Wasm128	on	present	gpu	gpu	nvidia/turing	false	20227136		1.51	0.04	50.85	52.40
+chromium	153.0.8010.12	linux	line-plot	0.25	0	1000	1000	32827	webgpu-threads	Wasm128	on	decode	gpu		nvidia/turing	false	19427616		1.24	0.04	51.47	52.75
+chromium	153.0.8010.12	linux	line-plot	0.25	0	1000	1000	32827	webgpu-threads	Wasm128	on	present	gpu	gpu	nvidia/turing	false	19363840		1.37	0.05	48.28	49.70
+chromium	153.0.8010.12	linux	line-plot	0.75	1	1000	1000	97944	webgpu-threads	Wasm128	on	decode	gpu		nvidia/turing	false	19380608		1.49	0.03	51.51	53.03
+chromium	153.0.8010.12	linux	line-plot	0.75	1	1000	1000	97944	webgpu-threads	Wasm128	on	present	gpu	gpu	nvidia/turing	false	19361728		1.17	0.04	49.70	50.91
+chromium	153.0.8010.12	linux	clipart	0.25	2	816	1225	28034	webgpu-threads	Wasm128	on	decode	gpu		nvidia/turing	false	19916800		1.20	0.05	50.24	51.48
+chromium	153.0.8010.12	linux	clipart	0.25	2	816	1225	28034	webgpu-threads	Wasm128	on	present	gpu	gpu	nvidia/turing	false	19876384		1.30	0.03	48.59	49.92
+chromium	153.0.8010.12	linux	clipart	0.75	3	816	1225	83202	webgpu-threads	Wasm128	on	decode	gpu		nvidia/turing	false	19906560		1.25	42.84	63.49	107.58
+chromium	153.0.8010.12	linux	clipart	0.75	3	816	1225	83202	webgpu-threads	Wasm128	on	present	gpu	gpu	nvidia/turing	false	19927104		3.09	0.06	51.96	55.11
+chromium	153.0.8010.12	linux	car	0.25	1	1155	866	33016	threads	Wasm128	off (threads)	decode	cpu		cpu				0.77	8.83	168.96	178.56
+chromium	153.0.8010.12	linux	car	0.75	2	1155	866	98890	threads	Wasm128	off (threads)	decode	cpu		cpu				1.45	7.56	120.12	129.13
+chromium	153.0.8010.12	linux	mountain	0.25	1	1155	866	32887	threads	Wasm128	off (threads)	decode	cpu		cpu				1.34	0.05	104.47	105.86
+chromium	153.0.8010.12	linux	mountain	0.75	2	1155	866	90684	threads	Wasm128	off (threads)	decode	cpu		cpu				1.56	0.06	96.87	98.49
+chromium	153.0.8010.12	linux	dumplings	0.25	1	1155	866	32928	threads	Wasm128	off (threads)	decode	cpu		cpu				1.42	0.03	100.49	101.95
+chromium	153.0.8010.12	linux	dumplings	0.75	2	1155	866	93621	threads	Wasm128	off (threads)	decode	cpu		cpu				1.44	0.03	96.23	97.71
+chromium	153.0.8010.12	linux	artwork	0.25	1	1178	849	32964	threads	Wasm128	off (threads)	decode	cpu		cpu				1.51	0.05	100.34	101.90
+chromium	153.0.8010.12	linux	artwork	0.75	2	1178	849	99407	threads	Wasm128	off (threads)	decode	cpu		cpu				1.36	0.06	100.89	102.32
+chromium	153.0.8010.12	linux	brochure	0.25	1	841	1189	32824	threads	Wasm128	off (threads)	decode	cpu		cpu				1.50	0.04	106.52	108.07
+chromium	153.0.8010.12	linux	brochure	0.75	1	841	1189	86466	threads	Wasm128	off (threads)	decode	cpu		cpu				1.64	0.08	120.00	121.72
+chromium	153.0.8010.12	linux	patent-scan	0.25	0	825	1212	28041	threads	Wasm128	off (threads)	decode	cpu		cpu				1.16	7.38	130.73	139.27
+chromium	153.0.8010.12	linux	patent-scan	0.75	1	825	1212	85887	threads	Wasm128	off (threads)	decode	cpu		cpu				1.51	0.05	115.00	116.56
+chromium	153.0.8010.12	linux	line-plot	0.25	0	1000	1000	32827	threads	Wasm128	off (threads)	decode	cpu		cpu				1.88	0.05	103.63	105.56
+chromium	153.0.8010.12	linux	line-plot	0.75	1	1000	1000	97944	threads	Wasm128	off (threads)	decode	cpu		cpu				1.48	0.05	97.29	98.83
+chromium	153.0.8010.12	linux	clipart	0.25	2	816	1225	28034	threads	Wasm128	off (threads)	decode	cpu		cpu				1.48	0.04	113.84	115.36
+chromium	153.0.8010.12	linux	clipart	0.75	3	816	1225	83202	threads	Wasm128	off (threads)	decode	cpu		cpu				1.34	8.75	103.13	113.21
+chromium	153.0.8010.12	linux	car	0.25	1	1155	866	33016	simd	Wasm128	off (simd)	decode	cpu		cpu				0.90	51.90	722.60	775.40
+chromium	153.0.8010.12	linux	car	0.75	2	1155	866	98890	simd	Wasm128	off (simd)	decode	cpu		cpu				1.50	49.00	674.80	725.30
+chromium	153.0.8010.12	linux	mountain	0.25	1	1155	866	32887	simd	Wasm128	off (simd)	decode	cpu		cpu				1.30	9.50	673.50	684.30
+chromium	153.0.8010.12	linux	mountain	0.75	2	1155	866	90684	simd	Wasm128	off (simd)	decode	cpu		cpu				1.40	9.00	666.70	677.10
+chromium	153.0.8010.12	linux	dumplings	0.25	1	1155	866	32928	simd	Wasm128	off (simd)	decode	cpu		cpu				1.60	0.00	639.80	641.40
+chromium	153.0.8010.12	linux	dumplings	0.75	2	1155	866	93621	simd	Wasm128	off (simd)	decode	cpu		cpu				1.50	0.10	639.30	640.90
+chromium	153.0.8010.12	linux	artwork	0.25	1	1178	849	32964	simd	Wasm128	off (simd)	decode	cpu		cpu				1.70	0.00	639.20	640.90
+chromium	153.0.8010.12	linux	artwork	0.75	2	1178	849	99407	simd	Wasm128	off (simd)	decode	cpu		cpu				1.60	0.10	637.80	639.50
+chromium	153.0.8010.12	linux	brochure	0.25	1	841	1189	32824	simd	Wasm128	off (simd)	decode	cpu		cpu				1.60	0.10	653.90	655.60
+chromium	153.0.8010.12	linux	brochure	0.75	1	841	1189	86466	simd	Wasm128	off (simd)	decode	cpu		cpu				1.50	7.20	664.70	673.40
+chromium	153.0.8010.12	linux	patent-scan	0.25	0	825	1212	28041	simd	Wasm128	off (simd)	decode	cpu		cpu				1.30	46.90	648.20	696.40
+chromium	153.0.8010.12	linux	patent-scan	0.75	1	825	1212	85887	simd	Wasm128	off (simd)	decode	cpu		cpu				1.50	6.90	676.60	685.00
+chromium	153.0.8010.12	linux	line-plot	0.25	0	1000	1000	32827	simd	Wasm128	off (simd)	decode	cpu		cpu				1.50	7.50	645.90	654.90
+chromium	153.0.8010.12	linux	line-plot	0.75	1	1000	1000	97944	simd	Wasm128	off (simd)	decode	cpu		cpu				1.50	0.10	641.20	642.80
+chromium	153.0.8010.12	linux	clipart	0.25	2	816	1225	28034	simd	Wasm128	off (simd)	decode	cpu		cpu				1.30	6.90	644.50	652.70
+chromium	153.0.8010.12	linux	clipart	0.75	3	816	1225	83202	simd	Wasm128	off (simd)	decode	cpu		cpu				1.60	46.20	646.30	694.10
+chromium	153.0.8010.12	linux	car	0.25	1	1155	866	33016	threads	Wasm128	on	decode	cpu		google/swiftshader				10.61	51.50	168.70	230.82
+chromium	153.0.8010.12	linux	car	0.25	1	1155	866	33016	threads	Wasm128	on	present	cpu	2d	google/swiftshader			this package has no GPU presentation	1.40	0.07	103.13	104.60
+chromium	153.0.8010.12	linux	car	0.75	2	1155	866	98890	threads	Wasm128	on	decode	cpu		google/swiftshader				1.48	47.00	106.88	155.36
+chromium	153.0.8010.12	linux	car	0.75	2	1155	866	98890	threads	Wasm128	on	present	cpu	2d	google/swiftshader			this package has no GPU presentation	1.48	0.06	103.29	104.83
+chromium	153.0.8010.12	linux	mountain	0.25	1	1155	866	32887	threads	Wasm128	on	decode	cpu		google/swiftshader				1.56	0.05	92.32	93.93
+chromium	153.0.8010.12	linux	mountain	0.25	1	1155	866	32887	threads	Wasm128	on	present	cpu	2d	google/swiftshader			this package has no GPU presentation	1.59	0.04	90.08	91.71
+chromium	153.0.8010.12	linux	mountain	0.75	2	1155	866	90684	threads	Wasm128	on	decode	cpu		google/swiftshader				1.62	0.03	88.56	90.21
+chromium	153.0.8010.12	linux	mountain	0.75	2	1155	866	90684	threads	Wasm128	on	present	cpu	2d	google/swiftshader			this package has no GPU presentation	1.62	0.03	94.26	95.91
+chromium	153.0.8010.12	linux	dumplings	0.25	1	1155	866	32928	threads	Wasm128	on	decode	cpu		google/swiftshader				1.47	0.03	94.39	95.89
+chromium	153.0.8010.12	linux	dumplings	0.25	1	1155	866	32928	threads	Wasm128	on	present	cpu	2d	google/swiftshader			this package has no GPU presentation	1.45	0.05	93.60	95.10
+chromium	153.0.8010.12	linux	dumplings	0.75	2	1155	866	93621	threads	Wasm128	on	decode	cpu		google/swiftshader				1.63	0.03	91.19	92.85
+chromium	153.0.8010.12	linux	dumplings	0.75	2	1155	866	93621	threads	Wasm128	on	present	cpu	2d	google/swiftshader			this package has no GPU presentation	1.69	0.05	104.50	106.25
+chromium	153.0.8010.12	linux	artwork	0.25	1	1178	849	32964	threads	Wasm128	on	decode	cpu		google/swiftshader				1.50	0.03	110.52	112.05
+chromium	153.0.8010.12	linux	artwork	0.25	1	1178	849	32964	threads	Wasm128	on	present	cpu	2d	google/swiftshader			this package has no GPU presentation	1.25	0.04	94.41	95.70
+chromium	153.0.8010.12	linux	artwork	0.75	2	1178	849	99407	threads	Wasm128	on	decode	cpu		google/swiftshader				1.75	0.05	92.35	94.15
+chromium	153.0.8010.12	linux	artwork	0.75	2	1178	849	99407	threads	Wasm128	on	present	cpu	2d	google/swiftshader			this package has no GPU presentation	1.42	0.04	93.90	95.36
+chromium	153.0.8010.12	linux	brochure	0.25	1	841	1189	32824	threads	Wasm128	on	decode	cpu		google/swiftshader				1.50	0.10	103.23	104.82
+chromium	153.0.8010.12	linux	brochure	0.25	1	841	1189	32824	threads	Wasm128	on	present	cpu	2d	google/swiftshader			this package has no GPU presentation	1.14	0.03	95.88	97.05
+chromium	153.0.8010.12	linux	brochure	0.75	1	841	1189	86466	threads	Wasm128	on	decode	cpu		google/swiftshader				1.45	0.04	95.84	97.34
+chromium	153.0.8010.12	linux	brochure	0.75	1	841	1189	86466	threads	Wasm128	on	present	cpu	2d	google/swiftshader			this package has no GPU presentation	1.72	0.03	92.93	94.69
+chromium	153.0.8010.12	linux	patent-scan	0.25	0	825	1212	28041	threads	Wasm128	on	decode	cpu		google/swiftshader				1.25	46.25	97.94	145.44
+chromium	153.0.8010.12	linux	patent-scan	0.25	0	825	1212	28041	threads	Wasm128	on	present	cpu	2d	google/swiftshader			this package has no GPU presentation	1.46	0.03	91.57	93.06
+chromium	153.0.8010.12	linux	patent-scan	0.75	1	825	1212	85887	threads	Wasm128	on	decode	cpu		google/swiftshader				1.65	0.03	87.97	89.65
+chromium	153.0.8010.12	linux	patent-scan	0.75	1	825	1212	85887	threads	Wasm128	on	present	cpu	2d	google/swiftshader			this package has no GPU presentation	1.63	0.05	91.11	92.79
+chromium	153.0.8010.12	linux	line-plot	0.25	0	1000	1000	32827	threads	Wasm128	on	decode	cpu		google/swiftshader				1.72	0.04	94.87	96.63
+chromium	153.0.8010.12	linux	line-plot	0.25	0	1000	1000	32827	threads	Wasm128	on	present	cpu	2d	google/swiftshader			this package has no GPU presentation	1.44	0.03	95.67	97.14
+chromium	153.0.8010.12	linux	line-plot	0.75	1	1000	1000	97944	threads	Wasm128	on	decode	cpu		google/swiftshader				1.77	0.03	87.83	89.63
+chromium	153.0.8010.12	linux	line-plot	0.75	1	1000	1000	97944	threads	Wasm128	on	present	cpu	2d	google/swiftshader			this package has no GPU presentation	1.42	0.05	93.76	95.22
+chromium	153.0.8010.12	linux	clipart	0.25	2	816	1225	28034	threads	Wasm128	on	decode	cpu		google/swiftshader				1.48	0.04	100.01	101.53
+chromium	153.0.8010.12	linux	clipart	0.25	2	816	1225	28034	threads	Wasm128	on	present	cpu	2d	google/swiftshader			this package has no GPU presentation	1.29	0.04	100.55	101.88
+chromium	153.0.8010.12	linux	clipart	0.75	3	816	1225	83202	threads	Wasm128	on	decode	cpu		google/swiftshader				1.39	47.10	99.57	148.06
+chromium	153.0.8010.12	linux	clipart	0.75	3	816	1225	83202	threads	Wasm128	on	present	cpu	2d	google/swiftshader			this package has no GPU presentation	3.40	0.07	96.75	100.23
+chromium	153.0.8010.12	linux	car	0.25	1	1155	866	33016	threads	Wasm128	off (threads)	decode	cpu		cpu				0.66	9.87	128.10	138.63
+chromium	153.0.8010.12	linux	car	0.75	2	1155	866	98890	threads	Wasm128	off (threads)	decode	cpu		cpu				1.40	6.89	104.65	112.95
+chromium	153.0.8010.12	linux	mountain	0.25	1	1155	866	32887	threads	Wasm128	off (threads)	decode	cpu		cpu				1.20	0.05	104.13	105.38
+chromium	153.0.8010.12	linux	mountain	0.75	2	1155	866	90684	threads	Wasm128	off (threads)	decode	cpu		cpu				1.38	0.06	94.11	95.55
+chromium	153.0.8010.12	linux	dumplings	0.25	1	1155	866	32928	threads	Wasm128	off (threads)	decode	cpu		cpu				1.34	0.05	99.26	100.65
+chromium	153.0.8010.12	linux	dumplings	0.75	2	1155	866	93621	threads	Wasm128	off (threads)	decode	cpu		cpu				1.50	0.06	95.25	96.80
+chromium	153.0.8010.12	linux	artwork	0.25	1	1178	849	32964	threads	Wasm128	off (threads)	decode	cpu		cpu				1.59	0.05	107.30	108.93
+chromium	153.0.8010.12	linux	artwork	0.75	2	1178	849	99407	threads	Wasm128	off (threads)	decode	cpu		cpu				1.33	0.06	97.92	99.32
+chromium	153.0.8010.12	linux	brochure	0.25	1	841	1189	32824	threads	Wasm128	off (threads)	decode	cpu		cpu				1.27	0.04	114.13	115.44
+chromium	153.0.8010.12	linux	brochure	0.75	1	841	1189	86466	threads	Wasm128	off (threads)	decode	cpu		cpu				1.72	0.05	110.22	111.99
+chromium	153.0.8010.12	linux	patent-scan	0.25	0	825	1212	28041	threads	Wasm128	off (threads)	decode	cpu		cpu				1.25	8.21	100.14	109.60
+chromium	153.0.8010.12	linux	patent-scan	0.75	1	825	1212	85887	threads	Wasm128	off (threads)	decode	cpu		cpu				1.63	0.03	92.82	94.48
+chromium	153.0.8010.12	linux	line-plot	0.25	0	1000	1000	32827	threads	Wasm128	off (threads)	decode	cpu		cpu				1.68	0.05	102.03	103.75
+chromium	153.0.8010.12	linux	line-plot	0.75	1	1000	1000	97944	threads	Wasm128	off (threads)	decode	cpu		cpu				1.58	0.04	87.22	88.85
+chromium	153.0.8010.12	linux	clipart	0.25	2	816	1225	28034	threads	Wasm128	off (threads)	decode	cpu		cpu				9.69	0.05	87.80	97.55
+chromium	153.0.8010.12	linux	clipart	0.75	3	816	1225	83202	threads	Wasm128	off (threads)	decode	cpu		cpu				1.59	8.47	106.18	116.23
+chromium	153.0.8010.12	linux	car	0.25	1	1155	866	33016	simd	Wasm128	off (simd)	decode	cpu		cpu				0.90	49.90	719.60	770.40
+chromium	153.0.8010.12	linux	car	0.75	2	1155	866	98890	simd	Wasm128	off (simd)	decode	cpu		cpu				1.30	46.10	672.00	719.40
+chromium	153.0.8010.12	linux	mountain	0.25	1	1155	866	32887	simd	Wasm128	off (simd)	decode	cpu		cpu				1.20	8.80	669.00	679.00
+chromium	153.0.8010.12	linux	mountain	0.75	2	1155	866	90684	simd	Wasm128	off (simd)	decode	cpu		cpu				1.40	9.10	673.60	684.10
+chromium	153.0.8010.12	linux	dumplings	0.25	1	1155	866	32928	simd	Wasm128	off (simd)	decode	cpu		cpu				1.40	0.00	641.20	642.60
+chromium	153.0.8010.12	linux	dumplings	0.75	2	1155	866	93621	simd	Wasm128	off (simd)	decode	cpu		cpu				1.40	0.00	643.40	644.80
+chromium	153.0.8010.12	linux	artwork	0.25	1	1178	849	32964	simd	Wasm128	off (simd)	decode	cpu		cpu				1.50	0.00	639.30	640.80
+chromium	153.0.8010.12	linux	artwork	0.75	2	1178	849	99407	simd	Wasm128	off (simd)	decode	cpu		cpu				9.30	0.00	639.40	648.70
+chromium	153.0.8010.12	linux	brochure	0.25	1	841	1189	32824	simd	Wasm128	off (simd)	decode	cpu		cpu				1.50	0.10	656.60	658.20
+chromium	153.0.8010.12	linux	brochure	0.75	1	841	1189	86466	simd	Wasm128	off (simd)	decode	cpu		cpu				1.50	7.80	661.50	670.80
+chromium	153.0.8010.12	linux	patent-scan	0.25	0	825	1212	28041	simd	Wasm128	off (simd)	decode	cpu		cpu				1.30	43.90	641.10	686.30
+chromium	153.0.8010.12	linux	patent-scan	0.75	1	825	1212	85887	simd	Wasm128	off (simd)	decode	cpu		cpu				1.80	6.80	641.30	649.90
+chromium	153.0.8010.12	linux	line-plot	0.25	0	1000	1000	32827	simd	Wasm128	off (simd)	decode	cpu		cpu				1.30	7.60	640.20	649.10
+chromium	153.0.8010.12	linux	line-plot	0.75	1	1000	1000	97944	simd	Wasm128	off (simd)	decode	cpu		cpu				1.30	0.20	635.20	636.70
+chromium	153.0.8010.12	linux	clipart	0.25	2	816	1225	28034	simd	Wasm128	off (simd)	decode	cpu		cpu				1.70	6.90	645.20	653.80
+chromium	153.0.8010.12	linux	clipart	0.75	3	816	1225	83202	simd	Wasm128	off (simd)	decode	cpu		cpu				1.60	43.70	645.80	691.10
+chromium	153.0.8010.12	linux	car	0.25	1	1155	866	33016	webgpu-threads	Wasm128	on	decode	gpu		nvidia/turing	false	20327552		11.20	56.13	140.34	207.67
+chromium	153.0.8010.12	linux	car	0.25	1	1155	866	33016	webgpu-threads	Wasm128	on	present	gpu	gpu	nvidia/turing	false	20106912		1.66	0.06	60.91	62.63
+chromium	153.0.8010.12	linux	car	0.75	2	1155	866	98890	webgpu-threads	Wasm128	on	decode	gpu		nvidia/turing	false	20070400		11.42	53.79	70.64	135.86
+chromium	153.0.8010.12	linux	car	0.75	2	1155	866	98890	webgpu-threads	Wasm128	on	present	gpu	gpu	nvidia/turing	false	20114592		1.46	0.03	55.82	57.31
+chromium	153.0.8010.12	linux	mountain	0.25	1	1155	866	32887	webgpu-threads	Wasm128	on	decode	gpu		nvidia/turing	false	20140032		11.31	0.06	56.85	68.22
+chromium	153.0.8010.12	linux	mountain	0.25	1	1155	866	32887	webgpu-threads	Wasm128	on	present	gpu	gpu	nvidia/turing	false	20174848		1.50	0.04	56.13	57.67
+chromium	153.0.8010.12	linux	mountain	0.75	2	1155	866	90684	webgpu-threads	Wasm128	on	decode	gpu		nvidia/turing	false	20214624		11.57	0.04	54.74	66.35
+chromium	153.0.8010.12	linux	mountain	0.75	2	1155	866	90684	webgpu-threads	Wasm128	on	present	gpu	gpu	nvidia/turing	false	20176640		1.51	0.04	53.10	54.65
+chromium	153.0.8010.12	linux	dumplings	0.25	1	1155	866	32928	webgpu-threads	Wasm128	on	decode	gpu		nvidia/turing	false	20169120		11.35	0.04	54.44	65.84
+chromium	153.0.8010.12	linux	dumplings	0.25	1	1155	866	32928	webgpu-threads	Wasm128	on	present	gpu	gpu	nvidia/turing	false	20150784		1.42	0.05	54.34	55.80
+chromium	153.0.8010.12	linux	dumplings	0.75	2	1155	866	93621	webgpu-threads	Wasm128	on	decode	gpu		nvidia/turing	false	20150912		11.38	0.04	54.75	66.17
+chromium	153.0.8010.12	linux	dumplings	0.75	2	1155	866	93621	webgpu-threads	Wasm128	on	present	gpu	gpu	nvidia/turing	false	20168864		1.17	0.04	52.91	54.11
+chromium	153.0.8010.12	linux	artwork	0.25	1	1178	849	32964	webgpu-threads	Wasm128	on	decode	gpu		nvidia/turing	false	20250016		1.69	0.02	52.77	54.49
+chromium	153.0.8010.12	linux	artwork	0.25	1	1178	849	32964	webgpu-threads	Wasm128	on	present	gpu	gpu	nvidia/turing	false	20129792		1.32	0.04	50.69	52.05
+chromium	153.0.8010.12	linux	artwork	0.75	2	1178	849	99407	webgpu-threads	Wasm128	on	decode	gpu		nvidia/turing	false	20104544		1.88	0.03	52.07	53.98
+chromium	153.0.8010.12	linux	artwork	0.75	2	1178	849	99407	webgpu-threads	Wasm128	on	present	gpu	gpu	nvidia/turing	false	20107264		1.54	0.05	52.39	53.97
+chromium	153.0.8010.12	linux	brochure	0.25	1	841	1189	32824	webgpu-threads	Wasm128	on	decode	gpu		nvidia/turing	false	20113408		10.91	0.04	54.99	65.95
+chromium	153.0.8010.12	linux	brochure	0.25	1	841	1189	32824	webgpu-threads	Wasm128	on	present	gpu	gpu	nvidia/turing	false	19984640		1.17	0.03	51.89	53.10
+chromium	153.0.8010.12	linux	brochure	0.75	1	841	1189	86466	webgpu-threads	Wasm128	on	decode	gpu		nvidia/turing	false	19958432		10.91	0.05	53.74	64.69
+chromium	153.0.8010.12	linux	brochure	0.75	1	841	1189	86466	webgpu-threads	Wasm128	on	present	gpu	gpu	nvidia/turing	false	19978784		1.02	0.03	52.92	53.97
+chromium	153.0.8010.12	linux	patent-scan	0.25	0	825	1212	28041	webgpu-threads	Wasm128	on	decode	gpu		nvidia/turing	false	20305696		10.90	48.86	60.47	120.23
+chromium	153.0.8010.12	linux	patent-scan	0.25	0	825	1212	28041	webgpu-threads	Wasm128	on	present	gpu	gpu	nvidia/turing	false	20319712		1.88	0.04	50.88	52.79
+chromium	153.0.8010.12	linux	patent-scan	0.75	1	825	1212	85887	webgpu-threads	Wasm128	on	decode	gpu		nvidia/turing	false	20267488		11.19	0.05	52.23	63.46
+chromium	153.0.8010.12	linux	patent-scan	0.75	1	825	1212	85887	webgpu-threads	Wasm128	on	present	gpu	gpu	nvidia/turing	false	20221952		1.40	0.05	50.40	51.85
+chromium	153.0.8010.12	linux	line-plot	0.25	0	1000	1000	32827	webgpu-threads	Wasm128	on	decode	gpu		nvidia/turing	false	19408416		1.14	0.03	50.97	52.14
+chromium	153.0.8010.12	linux	line-plot	0.25	0	1000	1000	32827	webgpu-threads	Wasm128	on	present	gpu	gpu	nvidia/turing	false	19392256		1.34	0.02	49.02	50.38
+chromium	153.0.8010.12	linux	line-plot	0.75	1	1000	1000	97944	webgpu-threads	Wasm128	on	decode	gpu		nvidia/turing	false	19406848		11.39	0.03	50.71	62.13
+chromium	153.0.8010.12	linux	line-plot	0.75	1	1000	1000	97944	webgpu-threads	Wasm128	on	present	gpu	gpu	nvidia/turing	false	19400704		1.02	0.03	51.53	52.58
+chromium	153.0.8010.12	linux	clipart	0.25	2	816	1225	28034	webgpu-threads	Wasm128	on	decode	gpu		nvidia/turing	false	19900416		10.81	0.06	52.30	63.16
+chromium	153.0.8010.12	linux	clipart	0.25	2	816	1225	28034	webgpu-threads	Wasm128	on	present	gpu	gpu	nvidia/turing	false	19925728		1.29	0.04	52.52	53.85
+chromium	153.0.8010.12	linux	clipart	0.75	3	816	1225	83202	webgpu-threads	Wasm128	on	decode	gpu		nvidia/turing	false	19902144		11.02	55.21	61.61	127.84
+chromium	153.0.8010.12	linux	clipart	0.75	3	816	1225	83202	webgpu-threads	Wasm128	on	present	gpu	gpu	nvidia/turing	false	19912608		2.71	0.03	53.47	56.21
+chromium	153.0.8010.12	linux	car	0.25	1	1155	866	33016	threads	Wasm128	off (threads)	decode	cpu		cpu				0.81	10.09	173.84	184.74
+chromium	153.0.8010.12	linux	car	0.75	2	1155	866	98890	threads	Wasm128	off (threads)	decode	cpu		cpu				1.44	7.04	122.40	130.88
+chromium	153.0.8010.12	linux	mountain	0.25	1	1155	866	32887	threads	Wasm128	off (threads)	decode	cpu		cpu				1.27	0.06	96.82	98.15
+chromium	153.0.8010.12	linux	mountain	0.75	2	1155	866	90684	threads	Wasm128	off (threads)	decode	cpu		cpu				1.47	0.07	95.35	96.89
+chromium	153.0.8010.12	linux	dumplings	0.25	1	1155	866	32928	threads	Wasm128	off (threads)	decode	cpu		cpu				1.75	0.09	93.95	95.79
+chromium	153.0.8010.12	linux	dumplings	0.75	2	1155	866	93621	threads	Wasm128	off (threads)	decode	cpu		cpu				1.63	0.04	93.75	95.42
+chromium	153.0.8010.12	linux	artwork	0.25	1	1178	849	32964	threads	Wasm128	off (threads)	decode	cpu		cpu				1.34	0.04	107.74	109.13
+chromium	153.0.8010.12	linux	artwork	0.75	2	1178	849	99407	threads	Wasm128	off (threads)	decode	cpu		cpu				1.39	0.06	108.06	109.51
+chromium	153.0.8010.12	linux	brochure	0.25	1	841	1189	32824	threads	Wasm128	off (threads)	decode	cpu		cpu				1.36	0.04	114.36	115.76
+chromium	153.0.8010.12	linux	brochure	0.75	1	841	1189	86466	threads	Wasm128	off (threads)	decode	cpu		cpu				1.52	0.07	103.01	104.61
+chromium	153.0.8010.12	linux	patent-scan	0.25	0	825	1212	28041	threads	Wasm128	off (threads)	decode	cpu		cpu				1.55	7.42	121.08	130.05
+chromium	153.0.8010.12	linux	patent-scan	0.75	1	825	1212	85887	threads	Wasm128	off (threads)	decode	cpu		cpu				1.52	0.04	92.03	93.59
+chromium	153.0.8010.12	linux	line-plot	0.25	0	1000	1000	32827	threads	Wasm128	off (threads)	decode	cpu		cpu				1.41	0.04	93.85	95.30
+chromium	153.0.8010.12	linux	line-plot	0.75	1	1000	1000	97944	threads	Wasm128	off (threads)	decode	cpu		cpu				1.49	0.04	91.90	93.44
+chromium	153.0.8010.12	linux	clipart	0.25	2	816	1225	28034	threads	Wasm128	off (threads)	decode	cpu		cpu				1.35	0.04	93.58	94.97
+chromium	153.0.8010.12	linux	clipart	0.75	3	816	1225	83202	threads	Wasm128	off (threads)	decode	cpu		cpu				4.68	8.91	96.99	110.58
+chromium	153.0.8010.12	linux	car	0.25	1	1155	866	33016	simd	Wasm128	off (simd)	decode	cpu		cpu				1.20	51.30	723.00	775.50
+chromium	153.0.8010.12	linux	car	0.75	2	1155	866	98890	simd	Wasm128	off (simd)	decode	cpu		cpu				9.70	45.70	672.50	727.90
+chromium	153.0.8010.12	linux	mountain	0.25	1	1155	866	32887	simd	Wasm128	off (simd)	decode	cpu		cpu				1.20	7.60	675.50	684.30
+chromium	153.0.8010.12	linux	mountain	0.75	2	1155	866	90684	simd	Wasm128	off (simd)	decode	cpu		cpu				1.40	8.60	669.80	679.80
+chromium	153.0.8010.12	linux	dumplings	0.25	1	1155	866	32928	simd	Wasm128	off (simd)	decode	cpu		cpu				1.50	0.00	643.00	644.50
+chromium	153.0.8010.12	linux	dumplings	0.75	2	1155	866	93621	simd	Wasm128	off (simd)	decode	cpu		cpu				1.60	0.10	641.40	643.10
+chromium	153.0.8010.12	linux	artwork	0.25	1	1178	849	32964	simd	Wasm128	off (simd)	decode	cpu		cpu				1.30	0.10	638.70	640.10
+chromium	153.0.8010.12	linux	artwork	0.75	2	1178	849	99407	simd	Wasm128	off (simd)	decode	cpu		cpu				1.40	0.10	650.80	652.30
+chromium	153.0.8010.12	linux	brochure	0.25	1	841	1189	32824	simd	Wasm128	off (simd)	decode	cpu		cpu				1.50	0.20	653.90	655.60
+chromium	153.0.8010.12	linux	brochure	0.75	1	841	1189	86466	simd	Wasm128	off (simd)	decode	cpu		cpu				9.30	8.40	660.00	677.70
+chromium	153.0.8010.12	linux	patent-scan	0.25	0	825	1212	28041	simd	Wasm128	off (simd)	decode	cpu		cpu				1.60	44.10	649.30	695.00
+chromium	153.0.8010.12	linux	patent-scan	0.75	1	825	1212	85887	simd	Wasm128	off (simd)	decode	cpu		cpu				1.50	8.00	643.90	653.40
+chromium	153.0.8010.12	linux	line-plot	0.25	0	1000	1000	32827	simd	Wasm128	off (simd)	decode	cpu		cpu				1.20	7.40	641.70	650.30
+chromium	153.0.8010.12	linux	line-plot	0.75	1	1000	1000	97944	simd	Wasm128	off (simd)	decode	cpu		cpu				1.50	0.10	632.30	633.90
+chromium	153.0.8010.12	linux	clipart	0.25	2	816	1225	28034	simd	Wasm128	off (simd)	decode	cpu		cpu				1.60	6.70	641.60	649.90
+chromium	153.0.8010.12	linux	clipart	0.75	3	816	1225	83202	simd	Wasm128	off (simd)	decode	cpu		cpu				1.40	47.10	646.60	695.10
+chromium	153.0.8010.12	linux	car	0.25	1	1155	866	33016	threads	Wasm128	on	decode	cpu		google/swiftshader				10.53	50.97	164.30	225.80
+chromium	153.0.8010.12	linux	car	0.25	1	1155	866	33016	threads	Wasm128	on	present	cpu	2d	google/swiftshader			this package has no GPU presentation	1.98	0.05	91.54	93.57
+chromium	153.0.8010.12	linux	car	0.75	2	1155	866	98890	threads	Wasm128	on	decode	cpu		google/swiftshader				1.52	45.19	103.28	150.00
+chromium	153.0.8010.12	linux	car	0.75	2	1155	866	98890	threads	Wasm128	on	present	cpu	2d	google/swiftshader			this package has no GPU presentation	1.54	0.06	93.60	95.20
+chromium	153.0.8010.12	linux	mountain	0.25	1	1155	866	32887	threads	Wasm128	on	decode	cpu		google/swiftshader				1.53	0.04	92.62	94.19
+chromium	153.0.8010.12	linux	mountain	0.25	1	1155	866	32887	threads	Wasm128	on	present	cpu	2d	google/swiftshader			this package has no GPU presentation	1.51	0.03	86.89	88.44
+chromium	153.0.8010.12	linux	mountain	0.75	2	1155	866	90684	threads	Wasm128	on	decode	cpu		google/swiftshader				1.40	0.04	90.76	92.20
+chromium	153.0.8010.12	linux	mountain	0.75	2	1155	866	90684	threads	Wasm128	on	present	cpu	2d	google/swiftshader			this package has no GPU presentation	1.56	0.03	94.07	95.66
+chromium	153.0.8010.12	linux	dumplings	0.25	1	1155	866	32928	threads	Wasm128	on	decode	cpu		google/swiftshader				1.59	0.05	89.00	90.64
+chromium	153.0.8010.12	linux	dumplings	0.25	1	1155	866	32928	threads	Wasm128	on	present	cpu	2d	google/swiftshader			this package has no GPU presentation	1.40	0.03	90.75	92.19
+chromium	153.0.8010.12	linux	dumplings	0.75	2	1155	866	93621	threads	Wasm128	on	decode	cpu		google/swiftshader				1.58	0.05	92.03	93.66
+chromium	153.0.8010.12	linux	dumplings	0.75	2	1155	866	93621	threads	Wasm128	on	present	cpu	2d	google/swiftshader			this package has no GPU presentation	1.58	0.06	94.35	95.98
+chromium	153.0.8010.12	linux	artwork	0.25	1	1178	849	32964	threads	Wasm128	on	decode	cpu		google/swiftshader				1.22	0.03	100.03	101.28
+chromium	153.0.8010.12	linux	artwork	0.25	1	1178	849	32964	threads	Wasm128	on	present	cpu	2d	google/swiftshader			this package has no GPU presentation	1.23	0.04	90.21	91.48
+chromium	153.0.8010.12	linux	artwork	0.75	2	1178	849	99407	threads	Wasm128	on	decode	cpu		google/swiftshader				1.65	0.03	86.95	88.64
+chromium	153.0.8010.12	linux	artwork	0.75	2	1178	849	99407	threads	Wasm128	on	present	cpu	2d	google/swiftshader			this package has no GPU presentation	1.70	0.05	94.07	95.82
+chromium	153.0.8010.12	linux	brochure	0.25	1	841	1189	32824	threads	Wasm128	on	decode	cpu		google/swiftshader				1.63	0.05	101.19	102.86
+chromium	153.0.8010.12	linux	brochure	0.25	1	841	1189	32824	threads	Wasm128	on	present	cpu	2d	google/swiftshader			this package has no GPU presentation	1.17	0.04	89.08	90.28
+chromium	153.0.8010.12	linux	brochure	0.75	1	841	1189	86466	threads	Wasm128	on	decode	cpu		google/swiftshader				1.46	0.03	87.40	88.89
+chromium	153.0.8010.12	linux	brochure	0.75	1	841	1189	86466	threads	Wasm128	on	present	cpu	2d	google/swiftshader			this package has no GPU presentation	1.53	0.06	94.46	96.04
+chromium	153.0.8010.12	linux	patent-scan	0.25	0	825	1212	28041	threads	Wasm128	on	decode	cpu		google/swiftshader				1.56	48.25	96.07	145.89
+chromium	153.0.8010.12	linux	patent-scan	0.25	0	825	1212	28041	threads	Wasm128	on	present	cpu	2d	google/swiftshader			this package has no GPU presentation	1.44	0.04	91.44	92.93
+chromium	153.0.8010.12	linux	patent-scan	0.75	1	825	1212	85887	threads	Wasm128	on	decode	cpu		google/swiftshader				1.54	0.04	89.04	90.62
+chromium	153.0.8010.12	linux	patent-scan	0.75	1	825	1212	85887	threads	Wasm128	on	present	cpu	2d	google/swiftshader			this package has no GPU presentation	1.79	0.04	85.60	87.43
+chromium	153.0.8010.12	linux	line-plot	0.25	0	1000	1000	32827	threads	Wasm128	on	decode	cpu		google/swiftshader				1.46	0.05	90.51	92.02
+chromium	153.0.8010.12	linux	line-plot	0.25	0	1000	1000	32827	threads	Wasm128	on	present	cpu	2d	google/swiftshader			this package has no GPU presentation	1.61	0.04	86.68	88.33
+chromium	153.0.8010.12	linux	line-plot	0.75	1	1000	1000	97944	threads	Wasm128	on	decode	cpu		google/swiftshader				1.70	0.06	85.99	87.75
+chromium	153.0.8010.12	linux	line-plot	0.75	1	1000	1000	97944	threads	Wasm128	on	present	cpu	2d	google/swiftshader			this package has no GPU presentation	1.82	0.04	85.23	87.09
+chromium	153.0.8010.12	linux	clipart	0.25	2	816	1225	28034	threads	Wasm128	on	decode	cpu		google/swiftshader				1.69	0.04	90.13	91.87
+chromium	153.0.8010.12	linux	clipart	0.25	2	816	1225	28034	threads	Wasm128	on	present	cpu	2d	google/swiftshader			this package has no GPU presentation	1.58	0.05	88.40	90.03
+chromium	153.0.8010.12	linux	clipart	0.75	3	816	1225	83202	threads	Wasm128	on	decode	cpu		google/swiftshader				1.58	46.63	97.15	145.36
+chromium	153.0.8010.12	linux	clipart	0.75	3	816	1225	83202	threads	Wasm128	on	present	cpu	2d	google/swiftshader			this package has no GPU presentation	3.74	0.06	89.60	93.39
+chromium	153.0.8010.12	linux	car	0.25	1	1155	866	33016	threads	Wasm128	off (threads)	decode	cpu		cpu				0.78	9.42	128.62	138.82
+chromium	153.0.8010.12	linux	car	0.75	2	1155	866	98890	threads	Wasm128	off (threads)	decode	cpu		cpu				1.40	7.25	101.83	110.49
+chromium	153.0.8010.12	linux	mountain	0.25	1	1155	866	32887	threads	Wasm128	off (threads)	decode	cpu		cpu				1.24	0.06	88.71	90.00
+chromium	153.0.8010.12	linux	mountain	0.75	2	1155	866	90684	threads	Wasm128	off (threads)	decode	cpu		cpu				1.40	0.05	93.81	95.26
+chromium	153.0.8010.12	linux	dumplings	0.25	1	1155	866	32928	threads	Wasm128	off (threads)	decode	cpu		cpu				1.40	0.06	94.80	96.26
+chromium	153.0.8010.12	linux	dumplings	0.75	2	1155	866	93621	threads	Wasm128	off (threads)	decode	cpu		cpu				1.36	0.05	94.41	95.82
+chromium	153.0.8010.12	linux	artwork	0.25	1	1178	849	32964	threads	Wasm128	off (threads)	decode	cpu		cpu				1.32	0.05	98.96	100.33
+chromium	153.0.8010.12	linux	artwork	0.75	2	1178	849	99407	threads	Wasm128	off (threads)	decode	cpu		cpu				1.29	0.05	90.36	91.71
+chromium	153.0.8010.12	linux	brochure	0.25	1	841	1189	32824	threads	Wasm128	off (threads)	decode	cpu		cpu				1.40	0.06	101.66	103.12
+chromium	153.0.8010.12	linux	brochure	0.75	1	841	1189	86466	threads	Wasm128	off (threads)	decode	cpu		cpu				1.53	0.06	115.61	117.20
+chromium	153.0.8010.12	linux	patent-scan	0.25	0	825	1212	28041	threads	Wasm128	off (threads)	decode	cpu		cpu				1.31	7.59	103.46	112.35
+chromium	153.0.8010.12	linux	patent-scan	0.75	1	825	1212	85887	threads	Wasm128	off (threads)	decode	cpu		cpu				1.59	0.04	99.03	100.66
+chromium	153.0.8010.12	linux	line-plot	0.25	0	1000	1000	32827	threads	Wasm128	off (threads)	decode	cpu		cpu				1.49	0.03	88.99	90.51
+chromium	153.0.8010.12	linux	line-plot	0.75	1	1000	1000	97944	threads	Wasm128	off (threads)	decode	cpu		cpu				1.69	0.04	87.14	88.87
+chromium	153.0.8010.12	linux	clipart	0.25	2	816	1225	28034	threads	Wasm128	off (threads)	decode	cpu		cpu				1.36	0.05	92.67	94.09
+chromium	153.0.8010.12	linux	clipart	0.75	3	816	1225	83202	threads	Wasm128	off (threads)	decode	cpu		cpu				1.48	8.45	98.05	107.98
+chromium	153.0.8010.12	linux	car	0.25	1	1155	866	33016	simd	Wasm128	off (simd)	decode	cpu		cpu				0.90	50.40	727.00	778.30
+chromium	153.0.8010.12	linux	car	0.75	2	1155	866	98890	simd	Wasm128	off (simd)	decode	cpu		cpu				1.60	55.80	699.20	756.60
+chromium	153.0.8010.12	linux	mountain	0.25	1	1155	866	32887	simd	Wasm128	off (simd)	decode	cpu		cpu				2.50	8.60	687.00	698.10
+chromium	153.0.8010.12	linux	mountain	0.75	2	1155	866	90684	simd	Wasm128	off (simd)	decode	cpu		cpu				1.40	8.90	679.70	690.00
+chromium	153.0.8010.12	linux	dumplings	0.25	1	1155	866	32928	simd	Wasm128	off (simd)	decode	cpu		cpu				1.70	0.00	642.00	643.70
+chromium	153.0.8010.12	linux	dumplings	0.75	2	1155	866	93621	simd	Wasm128	off (simd)	decode	cpu		cpu				1.70	0.20	639.20	641.10
+chromium	153.0.8010.12	linux	artwork	0.25	1	1178	849	32964	simd	Wasm128	off (simd)	decode	cpu		cpu				1.20	0.20	646.60	648.00
+chromium	153.0.8010.12	linux	artwork	0.75	2	1178	849	99407	simd	Wasm128	off (simd)	decode	cpu		cpu				1.60	0.10	639.60	641.30
+chromium	153.0.8010.12	linux	brochure	0.25	1	841	1189	32824	simd	Wasm128	off (simd)	decode	cpu		cpu				1.30	0.10	654.10	655.50
+chromium	153.0.8010.12	linux	brochure	0.75	1	841	1189	86466	simd	Wasm128	off (simd)	decode	cpu		cpu				1.10	8.40	659.20	668.70
+chromium	153.0.8010.12	linux	patent-scan	0.25	0	825	1212	28041	simd	Wasm128	off (simd)	decode	cpu		cpu				1.50	42.80	645.30	689.60
+chromium	153.0.8010.12	linux	patent-scan	0.75	1	825	1212	85887	simd	Wasm128	off (simd)	decode	cpu		cpu				1.70	7.50	637.00	646.20
+chromium	153.0.8010.12	linux	line-plot	0.25	0	1000	1000	32827	simd	Wasm128	off (simd)	decode	cpu		cpu				1.30	7.80	639.20	648.30
+chromium	153.0.8010.12	linux	line-plot	0.75	1	1000	1000	97944	simd	Wasm128	off (simd)	decode	cpu		cpu				9.80	0.10	632.60	642.50
+chromium	153.0.8010.12	linux	clipart	0.25	2	816	1225	28034	simd	Wasm128	off (simd)	decode	cpu		cpu				1.10	7.50	643.30	651.90
+chromium	153.0.8010.12	linux	clipart	0.75	3	816	1225	83202	simd	Wasm128	off (simd)	decode	cpu		cpu				1.30	42.40	643.90	687.60

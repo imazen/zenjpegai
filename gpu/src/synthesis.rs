@@ -712,9 +712,56 @@ pub struct Timing {
     pub plan_host_ns: u64,
     /// Host time encoding and submitting the tile command buffers.
     pub submit_host_ns: u64,
+    /// Host time in `GpuDecoder` before synthesis: codestream parse + header read.
+    pub headers_host_ns: u64,
+    /// Host time parsing the common (entropy/latent) networks — a `(model, op)` cache miss
+    /// only, 0 on warm decodes.
+    pub common_host_ns: u64,
+    /// Host time parsing the synthesis checkpoints and uploading their weights — a cache miss
+    /// only, 0 on warm decodes.
+    pub weights_host_ns: u64,
+    /// Host time in the entropy stage (z substream, residuals, quality map; both components).
+    pub entropy_host_ns: u64,
+    /// Host time in latent reconstruction + post-processing (hyper-decoder, context model,
+    /// LSBS; both components). This is the serial CPU stage the GPU work waits on.
+    pub latent_host_ns: u64,
     /// Sum of the tiles' compute-pass durations from GPU timestamp queries, when the device has
-    /// them and the picture was read back through [`GpuPicture::read_planes`].
+    /// them and the timestamps were read back (through [`GpuPicture::read_planes`],
+    /// [`GpuPicture::read_rgba`] or [`GpuPicture::gpu_time`]).
     pub gpu_ns: Option<u64>,
+}
+
+/// Extra commands [`GpuSynthesis::run_tailed`] appends to its single submission, so the whole
+/// decode is one queue submit and at most one map round-trip.
+#[derive(Default)]
+pub(crate) enum RunTail<'a> {
+    /// The planes stay in the picture buffer; readers submit their own copies.
+    #[default]
+    None,
+    /// Copy the picture buffer into the staging buffer — `read_planes` then only maps.
+    Planes,
+    /// Convert the picture to the caller's `rgba8unorm` texture (display `out_h x out_w`) and,
+    /// when `stage`, copy it into the staging buffer for `read_rgba`. The texture is stored on
+    /// the picture (`GpuPicture::rgba_texture`).
+    Rgba {
+        tex: &'a wgpu::Texture,
+        out: (usize, usize),
+        stage: bool,
+    },
+}
+
+/// What the run's tail left in the staging buffer.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Staged {
+    None,
+    /// Planar `f32` picture, tightly packed `[3, h, w]`.
+    Planes,
+    /// `rgba8` rows at the padded copy stride.
+    Rgba {
+        stride: usize,
+        h: usize,
+        w: usize,
+    },
 }
 
 /// A synthesised picture still on the GPU: planar `f32` YUV `[3, height, width]` in `[0, 255]`
@@ -727,36 +774,75 @@ pub struct GpuPicture {
     pub width: usize,
     pub timing: Timing,
     staging: wgpu::Buffer,
+    staged: Staged,
+    rgba_tex: Option<wgpu::Texture>,
     queries: Option<(wgpu::Buffer, u32)>,
     profile: Option<(wgpu::Buffer, Vec<String>)>,
 }
 
+// `Instant` panics on wasm32-unknown-unknown; the browser timer is `Date.now` (ms as f64).
 #[cfg(not(target_arch = "wasm32"))]
-fn now() -> std::time::Instant {
+pub(crate) fn now() -> std::time::Instant {
     std::time::Instant::now()
 }
 #[cfg(not(target_arch = "wasm32"))]
-fn since(t: std::time::Instant) -> u64 {
+pub(crate) fn since(t: std::time::Instant) -> u64 {
     t.elapsed().as_nanos() as u64
 }
-// `Instant` panics on wasm32-unknown-unknown; host-side submit times are not interesting there
-// (use the browser's performance timeline around the awaited call instead).
 #[cfg(target_arch = "wasm32")]
-fn now() {}
+pub(crate) fn now() -> f64 {
+    js_sys::Date::now()
+}
 #[cfg(target_arch = "wasm32")]
-fn since(_: ()) -> u64 {
-    0
+pub(crate) fn since(t: f64) -> u64 {
+    ((js_sys::Date::now() - t) * 1e6) as u64
 }
 
 impl GpuPicture {
+    /// Sum the tile-pass durations out of a mapped timestamp-result buffer.
+    fn read_ticks(&self, buf: &wgpu::Buffer, bytes: u64) -> Result<u64> {
+        let view = buf
+            .slice(0..bytes)
+            .get_mapped_range()
+            .map_err(|e| GpuError::Device(e.to_string()))?;
+        let ticks: u64 = bytemuck::cast_slice::<u8, u64>(&view)
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|t| t[1].saturating_sub(t[0]))
+            .sum();
+        drop(view);
+        buf.unmap();
+        Ok(ticks)
+    }
+
+    /// Map the staging buffer and (when timestamp queries ran) the query-result buffer in one
+    /// wait, then read the timestamps into `timing.gpu_ns`.
+    async fn map_staging(&mut self, bytes: u64) -> Result<()> {
+        let ctx = &self.ctx;
+        match &self.queries {
+            Some((qbuf, tiles)) => {
+                let qbytes = *tiles as u64 * 16;
+                ctx.map_read2(&self.staging, bytes, qbuf, qbytes).await?;
+                let ticks = self.read_ticks(qbuf, qbytes)?;
+                self.timing.gpu_ns =
+                    Some((ticks as f64 * ctx.queue().get_timestamp_period() as f64) as u64);
+            }
+            None => ctx.map_read(&self.staging, bytes).await?,
+        }
+        Ok(())
+    }
+
     /// Read the three planes back: `[3, height, width]`. Also fills `timing.gpu_ns`.
     pub async fn read_planes(&mut self) -> Result<Tensor<f32>> {
         let ctx = &self.ctx;
         let bytes = (3 * self.height * self.width * 4) as u64;
-        let mut enc = ctx.device().create_command_encoder(&Default::default());
-        enc.copy_buffer_to_buffer(&self.buffer, 0, &self.staging, 0, bytes);
-        ctx.queue().submit([enc.finish()]);
-        ctx.map_read(&self.staging, bytes).await?;
+        if self.staged != Staged::Planes {
+            let mut enc = ctx.device().create_command_encoder(&Default::default());
+            enc.copy_buffer_to_buffer(&self.buffer, 0, &self.staging, 0, bytes);
+            ctx.queue().submit([enc.finish()]);
+        }
+        self.map_staging(bytes).await?;
         let data = {
             let view = self
                 .staging
@@ -766,8 +852,31 @@ impl GpuPicture {
             bytemuck::cast_slice::<u8, f32>(&view).to_vec()
         };
         self.staging.unmap();
-        self.timing.gpu_ns = self.gpu_time().await?;
         Ok(Tensor::from_vec(3, self.height, self.width, data)?)
+    }
+
+    /// Read back the RGBA picture the run staged with `RunTail::Rgba { stage: true }` — the map is
+    /// the only wait, everything was recorded into the decode's single submission. Also fills
+    /// `timing.gpu_ns`.
+    pub async fn read_rgba(&mut self) -> Result<Vec<u8>> {
+        let Staged::Rgba { stride, h, w } = self.staged else {
+            return Err(GpuError::Shape(
+                "no staged RGBA readback (the run needs RunTail::Rgba stage)".into(),
+            ));
+        };
+        self.map_staging((stride * h) as u64).await?;
+        let view = self
+            .staging
+            .slice(0..(stride * h) as u64)
+            .get_mapped_range()
+            .map_err(|e| GpuError::Device(e.to_string()))?;
+        let mut out = Vec::with_capacity(w * h * 4);
+        for row in 0..h {
+            out.extend_from_slice(&view[row * stride..][..w * 4]);
+        }
+        drop(view);
+        self.staging.unmap();
+        Ok(out)
     }
 
     /// Device time of each dispatch, in submission order, after a run of a workspace with
@@ -809,49 +918,35 @@ impl GpuPicture {
         };
         let bytes = *tiles as u64 * 16;
         self.ctx.map_read(buf, bytes).await?;
-        let ticks: u64 = {
-            let view = buf
-                .slice(0..bytes)
-                .get_mapped_range()
-                .map_err(|e| GpuError::Device(e.to_string()))?;
-            bytemuck::cast_slice::<u8, u64>(&view)
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .map(|t| t[1].saturating_sub(t[0]))
-                .sum()
-        };
-        buf.unmap();
+        let ticks = self.read_ticks(buf, bytes)?;
         Ok(Some(
             (ticks as f64 * self.ctx.queue().get_timestamp_period() as f64) as u64,
         ))
     }
 
+    /// The `rgba8unorm` texture a [`RunTail::Rgba`] run already produced, if any.
+    pub fn rgba_texture(&self) -> Option<&wgpu::Texture> {
+        self.rgba_tex.as_ref()
+    }
+
     /// Convert to an `rgba8unorm` texture (BT.709, 4:4:4) on the GPU, cropped to
     /// `out_h x out_w`, for presentation without a readback. The texture has
-    /// `STORAGE_BINDING | TEXTURE_BINDING | COPY_SRC` usage.
+    /// `STORAGE_BINDING | TEXTURE_BINDING | COPY_SRC` usage. Returns the texture the run
+    /// already made when it was built with a matching [`RunTail::Rgba`] instead of submitting a
+    /// second conversion.
     pub fn to_rgba_texture(&self, out_h: usize, out_w: usize) -> Result<wgpu::Texture> {
+        if let Some(tex) = &self.rgba_tex
+            && tex.width() as usize == out_w
+            && tex.height() as usize == out_h
+        {
+            return Ok(tex.clone());
+        }
         if out_h > self.height || out_w > self.width || out_h == 0 || out_w == 0 {
             return Err(GpuError::Shape(
                 "display size outside the coded picture".into(),
             ));
         }
-        let tex = self.ctx.device().create_texture(&wgpu::TextureDescriptor {
-            label: Some("zenjpegai rgba"),
-            size: wgpu::Extent3d {
-                width: out_w as u32,
-                height: out_h as u32,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::STORAGE_BINDING
-                | wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
+        let tex = crate::decoder::rgba_texture(&self.ctx, out_h, out_w);
         let view = tex.create_view(&Default::default());
         let mut g = Graph::new(&self.ctx);
         g.yuv_to_rgba(
@@ -968,6 +1063,26 @@ impl GpuSynthesis {
         tiling: Option<SynthesisTiling>,
         independent_regions: Option<&RegionGrid>,
     ) -> Result<GpuPicture> {
+        self.run_tailed(
+            ws,
+            y_hat,
+            (height, width),
+            tiling,
+            independent_regions,
+            RunTail::None,
+        )
+    }
+
+    /// [`run`](Self::run) with extra commands appended to the same submission (`Tail`).
+    pub(crate) fn run_tailed(
+        &self,
+        ws: &mut Workspace,
+        y_hat: [&Tensor<f32>; 2],
+        (height, width): (usize, usize),
+        tiling: Option<SynthesisTiling>,
+        independent_regions: Option<&RegionGrid>,
+        tail: RunTail<'_>,
+    ) -> Result<GpuPicture> {
         let ctx = &self.ctx;
         let (lh, lw) = (y_hat[0].h, y_hat[0].w);
         if (y_hat[0].c, y_hat[1].c) != (160, 96) || (y_hat[1].h, y_hat[1].w) != (lh, lw) {
@@ -1012,10 +1127,23 @@ impl GpuSynthesis {
             storage | wgpu::BufferUsages::COPY_SRC,
             "zenjpegai picture",
         )?;
+        // The staging buffer must also fit a padded-stride RGBA copy when the tail stages one
+        // (it always does for real pictures, but a degenerate tiny picture can pad up past the
+        // planar size).
+        let stage_bytes = match &tail {
+            RunTail::Rgba {
+                stage: true, out, ..
+            } => {
+                let stride =
+                    (out.1 * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as usize);
+                rec_bytes.max((stride * out.0) as u64)
+            }
+            _ => rec_bytes,
+        };
         grow(
             &mut ws.staging,
             ctx,
-            rec_bytes,
+            stage_bytes,
             wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             "zenjpegai readback",
         )?;
@@ -1125,10 +1253,12 @@ impl GpuSynthesis {
                 (set, resolve, read, labels)
             });
 
+        // All tile plans, the timestamp resolve and the tail (readback copies / RGBA convert)
+        // go into one command encoder: one queue submit per picture, not one per tile.
+        let t_submit = now();
+        let mut enc = ctx.device().create_command_encoder(&Default::default());
         let mut at = 0u32;
         for (i, plan) in resolved.iter().enumerate() {
-            let t = now();
-            let mut enc = ctx.device().create_command_encoder(&Default::default());
             match &profile {
                 Some((set, ..)) => {
                     plan.encode_profiled(&mut enc, set, at);
@@ -1143,22 +1273,66 @@ impl GpuSynthesis {
                     plan.encode(&mut enc, stamps);
                 }
             }
-            if i + 1 == tiles.len() {
-                if let Some((set, resolve, read, _)) = &profile {
-                    enc.resolve_query_set(set, 0..at, resolve, 0);
-                    enc.copy_buffer_to_buffer(resolve, 0, read, 0, at as u64 * 8);
-                } else if let Some(q) = &ws.queries {
-                    enc.resolve_query_set(&q.set, 0..2 * timed, &q.resolve, 0);
-                    enc.copy_buffer_to_buffer(&q.resolve, 0, &q.read, 0, timed as u64 * 16);
-                }
-            }
-            ctx.queue().submit([enc.finish()]);
-            timing.submit_host_ns += since(t);
+        }
+        if let Some((set, resolve, read, _)) = &profile {
+            enc.resolve_query_set(set, 0..at, resolve, 0);
+            enc.copy_buffer_to_buffer(resolve, 0, read, 0, at as u64 * 8);
+        } else if let Some(q) = &ws.queries {
+            enc.resolve_query_set(&q.set, 0..2 * timed, &q.resolve, 0);
+            enc.copy_buffer_to_buffer(&q.resolve, 0, &q.read, 0, timed as u64 * 16);
         }
 
         let (Some(rec), Some(staging)) = (&ws.rec, &ws.staging) else {
             return Err(GpuError::Shape("workspace buffers missing".into()));
         };
+        let mut staged = Staged::None;
+        match &tail {
+            RunTail::None => {}
+            RunTail::Planes => {
+                enc.copy_buffer_to_buffer(rec, 0, staging, 0, rec_bytes);
+                staged = Staged::Planes;
+            }
+            RunTail::Rgba { tex, out, stage } => {
+                if out.0 > height || out.1 > width || out.0 == 0 || out.1 == 0 {
+                    return Err(GpuError::Shape(
+                        "display size outside the coded picture".into(),
+                    ));
+                }
+                // The conversion pass has no intermediate tensors: the pool is untouched.
+                let mut g = Graph::new(ctx);
+                g.yuv_to_rgba(
+                    rec,
+                    (height, width),
+                    *out,
+                    &tex.create_view(&Default::default()),
+                );
+                g.finish(&ws.pool)?.encode(&mut enc, None);
+                if *stage {
+                    let stride =
+                        (out.1 * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as usize);
+                    enc.copy_texture_to_buffer(
+                        tex.as_image_copy(),
+                        wgpu::TexelCopyBufferInfo {
+                            buffer: staging,
+                            layout: wgpu::TexelCopyBufferLayout {
+                                offset: 0,
+                                bytes_per_row: Some(stride as u32),
+                                rows_per_image: None,
+                            },
+                        },
+                        tex.size(),
+                    );
+                    staged = Staged::Rgba {
+                        stride,
+                        h: out.0,
+                        w: out.1,
+                    };
+                }
+            }
+        }
+        ctx.queue().submit([enc.finish()]);
+        timing.submit_host_ns = since(t_submit);
+
         Ok(GpuPicture {
             ctx: self.ctx.clone(),
             buffer: rec.clone(),
@@ -1166,6 +1340,11 @@ impl GpuSynthesis {
             width,
             timing,
             staging: staging.clone(),
+            staged,
+            rgba_tex: match &tail {
+                RunTail::Rgba { tex, .. } => Some((*tex).clone()),
+                _ => None,
+            },
             // In profile mode the per-tile query set is not written, so it must not be read.
             queries: profile
                 .is_none()
@@ -1183,6 +1362,18 @@ impl GpuSynthesis {
         hdr: &PictureHeader,
         y_hat: [&Tensor<f32>; 2],
     ) -> Result<GpuPicture> {
+        self.run_for_header_tailed(ws, hdr, y_hat, RunTail::None)
+    }
+
+    /// [`run_for_header`](Self::run_for_header) with extra commands appended to the same
+    /// submission (`Tail`).
+    pub(crate) fn run_for_header_tailed(
+        &self,
+        ws: &mut Workspace,
+        hdr: &PictureHeader,
+        y_hat: [&Tensor<f32>; 2],
+        tail: RunTail<'_>,
+    ) -> Result<GpuPicture> {
         if hdr.components[0].synthesis_tiling != hdr.components[1].synthesis_tiling {
             return Err(GpuError::Codec(zenjpegai::Error::Unsupported(
                 "different synthesis tiling for luma and chroma",
@@ -1192,12 +1383,13 @@ impl GpuSynthesis {
             .regions
             .filter(|r| r.independent)
             .map(|_| region_grid(hdr, 0, Plane::Image));
-        self.run(
+        self.run_tailed(
             ws,
             y_hat,
             (hdr.height as usize, hdr.width as usize),
             hdr.components[0].synthesis_tiling,
             regions.as_ref(),
+            tail,
         )
     }
 }

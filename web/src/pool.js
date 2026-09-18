@@ -19,7 +19,8 @@
 //   worker (`decodeToCanvas` repeat presents — a transferred OffscreenCanvas can only be
 //   drawn on by the worker that owns it); pinned jobs wait for their worker specifically.
 // - The `gpu` constructor option is appended to the worker URL as `?gpu=` and selects whether
-//   the worker loads `pkg-webgpu` (see worker.js's header for the mode table).
+//   the worker loads a webgpu package (`pkg-webgpu-threads` on isolated pages, `pkg-webgpu`
+//   otherwise — see worker.js's header for the mode table).
 export class DecoderPool {
   /**
    * @param {string} modelsBaseUrl - directory holding `m<id>_common.zjb` / `m<id>_<op>.zjb`.
@@ -29,12 +30,12 @@ export class DecoderPool {
    *   passes each bundle's sha256 from manifest.json). Appended to bundle URLs as `?v=` so a
    *   bundle swapped under the same file name can't be served stale from the Cache API.
    * @param {'auto'|'on'|'software'|'force-software'|'off'} [gpu] - WebGPU synthesis: 'auto'
-   *   (default) keeps the CPU engine — measured on an RTX 2080 the WebGPU path does not beat
-   *   the threads engine at ~1 MP demo sizes, so `auto` does not pay the pkg-webgpu download
-   *   (web/README §7); 'on' opts in and uses `pkg-webgpu` when `navigator.gpu` yields a
-   *   non-software adapter, the CPU packages otherwise; 'software' additionally accepts
-   *   software adapters (exercises the GPU code path on a GPU-less host); 'force-software'
-   *   always takes the software adapter; 'off' never loads `pkg-webgpu`.
+   *   (default) uses the webgpu package when `navigator.gpu` offers a non-software adapter —
+   *   measured faster than both CPU packages on an RTX 2080 through Dawn/Vulkan
+   *   (2026-09-18, web/README §7) — and the CPU packages otherwise; 'on' always opts in;
+   *   'software' additionally accepts software adapters (exercises the GPU code path on a
+   *   GPU-less host); 'force-software' always takes the software adapter; 'off' never loads
+   *   a webgpu package.
    * @param {number} [threads] - rayon pool size of each `threads`-variant worker (isolated
    *   pages only; `worker.js` reads it off `?threads=` on its own URL). Default:
    *   `min(navigator.hardwareConcurrency, 16)` — measured optimum on a 32-hwc host

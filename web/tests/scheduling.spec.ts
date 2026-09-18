@@ -51,7 +51,7 @@ const DONE_COUNT_SRC = `(() => [...document.querySelectorAll('.card')].filter((c
 }).length)()`;
 
 async function soloDecodeMs(page): Promise<number> {
-  await page.goto(`${BASE_PLAIN}/decode.html`);
+  await page.goto(`${BASE_PLAIN}/decode.html?gpu=off`);
   await page.evaluate(() => window.__ready);
   const r = await page.evaluate(async (stream) => {
     const bytes = await fetch(stream).then((res) => res.arrayBuffer());
@@ -132,7 +132,7 @@ test.describe('decode scheduling', () => {
       // origin's responses with COOP/COEP — the aborted sw-coi.js fetch only stops the
       // re-registration, it does not detach the existing worker. Drop any stale registration
       // first so the navigation below is genuinely uncontrolled.
-      await page.goto(`${BASE_PLAIN}/decode.html`);
+      await page.goto(`${BASE_PLAIN}/decode.html?gpu=off`);
       await page.evaluate(async () => {
         for (const r of await navigator.serviceWorker.getRegistrations()) await r.unregister();
       });

@@ -31,8 +31,8 @@ const variantCell = statusRow('build', '…');
 const tierCell = statusRow('SIMD tier', '…');
 const workersCell = statusRow('workers', '…');
 
-// WebGPU: `DecoderPool`'s default `gpu: 'auto'` keeps the CPU engine — measured on an RTX
-// 2080 the WebGPU path does not beat it at these sizes (web/README §7); `?gpu=on` opts in.
+// WebGPU: `DecoderPool`'s default `gpu: 'auto'` uses the GPU when a hardware adapter exists —
+// measured faster than the CPU packages on an RTX 2080 (web/README §7); `?gpu=off` forces CPU.
 // The note below is filled in once the pool reports ready — until then it only says what the
 // browser advertises.
 if ('gpu' in navigator) {

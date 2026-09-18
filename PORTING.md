@@ -559,10 +559,20 @@ measured numbers in the status table above when you close an item.
   fixed at the root in `gpu/` (unmapped `create_buffer` + chunked `queue.write_buffer`, native
   parity re-verified unchanged); **verified on hardware** — RTX 2080 through Dawn/Vulkan in
   headless Chromium (`WEBGPU_ADAPTER=hardware`, `isFallbackAdapter: false`), all 16 demo
-  streams on `path: 'gpu'`, zero traps. Measured crossover keeps `auto` on the CPU engine at
-  demo sizes (GPU 178-302 ms vs threads 158-287 ms wall at ~1 MP — detail and the `on` opt-in
-  in `web/README.md` §7); Dawn/SwiftShader still loses its device at model-2 load (per-call
-  CPU fallback, no trap).
+  streams on `path: 'gpu'`, zero traps. ~~Measured crossover keeps `auto` on the CPU engine at
+  demo sizes~~ — superseded by `b3gpu` below; `auto` now takes a hardware adapter.
+  Dawn/SwiftShader still loses its device at model-2 load (per-call CPU fallback, no trap).
+  **b3gpu done 2026-09-18** — the ~150 ms per-call gap was mostly *not* GPU orchestration:
+  phase timings (`benchmarks/wasm_gpu_phases_2026-09-18.tsv`) showed ~120 ms of it was the
+  serial single-threaded CPU latent stage in `pkg-webgpu`. New `pkg-webgpu-threads` package
+  (webgpu + rayon, picked automatically on isolated pages) plus one command encoder per decode
+  (`RunTail` in `gpu/src/synthesis.rs`: tile plans + timestamp resolve + optional RGBA convert
+  and staged readback in a single submit) and one batched map round-trip
+  (`GpuContext::map_read2`) took warm ~1 MP `decode_ms` from ~179 ms to ~55 ms on the RTX 2080 —
+  ~1.7x faster than the `threads` CPU package (~95-104 ms) and ~12x faster than `simd`
+  (~645 ms), so `auto` now prefers a non-software adapter on both page kinds. GPU parity
+  unchanged (same kernels, same counts: 6+6 `gpu/tests`, 195/3,000,000 samples differ by 1
+  in-browser). Detail in `web/README.md` §7.
   **B2 done 2026-09-18** — demo throttling +
   viewport-priority queue landed: one shared queue in `web/src/pool.js` (threads build: exactly
   one decode in flight; simd build: at most `min(navigator.hardwareConcurrency - 1, 4)` —
@@ -629,6 +639,7 @@ Appended by the WebGPU browser agent (`webgpu` workspace), 2026-09-18:
   2026-09-18: hardware run on the RTX 2080 (adapter `nvidia/turing`, non-fallback) through
   Dawn/Vulkan; `gpu/` uploads are all unmapped `create_buffer` + chunked `write_buffer` so the
   staging-limit trap cannot occur (worker `onerror`→`disableGpu`→CPU-retry kept as defence in
-  depth). Remaining: Dawn/SwiftShader loses the device at model-2 load (per-call CPU fallback);
-  `auto` defaults to the CPU engine by measurement (`web/README.md` §7).
+  depth). Remaining: Dawn/SwiftShader loses the device at model-2 load (per-call CPU fallback).
+  `auto` on the CPU engine was superseded by the b3gpu pass (B1 row above): `auto` takes a
+  non-software adapter when one exists (`web/README.md` §7).
 

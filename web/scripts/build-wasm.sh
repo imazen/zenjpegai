@@ -4,8 +4,12 @@
 #   pkg-threads/  rayon on Web Workers: needs a cross-origin isolated page
 #   pkg-webgpu/   simd build + WebGPU synthesis (zenjpegai-gpu): async initGpu/decode/present,
 #                 falls back to the CPU engine when the browser offers no non-software adapter
+#   pkg-webgpu-threads/  webgpu build + rayon: on isolated pages the CPU entropy/latent stages
+#                 run on the thread pool too — the serial single-threaded latent stage is the
+#                 dominant cost of the single-threaded webgpu package (~120 ms of a ~250 ms
+#                 1 MP decode on RTX 2080/Dawn; measured 2026-09-18)
 # All are built with a pinned nightly and -Z build-std (threads need it; simd is faster for it).
-# usage: web/scripts/build-wasm.sh [simd] [threads] [webgpu]      (default: simd threads)
+# usage: web/scripts/build-wasm.sh [simd] [threads] [webgpu] [webgpu-threads]  (default: simd threads)
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$PWD
@@ -63,6 +67,13 @@ for v in "${variants[@]}"; do
         --target wasm32-unknown-unknown --profile wasm-release --target-dir target/wasm-webgpu \
         -Z build-std=panic_abort,std >&2
       in=target/wasm-webgpu/wasm32-unknown-unknown/wasm-release/zenjpegai_wasm.wasm ;;
+    webgpu-threads)
+      # threads flags + the gpu feature: WebGPU synthesis with the rayon CPU stages.
+      RUSTFLAGS="-Ctarget-feature=+simd128,+atomics,+bulk-memory,+mutable-globals,+nontrapping-fptoint,+sign-ext -Clink-arg=--max-memory=2147483648 -Clink-arg=--shared-memory -Clink-arg=--import-memory -Clink-arg=--export=__wasm_init_tls -Clink-arg=--export=__tls_size -Clink-arg=--export=__tls_align -Clink-arg=--export=__tls_base" \
+        nice -n 19 cargo +"$NIGHTLY" build -j "$JOBS" -p zenjpegai-wasm --features "gpu threads" \
+        --target wasm32-unknown-unknown --profile wasm-release --target-dir target/wasm-webgpu-threads \
+        -Z build-std=panic_abort,std >&2
+      in=target/wasm-webgpu-threads/wasm32-unknown-unknown/wasm-release/zenjpegai_wasm.wasm ;;
     *) echo "unknown variant $v" >&2; exit 2 ;;
   esac
   out=$DIST/pkg-$v

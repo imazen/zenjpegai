@@ -30,3 +30,7 @@ futures-channel = { version = "0.3.34", default-features = false, features = ["a
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 pollster = "1.0.1"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# Instant::now panics on wasm32-unknown-unknown; the browser timer lives in js-sys.
+js-sys = "0.3.105"

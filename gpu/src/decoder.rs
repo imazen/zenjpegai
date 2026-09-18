@@ -17,7 +17,7 @@ use zenjpegai::{Picture, RgbImage};
 
 use crate::context::GpuContext;
 use crate::error::{GpuError, Result};
-use crate::synthesis::{GpuPicture, GpuSynthesis, Timing, Workspace};
+use crate::synthesis::{GpuPicture, GpuSynthesis, RunTail, Timing, Workspace, now, since};
 
 struct ModelSet {
     common: [CommonModel; 2],
@@ -47,11 +47,7 @@ impl GpuDecoded {
     /// Whether [`GpuDecoded::to_rgba_texture`] can show this picture as is: 4:4:4, BT.709,
     /// 8 bit, no post-filters. Everything else has to go through [`GpuDecoder::finish`].
     pub fn presentable_on_gpu(&self) -> bool {
-        let h = &self.headers.picture;
-        h.bit_depth == 8
-            && (h.s_ver, h.s_hor, h.c_ver, h.c_hor) == (1, 1, 1, 1)
-            && h.colour_transform == zenjpegai::header::ColourTransform::Bt709
-            && !self.headers.tools.any_post_filter()
+        presentable(&self.headers)
     }
 
     /// `rgba8unorm` texture of the displayed picture, without a CPU readback.
@@ -64,6 +60,51 @@ impl GpuDecoded {
         let (h, w) = self.display_size();
         self.picture.to_rgba_texture(h, w)
     }
+}
+
+/// The `presentable_on_gpu` check, before `GpuDecoded` exists (the decode tail depends on it).
+fn presentable(headers: &Headers) -> bool {
+    let h = &headers.picture;
+    h.bit_depth == 8
+        && (h.s_ver, h.s_hor, h.c_ver, h.c_hor) == (1, 1, 1, 1)
+        && h.colour_transform == zenjpegai::header::ColourTransform::Bt709
+        && !headers.tools.any_post_filter()
+}
+
+/// What `decode_to_gpu_with` records into the decode's single submission, beyond the tile
+/// passes themselves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GpuOut {
+    /// Copy the planar picture into the readback staging buffer (`read_planes` / `finish` then
+    /// only map, no extra submit).
+    Planes,
+    /// For presentable pictures, also run the `rgba8unorm` conversion (`to_rgba_texture` then
+    /// returns the finished texture without a second submit). Non-presentable pictures behave
+    /// like `Planes`.
+    Rgba,
+    /// `Rgba` plus a copy of the RGBA texture into the staging buffer, so `read_rgba` is one
+    /// map and no additional submission.
+    RgbaReadback,
+}
+
+/// The `rgba8unorm` texture descriptor shared by the decode tail and `to_rgba_texture`.
+pub(crate) fn rgba_texture(ctx: &GpuContext, h: usize, w: usize) -> wgpu::Texture {
+    ctx.device().create_texture(&wgpu::TextureDescriptor {
+        label: Some("zenjpegai rgba"),
+        size: wgpu::Extent3d {
+            width: w as u32,
+            height: h as u32,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::STORAGE_BINDING
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    })
 }
 
 /// `rec[:, :out_h:sv, :out_w:sh]` like `zenjpegai::decoder::reconstruct::synthesize`.
@@ -147,7 +188,10 @@ impl GpuDecoder {
         }
     }
 
-    fn model_set(&self, id: usize, op: OperatingPoint) -> Result<Arc<ModelSet>> {
+    /// The `(model, op)` networks — parsed and uploaded on first use, then cached. `t` is
+    /// charged with the load time on a miss (`common_host_ns` for the CPU-side common
+    /// networks, `weights_host_ns` for the synthesis checkpoint parse + GPU upload).
+    fn model_set(&self, id: usize, op: OperatingPoint, t: &mut Timing) -> Result<Arc<ModelSet>> {
         if let Some(set) = self
             .cache
             .lock()
@@ -156,13 +200,16 @@ impl GpuDecoder {
         {
             return Ok(set);
         }
-        let set = Arc::new(ModelSet {
-            common: [
-                model::load_common(&*self.models, id, 0, &self.engine)?,
-                model::load_common(&*self.models, id, 1, &self.engine)?,
-            ],
-            synthesis: GpuSynthesis::load(self.ctx.clone(), &*self.models, id, op)?,
-        });
+        let t0 = now();
+        let common = [
+            model::load_common(&*self.models, id, 0, &self.engine)?,
+            model::load_common(&*self.models, id, 1, &self.engine)?,
+        ];
+        t.common_host_ns += since(t0);
+        let t0 = now();
+        let synthesis = GpuSynthesis::load(self.ctx.clone(), &*self.models, id, op)?;
+        t.weights_host_ns += since(t0);
+        let set = Arc::new(ModelSet { common, synthesis });
         if let Ok(mut c) = self.cache.lock() {
             c.insert((id, op), set.clone());
         }
@@ -171,14 +218,26 @@ impl GpuDecoder {
 
     /// Load and upload the networks of `(model_id, op)` ahead of the first decode.
     pub fn preload(&self, model_id: usize, op: OperatingPoint) -> Result<()> {
-        self.model_set(model_id, op).map(|_| ())
+        self.model_set(model_id, op, &mut Timing::default())
+            .map(|_| ())
     }
 
     /// Entropy + latent stage on the CPU, synthesis submitted to the GPU. Returns as soon as the
-    /// work is queued; nothing is read back.
+    /// work is queued; nothing is read back. The planes readback is staged in the same
+    /// submission ([`GpuOut::Planes`]); callers wanting the RGBA texture should use
+    /// [`decode_to_gpu_with`](Self::decode_to_gpu_with) instead.
     pub fn decode_to_gpu(&self, stream: &[u8]) -> Result<GpuDecoded> {
+        self.decode_to_gpu_with(stream, GpuOut::Planes)
+    }
+
+    /// [`decode_to_gpu`](Self::decode_to_gpu) with a choice of what the single submission also
+    /// produces ([`GpuOut`]). Presentable pictures decoded with `Rgba`/`RgbaReadback` need no
+    /// later submit for `to_rgba_texture`/`read_rgba`.
+    pub fn decode_to_gpu_with(&self, stream: &[u8], out: GpuOut) -> Result<GpuDecoded> {
+        let t = now();
         let cs = Codestream::parse(stream)?;
         let headers = read_headers(&cs)?;
+        let headers_ns = since(t);
         let hdr = &headers.picture;
         let default_op = *hdr
             .synthesis_transforms
@@ -196,29 +255,61 @@ impl GpuDecoder {
                 .into());
             }
         };
-        let set = self.model_set(hdr.model_id as usize, op)?;
+        let mut phases = Timing::default();
+        let set = self.model_set(hdr.model_id as usize, op, &mut phases)?;
         let eng = &self.engine;
+        let t = now();
         let [ent_y, ent_uv] =
             decode_entropy_stage(&self.tables, &cs, hdr, [&set.common[0], &set.common[1]])?;
+        phases.entropy_host_ns = since(t);
+        let t = now();
         let mut ly = reconstruct_latent(eng, hdr, 0, &set.common[0], &ent_y)?;
         post_process_latent(hdr, &headers.tools, 0, &ent_y, &mut ly)?;
         let mut luv = reconstruct_latent(eng, hdr, 1, &set.common[1], &ent_uv)?;
         post_process_latent(hdr, &headers.tools, 1, &ent_uv, &mut luv)?;
+        phases.latent_host_ns = since(t);
 
+        // Decide the tail before borrowing the workspace: for presentable pictures the RGBA
+        // conversion (and its staged readback for `RgbaReadback`) rides along in the decode's
+        // single submission; `to_rgba_texture`/`read_rgba` then only map.
+        let rgba_tex = match out {
+            GpuOut::Rgba | GpuOut::RgbaReadback if presentable(&headers) => {
+                let (dh, dw) = (
+                    hdr.height as usize - hdr.diff_display_height as usize,
+                    hdr.width as usize - hdr.diff_display_width as usize,
+                );
+                Some((rgba_texture(&self.ctx, dh, dw), dh, dw))
+            }
+            _ => None,
+        };
         let mut ws = self
             .workspace
             .lock()
             .ok()
             .and_then(|mut w| w.take())
             .unwrap_or_default();
-        let picture = set
-            .synthesis
-            .run_for_header(&mut ws, hdr, [&ly.y_hat, &luv.y_hat]);
+        let tail = match &rgba_tex {
+            Some((tex, dh, dw)) => RunTail::Rgba {
+                tex,
+                out: (*dh, *dw),
+                stage: out == GpuOut::RgbaReadback,
+            },
+            None => RunTail::Planes,
+        };
+        let picture =
+            set.synthesis
+                .run_for_header_tailed(&mut ws, hdr, [&ly.y_hat, &luv.y_hat], tail);
         if let Ok(mut slot) = self.workspace.lock() {
             *slot = Some(ws);
         }
+        let mut picture = picture?;
+        picture.timing.headers_host_ns = headers_ns;
+        picture.timing.common_host_ns = phases.common_host_ns;
+        picture.timing.weights_host_ns = phases.weights_host_ns;
+        picture.timing.entropy_host_ns = phases.entropy_host_ns;
+        picture.timing.latent_host_ns = phases.latent_host_ns;
         Ok(GpuDecoded {
-            picture: picture?,
+            picture,
             luma_scale_log: ent_y.scale_log,
             op,
             headers,

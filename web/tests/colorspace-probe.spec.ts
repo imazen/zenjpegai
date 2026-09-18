@@ -7,7 +7,7 @@ import { test } from '@playwright/test';
 import { PORTS } from '../playwright.config';
 
 test('probe: display-p3 canvas/ImageData support', async ({ page, browserName, browser }) => {
-  await page.goto(`http://127.0.0.1:${PORTS.plain}/decode.html`);
+  await page.goto(`http://127.0.0.1:${PORTS.plain}/decode.html?gpu=off`);
   const result = await page.evaluate(() => {
     const out: Record<string, string> = {};
     try {

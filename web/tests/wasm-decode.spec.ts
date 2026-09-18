@@ -13,7 +13,9 @@ const PNG = '_native/line-plot_bpp25.native.png';
 const MAX_DIFFERING_RATIO = 1 / 5000;
 
 async function decodeOnce(page, port: number) {
-  await page.goto(`http://127.0.0.1:${port}/decode.html`);
+  // `?gpu=off`: this spec asserts the CPU package selection — keep it deterministic on hosts
+  // where the browser happens to offer a hardware WebGPU adapter (`auto` would take it).
+  await page.goto(`http://127.0.0.1:${port}/decode.html?gpu=off`);
   await page.evaluate(() => window.__ready);
   return page.evaluate(
     ({ stream, png }) => window.__decodeAndCompare(stream, png),

@@ -15,7 +15,7 @@ mod present;
 mod synthesis;
 
 pub use context::{ContextOptions, GpuContext};
-pub use decoder::{GpuDecoded, GpuDecoder};
+pub use decoder::{GpuDecoded, GpuDecoder, GpuOut};
 pub use error::GpuError;
 pub use present::{Blitter, read_rgba8};
 pub use synthesis::{GpuPicture, GpuSynthesis, Timing, Workspace};

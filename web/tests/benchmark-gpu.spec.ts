@@ -18,6 +18,13 @@ const date = new Date().toISOString().slice(0, 10);
 const tsvPath = join(__dirname, '..', '..', 'benchmarks', `wasm_decode_${date}_gpu.tsv`);
 const metaPath = tsvPath.replace(/\.tsv$/, '.meta');
 const HEADER = ['browser', 'browser_version', 'os', 'slug', 'bpp', 'model_id', 'width', 'height', 'stream_bytes', 'variant', 'tier', 'gpu_mode', 'call', 'path', 'presented', 'adapter', 'software_adapter', 'gpu_ns', 'gpu_error', 'fetch_ms', 'models_ms', 'decode_ms', 'total_ms'].join('\t');
+// Per-phase breakdown of the GPU calls (`timings.gpu` on the webgpu package — see
+// wasm/src/gpu.rs `set_timing`): where the wall time between "CPU entropy done" and "bytes on
+// the canvas / in the Uint8ClampedArray" actually goes. One row per (call, stream); CPU-side
+// `decode`/`present` fallbacks and `gpu=off` rows are not written here — they carry no phases.
+const phaseTsvPath = join(__dirname, '..', '..', 'benchmarks', `wasm_gpu_phases_${date}.tsv`);
+const phaseMetaPath = phaseTsvPath.replace(/\.tsv$/, '.meta');
+const PHASE_HEADER = ['browser', 'browser_version', 'os', 'slug', 'bpp', 'model_id', 'width', 'height', 'gpu_mode', 'call', 'path', 'presented', 'adapter', 'tiles', 'dispatches', 'plans_built', 'headers_ms', 'common_ms', 'weights_ms', 'entropy_ms', 'latent_ms', 'upload_ms', 'plan_ms', 'submit_ms', 'convert_ms', 'readback_ms', 'wait_ms', 'present_ms', 'finish_ms', 'gpu_ns', 'decode_ms', 'total_ms'].join('\t');
 
 // Restricted to the chromium-webgpu project in playwright.config.ts (testIgnore) rather than
 // skipped at run time — the row columns only make sense from the WebGPU-enabled launch.
@@ -50,6 +57,13 @@ test('decode every demo stream on the GPU path and record timings', async ({ pag
   const os = process.platform;
 
   if (!existsSync(tsvPath)) writeFileSync(tsvPath, HEADER + '\n');
+  if (!existsSync(phaseTsvPath)) writeFileSync(phaseTsvPath, PHASE_HEADER + '\n');
+  if (!existsSync(phaseMetaPath)) {
+    writeFileSync(
+      phaseMetaPath,
+      `same_run\t${metaPath.split('/').pop()}\ncommit\t${safeExec(`jj log -r @ --no-graph -T "commit_id.short()"`) || safeExec('git rev-parse --short HEAD') || 'unknown'}\nadapter\t${adapter}\ndate\t${date}\ncolumns\tgpu.* timings of the webgpu package; all *_ms are host-side (browser performance clock), gpu_ns is device timestamp-query time\n`,
+    );
+  }
   if (!existsSync(metaPath)) {
     const commit = safeExec(`jj log -r @ --no-graph -T "commit_id.short()"`) || safeExec('git rev-parse --short HEAD') || 'unknown';
     writeFileSync(
@@ -59,6 +73,7 @@ test('decode every demo stream on the GPU path and record timings', async ({ pag
   }
 
   const rows: string[] = [];
+  const phaseRows: string[] = [];
   for (const img of manifest.images) {
     for (const v of img.variants) {
       const stream = streamUrl(img, v);
@@ -85,6 +100,13 @@ test('decode every demo stream on the GPU path and record timings', async ({ pag
         rows.push(
           [browserName, version, os, img.slug, v.bpp, v.modelId, r.width, r.height, r.bytes, t.variant, t.tier, gpuMode, call, t.path, r.presented, adapter, software, t.gpu && t.gpu.gpuNs != null ? t.gpu.gpuNs : '', gpuError, r.fetch_ms.toFixed(2), t.models.toFixed(2), t.decode.toFixed(2), (r.fetch_ms + t.total).toFixed(2)].join('\t'),
         );
+        const g = t.gpu;
+        if (g && t.path === 'gpu') {
+          const ms = (x) => (x == null ? '' : Number(x).toFixed(2));
+          phaseRows.push(
+            [browserName, version, os, img.slug, v.bpp, v.modelId, r.width, r.height, gpuMode, call, t.path, r.presented || '', adapter, g.tiles, g.dispatches, g.plansBuilt, ms(g.headersMs), ms(g.commonMs), ms(g.weightsMs), ms(g.entropyMs), ms(g.latentMs), ms(g.uploadMs), ms(g.planMs), ms(g.submitMs), ms(g.convertMs), ms(g.readbackMs), ms(g.waitMs), ms(g.presentMs), ms(g.finishMs), g.gpuNs != null ? g.gpuNs : '', t.decode.toFixed(2), t.total.toFixed(2)].join('\t'),
+          );
+        }
       }
     }
   }
@@ -113,6 +135,7 @@ test('decode every demo stream on the GPU path and record timings', async ({ pag
     }
   }
   appendFileSync(tsvPath, rows.join('\n') + '\n');
+  if (phaseRows.length) appendFileSync(phaseTsvPath, phaseRows.join('\n') + '\n');
   await testInfo.attach('wasm-decode-gpu-rows', { body: rows.join('\n'), contentType: 'text/tab-separated-values' });
 });
 
