@@ -31,3 +31,35 @@ chromium	153.0.8010.12	linux	clipart	0.25	2	816	1225	28034	webgpu	Wasm128	softwa
 chromium	153.0.8010.12	linux	clipart	0.25	2	816	1225	28034	webgpu	Wasm128	software	present	cpu	2d	BrowserWebGpu	true		no GPU context: disabled after a trap in the GPU path	1.53	0.04	716.36	717.94
 chromium	153.0.8010.12	linux	clipart	0.75	3	816	1225	83202	webgpu	Wasm128	software	decode	cpu		BrowserWebGpu	true			2.24	48.18	719.79	770.21
 chromium	153.0.8010.12	linux	clipart	0.75	3	816	1225	83202	webgpu	Wasm128	software	present	cpu	2d	BrowserWebGpu	true		no GPU context: disabled after a trap in the GPU path	3.83	0.03	713.33	717.19
+chromium	153.0.8010.12	linux	car	0.25	1	1155	866	33016	threads	Wasm128	auto	decode	cpu		only a software WebGPU adapter (fallback)				0.86	53.82	179.35	234.02
+chromium	153.0.8010.12	linux	car	0.25	1	1155	866	33016	threads	Wasm128	auto	present	cpu	2d	only a software WebGPU adapter (fallback)			this package has no GPU presentation	1.40	0.05	110.29	111.74
+chromium	153.0.8010.12	linux	car	0.75	2	1155	866	98890	threads	Wasm128	auto	decode	cpu		only a software WebGPU adapter (fallback)				1.57	52.33	115.93	169.83
+chromium	153.0.8010.12	linux	car	0.75	2	1155	866	98890	threads	Wasm128	auto	present	cpu	2d	only a software WebGPU adapter (fallback)			this package has no GPU presentation	1.90	0.06	98.88	100.83
+chromium	153.0.8010.12	linux	mountain	0.25	1	1155	866	32887	threads	Wasm128	auto	decode	cpu		only a software WebGPU adapter (fallback)				1.67	0.04	97.06	98.77
+chromium	153.0.8010.12	linux	mountain	0.25	1	1155	866	32887	threads	Wasm128	auto	present	cpu	2d	only a software WebGPU adapter (fallback)			this package has no GPU presentation	1.51	0.04	94.97	96.51
+chromium	153.0.8010.12	linux	mountain	0.75	2	1155	866	90684	threads	Wasm128	auto	decode	cpu		only a software WebGPU adapter (fallback)				1.62	0.04	91.78	93.44
+chromium	153.0.8010.12	linux	mountain	0.75	2	1155	866	90684	threads	Wasm128	auto	present	cpu	2d	only a software WebGPU adapter (fallback)			this package has no GPU presentation	1.35	0.04	96.38	97.77
+chromium	153.0.8010.12	linux	dumplings	0.25	1	1155	866	32928	threads	Wasm128	auto	decode	cpu		only a software WebGPU adapter (fallback)				1.44	0.04	96.98	98.47
+chromium	153.0.8010.12	linux	dumplings	0.25	1	1155	866	32928	threads	Wasm128	auto	present	cpu	2d	only a software WebGPU adapter (fallback)			this package has no GPU presentation	1.53	0.05	104.23	105.81
+chromium	153.0.8010.12	linux	dumplings	0.75	2	1155	866	93621	threads	Wasm128	auto	decode	cpu		only a software WebGPU adapter (fallback)				1.64	0.05	98.42	100.12
+chromium	153.0.8010.12	linux	dumplings	0.75	2	1155	866	93621	threads	Wasm128	auto	present	cpu	2d	only a software WebGPU adapter (fallback)			this package has no GPU presentation	1.61	0.04	96.07	97.72
+chromium	153.0.8010.12	linux	artwork	0.25	1	1178	849	32964	threads	Wasm128	auto	decode	cpu		only a software WebGPU adapter (fallback)				1.48	0.04	99.16	100.67
+chromium	153.0.8010.12	linux	artwork	0.25	1	1178	849	32964	threads	Wasm128	auto	present	cpu	2d	only a software WebGPU adapter (fallback)			this package has no GPU presentation	1.19	0.05	99.05	100.29
+chromium	153.0.8010.12	linux	artwork	0.75	2	1178	849	99407	threads	Wasm128	auto	decode	cpu		only a software WebGPU adapter (fallback)				1.30	0.04	97.34	98.68
+chromium	153.0.8010.12	linux	artwork	0.75	2	1178	849	99407	threads	Wasm128	auto	present	cpu	2d	only a software WebGPU adapter (fallback)			this package has no GPU presentation	1.78	0.05	92.37	94.20
+chromium	153.0.8010.12	linux	brochure	0.25	1	841	1189	32824	threads	Wasm128	auto	decode	cpu		only a software WebGPU adapter (fallback)				1.38	0.04	101.33	102.75
+chromium	153.0.8010.12	linux	brochure	0.25	1	841	1189	32824	threads	Wasm128	auto	present	cpu	2d	only a software WebGPU adapter (fallback)			this package has no GPU presentation	1.29	0.03	90.74	92.06
+chromium	153.0.8010.12	linux	brochure	0.75	1	841	1189	86466	threads	Wasm128	auto	decode	cpu		only a software WebGPU adapter (fallback)				1.49	0.04	93.15	94.68
+chromium	153.0.8010.12	linux	brochure	0.75	1	841	1189	86466	threads	Wasm128	auto	present	cpu	2d	only a software WebGPU adapter (fallback)			this package has no GPU presentation	1.52	0.03	97.90	99.45
+chromium	153.0.8010.12	linux	patent-scan	0.25	0	825	1212	28041	threads	Wasm128	auto	decode	cpu		only a software WebGPU adapter (fallback)				1.37	48.68	101.04	151.09
+chromium	153.0.8010.12	linux	patent-scan	0.25	0	825	1212	28041	threads	Wasm128	auto	present	cpu	2d	only a software WebGPU adapter (fallback)			this package has no GPU presentation	1.49	0.04	90.26	91.79
+chromium	153.0.8010.12	linux	patent-scan	0.75	1	825	1212	85887	threads	Wasm128	auto	decode	cpu		only a software WebGPU adapter (fallback)				1.51	0.05	88.53	90.09
+chromium	153.0.8010.12	linux	patent-scan	0.75	1	825	1212	85887	threads	Wasm128	auto	present	cpu	2d	only a software WebGPU adapter (fallback)			this package has no GPU presentation	1.75	0.04	91.22	93.00
+chromium	153.0.8010.12	linux	line-plot	0.25	0	1000	1000	32827	threads	Wasm128	auto	decode	cpu		only a software WebGPU adapter (fallback)				1.81	0.05	98.38	100.24
+chromium	153.0.8010.12	linux	line-plot	0.25	0	1000	1000	32827	threads	Wasm128	auto	present	cpu	2d	only a software WebGPU adapter (fallback)			this package has no GPU presentation	1.90	0.05	89.34	91.29
+chromium	153.0.8010.12	linux	line-plot	0.75	1	1000	1000	97944	threads	Wasm128	auto	decode	cpu		only a software WebGPU adapter (fallback)				1.63	0.04	102.01	103.68
+chromium	153.0.8010.12	linux	line-plot	0.75	1	1000	1000	97944	threads	Wasm128	auto	present	cpu	2d	only a software WebGPU adapter (fallback)			this package has no GPU presentation	1.83	0.04	106.63	108.50
+chromium	153.0.8010.12	linux	clipart	0.25	2	816	1225	28034	threads	Wasm128	auto	decode	cpu		only a software WebGPU adapter (fallback)				1.70	0.05	101.28	103.03
+chromium	153.0.8010.12	linux	clipart	0.25	2	816	1225	28034	threads	Wasm128	auto	present	cpu	2d	only a software WebGPU adapter (fallback)			this package has no GPU presentation	1.44	0.06	94.69	96.19
+chromium	153.0.8010.12	linux	clipart	0.75	3	816	1225	83202	threads	Wasm128	auto	decode	cpu		only a software WebGPU adapter (fallback)				1.54	47.89	100.30	149.74
+chromium	153.0.8010.12	linux	clipart	0.75	3	816	1225	83202	threads	Wasm128	auto	present	cpu	2d	only a software WebGPU adapter (fallback)			this package has no GPU presentation	4.48	0.03	95.60	100.11
