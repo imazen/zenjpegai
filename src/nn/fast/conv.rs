@@ -173,7 +173,8 @@ fn conv_row_neon(t: NeonToken, job: &mut RowJob<'_>) {
 #[cfg(target_arch = "wasm32")]
 #[arcane]
 fn conv_row_wasm128(t: Wasm128Token, job: &mut RowJob<'_>) {
-    // 16 v128 registers: 6 positions x 2 halves, the weight vector and the broadcast input.
+    // 16 v128 registers: 4 positions x 2 halves of accumulators, the weight vector pair and
+    // the broadcast input; B = 5 / 6 measured slower (spills), see benchmarks/wasm_profile_*.
     conv_row::<f32x8<Wasm128Token>, 8, 4>(t, job)
 }
 
@@ -406,55 +407,96 @@ impl PackedConv {
                 );
             }
             // Border columns: copy their (few) input windows into a small padded buffer.
+            // The scratch is per-thread: every row needs one, and a fresh `vec![0.0; n]` per
+            // row contends on the global allocator under `threads`.
             for (ja, jb) in [(0, j0), (j1, ow)] {
                 if jb <= ja {
                     continue;
                 }
                 let bw = (jb - ja - 1) * st + self.kw;
-                let mut buf = alloc::vec![0.0f32; (icb1 - icb0) * self.kh * bw * v];
-                for icb in icb0..icb1 {
+                border_buf((icb1 - icb0) * self.kh * bw * v, |buf| {
+                    self.border_row(&x.data, h, w, in_row, icb0, icb1, ja, bw, buf);
+                    let mut taps = [(None, 0usize); MAX_TAPS];
                     for ky in 0..self.kh {
-                        let Some(iy) = in_row(ky) else { continue };
-                        let src = &x.data[(icb * h + iy) * w * v..][..w * v];
-                        let dst = &mut buf[((icb - icb0) * self.kh + ky) * bw * v..][..bw * v];
-                        for c in 0..bw {
-                            if let Some(ix) = (ja * st + c).checked_sub(pl).filter(|&ix| ix < w) {
-                                dst[c * v..][..v].copy_from_slice(&src[ix * v..][..v]);
-                            }
+                        for kx in 0..self.kw {
+                            taps[ky * self.kw + kx] = (Some(ky), kx);
                         }
                     }
-                }
-                let mut taps = [(None, 0usize); MAX_TAPS];
-                for ky in 0..self.kh {
-                    for kx in 0..self.kw {
-                        taps[ky * self.kw + kx] = (Some(ky), kx);
-                    }
-                }
-                run_row(
-                    tier,
-                    &mut RowJob {
-                        out: &mut *row,
-                        o0: ja,
-                        os: 1,
-                        n: jb - ja,
-                        xp: &buf,
-                        ph: self.kh,
-                        pw: bw,
-                        icb_base: icb0,
-                        zero: &zero,
-                        icb0,
-                        icb1,
-                        in_ch: self.in_ch,
-                        is: st,
-                        taps: &taps[..ntaps],
-                        w: wts,
-                        bias,
-                    },
-                );
+                    run_row(
+                        tier,
+                        &mut RowJob {
+                            out: &mut *row,
+                            o0: ja,
+                            os: 1,
+                            n: jb - ja,
+                            xp: buf,
+                            ph: self.kh,
+                            pw: bw,
+                            icb_base: icb0,
+                            zero: &zero,
+                            icb0,
+                            icb1,
+                            in_ch: self.in_ch,
+                            is: st,
+                            taps: &taps[..ntaps],
+                            w: wts,
+                            bias,
+                        },
+                    );
+                });
             }
         });
         Ok(out)
     }
+
+    /// Copy the `kh` input rows covering border output columns `ja..` into `buf` (zeroed):
+    /// `[icb][kh][bw][V]`, padding columns left zero.
+    #[allow(clippy::too_many_arguments)]
+    fn border_row(
+        &self,
+        x: &[f32],
+        h: usize,
+        w: usize,
+        in_row: impl Fn(usize) -> Option<usize>,
+        icb0: usize,
+        icb1: usize,
+        ja: usize,
+        bw: usize,
+        buf: &mut [f32],
+    ) {
+        let (v, st, pl) = (self.v, self.stride, self.pad[1]);
+        for icb in icb0..icb1 {
+            for ky in 0..self.kh {
+                let Some(iy) = in_row(ky) else { continue };
+                let src = &x[(icb * h + iy) * w * v..][..w * v];
+                let dst = &mut buf[((icb - icb0) * self.kh + ky) * bw * v..][..bw * v];
+                for c in 0..bw {
+                    if let Some(ix) = (ja * st + c).checked_sub(pl).filter(|&ix| ix < w) {
+                        dst[c * v..][..v].copy_from_slice(&src[ix * v..][..v]);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// `f` runs with a zeroed scratch of `n` floats, reused per thread between calls.
+fn border_buf(n: usize, f: impl FnOnce(&mut [f32])) {
+    #[cfg(feature = "std")]
+    {
+        use std::cell::RefCell;
+        thread_local! {
+            static SCRATCH: RefCell<Vec<f32>> = const { RefCell::new(Vec::new()) };
+        }
+        SCRATCH.with(|s| {
+            let mut s = s.borrow_mut();
+            s.clear();
+            s.resize(n, 0.0);
+            f(s.as_mut_slice());
+        });
+    }
+    #[cfg(not(feature = "std"))]
+    f(&mut alloc::vec![0.0f32; n]);
 }
 
 /// A stride-2 transposed convolution packed for one block size.
