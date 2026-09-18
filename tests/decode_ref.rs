@@ -11,14 +11,15 @@
 #![cfg(feature = "reference-tests")]
 
 mod common;
-use common::{load_dump, load_fixed_decoder_dump, ref_root, vector_dir};
-use zenjpegai::container::Codestream;
+use common::{icci_header_from_dump, load_dump, load_fixed_decoder_dump, ref_root, vector_dir};
+use zenjpegai::container::{Codestream, Marker};
 use zenjpegai::decoder::output::{Picture, finish, quantize_plane, to_source_format};
 use zenjpegai::decoder::reconstruct::{
     Planes, post_process_latent, reconstruct_latent, synthesize,
 };
-use zenjpegai::decoder::{decode_entropy_stage, read_headers};
+use zenjpegai::decoder::{Headers, decode_entropy_stage, read_headers};
 use zenjpegai::filters::FilterContext;
+use zenjpegai::header::{PictureHeader, ToolHeader};
 use zenjpegai::mans::AnsTables;
 use zenjpegai::model::ModelDir;
 use zenjpegai::nn::fast::{Engine, Tier};
@@ -40,10 +41,16 @@ struct Decoded {
     filtered: Planes,
 }
 
-fn decode(stream: &[u8], eng: &Engine) -> (zenjpegai::header::PictureHeader, Decoded) {
+fn decode(stream: &[u8], eng: &Engine) -> (PictureHeader, Decoded) {
     let cs = Codestream::parse(stream).unwrap();
     let headers = read_headers(&cs).unwrap();
-    let hdr = headers.picture;
+    decode_with(&cs, eng, &headers)
+}
+
+/// The staged decode with caller-supplied headers: the forced-4:2:0 eICCI vector's tool
+/// header is not readable by a conformant parser, so its test rebuilds it from the dump.
+fn decode_with(cs: &Codestream<'_>, eng: &Engine, headers: &Headers) -> (PictureHeader, Decoded) {
+    let hdr = headers.picture.clone();
     let models = ModelDir::new(ref_root().join("models"));
     let id = hdr.model_id as usize;
     let op = hdr.synthesis_transforms[0];
@@ -53,7 +60,7 @@ fn decode(stream: &[u8], eng: &Engine) -> (zenjpegai::header::PictureHeader, Dec
     );
     let syn_y = models.load_synthesis_primary(id, op, eng).unwrap();
     let syn_uv = models.load_synthesis_secondary(id, op, eng).unwrap();
-    let ent = decode_entropy_stage(&AnsTables::new(), &cs, &hdr, [&ym, &uvm]).unwrap();
+    let ent = decode_entropy_stage(&AnsTables::new(), cs, &hdr, [&ym, &uvm]).unwrap();
     let mut ly = reconstruct_latent(eng, &hdr, 0, &ym, &ent[0]).unwrap();
     let mut luv = reconstruct_latent(eng, &hdr, 1, &uvm, &ent[1]).unwrap();
     post_process_latent(&hdr, &headers.tools, 0, &ent[0], &mut ly).unwrap();
@@ -95,7 +102,28 @@ fn check(name: &str) {
         load_dump(&dir)
     };
     let (hdr, d) = decode(&stream, &Engine::new());
+    let ours = check_dump(name, &hdr, &d, &dump);
 
+    // The one-call API must produce exactly the same samples.
+    let decoder = zenjpegai::Decoder::new(ref_root().join("models"));
+    let api: Vec<u16> = match decoder.decode_picture(&stream).unwrap() {
+        Picture::Rgb(img) => img.data,
+        Picture::Yuv(img) => [img.y, img.u, img.v].concat(),
+    };
+    assert!(
+        api == ours,
+        "{name}: Decoder::decode_picture differs from the staged decode"
+    );
+}
+
+/// Latents, reconstructed planes, and the finished picture against the dump; returns our
+/// quantised output samples.
+fn check_dump(
+    name: &str,
+    hdr: &PictureHeader,
+    d: &Decoded,
+    dump: &std::collections::HashMap<String, common::RefTensor>,
+) -> Vec<u16> {
     for (key, got) in [
         ("y.psi", &d.psi[0]),
         ("y.y_hat", &d.y_hat[0]),
@@ -126,7 +154,7 @@ fn check(name: &str) {
         .iter()
         .map(|k| quantize_plane(&dump[*k].f32(), depth))
         .collect();
-    let (ours, theirs): (Vec<u16>, Vec<u16>) = match finish(&hdr, &d.filtered).unwrap() {
+    let (ours, theirs): (Vec<u16>, Vec<u16>) = match finish(hdr, &d.filtered).unwrap() {
         Picture::Rgb(img) => {
             let t = theirs[0]
                 .iter()
@@ -159,17 +187,36 @@ fn check(name: &str) {
         "{name}: {differing} of {} {depth}-bit samples differ",
         ours.len()
     );
+    ours
+}
 
-    // The one-call API must produce exactly the same samples.
-    let decoder = zenjpegai::Decoder::new(ref_root().join("models"));
-    let api: Vec<u16> = match decoder.decode_picture(&stream).unwrap() {
-        Picture::Rgb(img) => img.data,
-        Picture::Yuv(img) => [img.y, img.u, img.v].concat(),
-    };
+/// The forced-4:2:0 eICCI stream (`scripts/ref_vectors/force_icci_encode.py`): its tool header
+/// carries the eICCI syntax where the 4:2:0 grammar has none, so `read_headers` — like the
+/// stock reference decoder — fails on it. The entropy and synthesis payloads are conformant;
+/// the staged decode runs them with the eICCI header rebuilt from the filter dump's selection
+/// tensors, against the patched reference decoder's dump (`fixed_decoder/`).
+#[test]
+fn img30yuv420_base_eicci() {
+    let name = "img30yuv420_base_eicci";
+    let dir = vector_dir(name);
+    let stream = std::fs::read(dir.join("stream.bits")).unwrap();
+    let cs = Codestream::parse(&stream).unwrap();
     assert!(
-        api == ours,
-        "{name}: Decoder::decode_picture differs from the staged decode"
+        read_headers(&cs).is_err(),
+        "{name}: a conformant parser cannot read this stream's tool header"
     );
+    let sel = load_dump(&dir.join("filters_lef_icci"));
+    let headers = Headers {
+        picture: PictureHeader::parse(cs.find(Marker::Pih).unwrap()).unwrap(),
+        tools: ToolHeader {
+            icci: Some(icci_header_from_dump(&sel)),
+            ..Default::default()
+        },
+        rendering: Default::default(),
+        user_data: None,
+    };
+    let (hdr, d) = decode_with(&cs, &Engine::new(), &headers);
+    check_dump(name, &hdr, &d, &load_fixed_decoder_dump(&dir));
 }
 
 /// The UDI substream is handed back byte for byte.
@@ -280,9 +327,11 @@ vectors! {
     img01_base_off_depregions_m1 => "img01_base_off_depregions_m1",
     img01_base_off_indregions_m1 => "img01_base_off_indregions_m1",
     img01_base_off_indregions_threads8_m2 => "img01_base_off_indregions_threads8_m2",
-    // Post-filters: LEF, eICCI.
+    // Post-filters: LEF, eICCI (the 4:2:2 eICCI vector is a conformant forced-encode stream;
+    // the forced 4:2:0 one needs rebuilt headers and is a separate test above).
     img30_base_lef_bpp050 => "img30_base_lef_bpp050",
     img30_base_eicci_bpp050 => "img30_base_eicci_bpp050",
+    img30yuv422_base_eicci => "img30yuv422_base_eicci",
     img01_base_eiccitiles_lef_bpp050 => "img01_base_eiccitiles_lef_bpp050",
     // Upstream's tools_on: all four post-filters in a row, on top of RVS / GRFS / LSBS.
     img30_base_on_bpp025 => "img30_base_on_bpp025",

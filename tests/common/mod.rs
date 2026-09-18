@@ -60,6 +60,39 @@ pub fn load_fixed_decoder_dump(
     load_dump(&fixed)
 }
 
+/// `IcciHeader` rebuilt from a `filters_lef_icci` dump's machine-readable selection tensors
+/// (`eicci.selection`, `eicci.signalled`, `eicci.short_list`, written by
+/// `scripts/ref_vectors/dump_filters_lef_icci.py`). Needed for the forced-4:2:0 eICCI vector,
+/// whose tool header is not readable by a conformant parser (`icci_enable_flag` and the header
+/// are not part of the 4:2:0 syntax, but the forced stream carries them anyway).
+pub fn icci_header_from_dump(
+    dump: &std::collections::HashMap<String, RefTensor>,
+) -> zenjpegai::header::IcciHeader {
+    let sel = &dump["eicci.selection"];
+    let sig = &dump["eicci.signalled"];
+    let short_list = dump["eicci.short_list"].bytes[0] != 0;
+    assert_eq!(sel.shape[1..], [3]);
+    assert_eq!(sig.shape[1..], [2]);
+    assert_eq!(sel.shape[0], sig.shape[0]);
+    let tiles = sel
+        .i32()
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .zip(sig.i32().as_chunks::<2>().0)
+        .map(|(s, g)| zenjpegai::header::IcciTile {
+            use_yuv: [s[0] != 0, s[1] != 0, s[2] != 0],
+            short_list,
+            index_y: g[0] as u8,
+            index_uv: g[1] as u8,
+        })
+        .collect();
+    zenjpegai::header::IcciHeader {
+        tiling: None,
+        tiles,
+    }
+}
+
 /// One tensor of a reference dump.
 pub struct RefTensor {
     pub dtype: String,

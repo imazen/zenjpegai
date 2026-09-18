@@ -9,12 +9,13 @@
 #![cfg(feature = "reference-tests")]
 
 mod common;
-use common::{RefTensor, load_dump, ref_root, vector_dir};
+use common::{RefTensor, icci_header_from_dump, load_dump, ref_root, vector_dir};
 use std::collections::HashMap;
-use zenjpegai::container::Codestream;
-use zenjpegai::decoder::read_headers;
+use zenjpegai::container::{Codestream, Marker};
 use zenjpegai::decoder::reconstruct::Planes;
+use zenjpegai::decoder::{Headers, read_headers};
 use zenjpegai::filters::{icci, lef};
+use zenjpegai::header::{PictureHeader, ToolHeader};
 use zenjpegai::model::ModelDir;
 use zenjpegai::nn::fast::{Engine, Tier};
 use zenjpegai::tensor::Tensor;
@@ -40,7 +41,7 @@ fn planes(dump: &HashMap<String, RefTensor>, prefix: &str) -> Planes {
     }
 }
 
-fn filter_dump(name: &str) -> (zenjpegai::decoder::Headers, HashMap<String, RefTensor>) {
+fn filter_dump(name: &str) -> (Headers, HashMap<String, RefTensor>) {
     let dir = vector_dir(name);
     let stream = std::fs::read(dir.join("stream.bits")).unwrap();
     let headers = read_headers(&Codestream::parse(&stream).unwrap()).unwrap();
@@ -51,6 +52,34 @@ fn filter_dump(name: &str) -> (zenjpegai::decoder::Headers, HashMap<String, RefT
         sub.display()
     );
     (headers, load_dump(&sub))
+}
+
+/// Forced-4:2:0 eICCI stream (`scripts/ref_vectors/force_icci_encode.py`): its tool header
+/// carries `icci_enable_flag` and the eICCI header in a position the 4:2:0 syntax does not
+/// have (`icci_flag_coded` is false for `s_ver == s_hor == 2`), so `read_headers` — like the
+/// stock reference decoder — cannot parse it. Only the picture header comes from the stream;
+/// the eICCI header is rebuilt from the dump's `eicci.*` selection tensors.
+fn filter_dump_forced_420(name: &str) -> (Headers, HashMap<String, RefTensor>) {
+    let dir = vector_dir(name);
+    let stream = std::fs::read(dir.join("stream.bits")).unwrap();
+    let cs = Codestream::parse(&stream).unwrap();
+    assert!(
+        read_headers(&cs).is_err(),
+        "{name}: a conformant parser cannot read this stream's tool header"
+    );
+    let picture = PictureHeader::parse(cs.find(Marker::Pih).unwrap()).unwrap();
+    let sub = dir.join("filters_lef_icci");
+    let dump = load_dump(&sub);
+    let headers = Headers {
+        picture,
+        tools: ToolHeader {
+            icci: Some(icci_header_from_dump(&dump)),
+            ..Default::default()
+        },
+        rendering: Default::default(),
+        user_data: None,
+    };
+    (headers, dump)
 }
 
 /// Every tier, threaded or not; the large picture only on the default engine (tier identity is
@@ -113,9 +142,24 @@ fn check_lef(name: &str) {
 
 fn check_icci(name: &str, expect_change: bool) {
     let (headers, dump) = filter_dump(name);
+    check_icci_dump(name, &headers, &dump, expect_change);
+}
+
+/// The forced-4:2:0 eICCI stream, headers rebuilt from the dump.
+fn check_icci_forced_420(name: &str) {
+    let (headers, dump) = filter_dump_forced_420(name);
+    check_icci_dump(name, &headers, &dump, true);
+}
+
+fn check_icci_dump(
+    name: &str,
+    headers: &Headers,
+    dump: &HashMap<String, RefTensor>,
+    expect_change: bool,
+) {
     let h = headers.tools.icci.as_ref().expect("stream without eICCI");
     let models = ModelDir::new(ref_root().join("models"));
-    let want = planes(&dump, "eicci.out");
+    let want = planes(dump, "eicci.out");
     let mut first: Option<Planes> = None;
     for eng in engines(name) {
         let cache = icci::NetCache::default();
@@ -126,7 +170,7 @@ fn check_icci(name: &str, expect_change: bool) {
             headers.picture.synthesis_transforms[0],
             &models,
             &cache,
-            planes(&dump, "eicci.in"),
+            planes(dump, "eicci.in"),
             &enough::Unstoppable,
         )
         .unwrap();
@@ -201,6 +245,23 @@ fn icci_img30_base_on_bpp100() {
 #[test]
 fn icci_img01_base_eiccitiles_lef_bpp050() {
     check_icci("img01_base_eiccitiles_lef_bpp050", true);
+}
+
+/// eICCI on a 4:2:2 source (`force_icci_encode.py`; the reference encoder never selects eICCI
+/// for subsampled sources, so the flag was forced): chroma bicubic-upsampled to 4:4:4,
+/// filtered, bilinear-downsampled back. A conformant stream — `icci_enable_flag` is coded
+/// for 4:2:2.
+#[test]
+fn icci_img30yuv422_base_eicci() {
+    check_icci("img30yuv422_base_eicci", true);
+}
+
+/// eICCI on a 4:2:0 source, same forced vector. The stream itself is not conformant —
+/// `icci_enable_flag` is not part of the 4:2:0 syntax — so the header is rebuilt from the
+/// dump (the patched reference decoder is the only decoder that reads this stream).
+#[test]
+fn icci_img30yuv420_base_eicci() {
+    check_icci_forced_420("img30yuv420_base_eicci");
 }
 
 #[test]
