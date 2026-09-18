@@ -248,7 +248,9 @@ if [ "$SET" = encoder ] || [ "$SET" = all ]; then
   # -1069 is the low end of BDL_clipping_range (`cfg`: [-1069, 702]).
   enc_fixed enc_img30_bop_m0_bm1069 $IMG30 0 -1069 cfg/tools_off.json cfg/profiles/base.json
   enc_fixed enc_img30_hop_m3_bm1069 $IMG30 3 -1069 cfg/tools_off.json cfg/profiles/high.json
-  # Not generated yet (next steps of the encoder port, see PORTING.md "Work queue"):
-  # the 2096x1400 picture (analysis tiling) and odd picture sizes.
+  # 2096x1400: above the encoder's 1 MP threshold, so the analysis transform and the
+  # hyper-encoder run per tile (1024 luma / 512 chroma, overlap 64 / 32).
+  enc_fixed enc_img01_bop_m1_b0 $IMG01 1 0 cfg/tools_off.json cfg/profiles/base.json
+  # Not generated yet (see PORTING.md "Work queue"): odd picture sizes.
 fi
 echo "== done ($(date -u +%H:%M:%S))"

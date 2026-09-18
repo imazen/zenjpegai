@@ -25,6 +25,7 @@ zenjpegai - JPEG AI (ISO/IEC 6048) codec
 
 USAGE:
     zenjpegai encode <in.png> <out.bits> [--model <0..3>] [--beta-disp <n>] [--op <sop|bop|hop>]
+    zenjpegai encode <in.png> <out.bits> --bpp <r> [--op <sop|bop|hop>]
     zenjpegai decode <in.bits> <out.png | out.yuv> [options]
     zenjpegai info <in.bits>
     zenjpegai pack-models --models <dir> --out <file.zjb> [--model <0..3>]... [--op <sop|bop|hop>]...
@@ -37,6 +38,8 @@ OPTIONS:
     --op <sop|bop|hop> encode: the operating point to code for (default: bop). decode: the
                        synthesis transform to use (default: the stream's first listed one)
     --beta-disp <n>    encode: quantiser displacement, -1069..702 (default 0; lower = lower rate)
+    --bpp <r>          encode: target bits per pixel; searches the model and the displacement
+                       (rate matching) instead of taking --model / --beta-disp
     --max-channels <y,uv>  progressive decode: read only the first latent channels
     --single-thread    do not use the thread pool
     --scalar           no SIMD (for debugging; every tier produces identical pixels)
@@ -63,6 +66,7 @@ struct Args {
     out: Option<PathBuf>,
     only: Option<String>,
     beta_disp: i32,
+    bpp: Option<f64>,
     single_thread: bool,
     scalar: bool,
     repeat: usize,
@@ -82,6 +86,7 @@ fn parse_args() -> Result<Args, String> {
         out: None,
         only: None,
         beta_disp: 0,
+        bpp: None,
         single_thread: false,
         scalar: false,
         repeat: 1,
@@ -121,6 +126,9 @@ fn parse_args() -> Result<Args, String> {
                 a.only = Some(v);
             }
             "--out" => a.out = Some(PathBuf::from(value("--out")?)),
+            "--bpp" => {
+                a.bpp = Some(value("--bpp")?.parse().map_err(|e| format!("--bpp: {e}"))?);
+            }
             "--beta-disp" => {
                 a.beta_disp = value("--beta-disp")?
                     .parse()
@@ -267,9 +275,24 @@ fn run() -> Result<(), String> {
             let mut stream = Vec::new();
             for run in 0..args.repeat.max(1) {
                 let t = Instant::now();
-                stream = encoder
-                    .encode(&image, params)
-                    .map_err(|e| format!("{e:?}"))?;
+                stream = match args.bpp {
+                    None => encoder
+                        .encode(&image, params)
+                        .map_err(|e| format!("{e:?}"))?,
+                    Some(bpp) => {
+                        let (s, m) = encoder
+                            .encode_to_bpp(&image, bpp, params.op)
+                            .map_err(|e| format!("{e:?}"))?;
+                        if run == 0 {
+                            eprintln!(
+                                "rate matching: model {} beta-disp {} -> {:.4} bpp \
+                                 (target {bpp}, {} trial encodes)",
+                                m.model_id, m.beta_displacement_log, m.bpp, m.trials
+                            );
+                        }
+                        s
+                    }
+                };
                 if args.time {
                     eprintln!(
                         "encode {run}: {:.1} ms ({}x{}, {:?}{})",

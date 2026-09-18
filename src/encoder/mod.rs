@@ -16,8 +16,12 @@
 #![allow(clippy::needless_range_loop)]
 
 mod colour;
+mod rate;
+mod tiles;
 
 pub use colour::{AnalysisInput, preprocess_rgb};
+pub use rate::{BDL_SEARCH_RANGE, RateMatch, search_beta};
+pub use tiles::{AnalysisTile, analysis_tiles};
 
 use alloc::vec::Vec;
 use std::collections::HashMap;
@@ -43,6 +47,7 @@ use crate::model::mcm::{self, upshuffle_psi};
 use crate::model::{self, CommonModel, ModelDir, ModelSource};
 use crate::nn::fast::{BTensor, Engine};
 use crate::tensor::Tensor;
+use crate::tools::regions::Area;
 use crate::tools::skip::skip_mask;
 
 /// `skip_cube_thr`: a cube may be skipped while every latent sample in it is reconstructed
@@ -99,6 +104,10 @@ pub struct Encoder {
     tables: AnsTables,
     cache: Mutex<HashMap<(usize, OperatingPoint), Arc<ModelSet>>>,
 }
+
+/// One model's analysis output for a whole picture: the two latents and the two hyper-latents.
+/// They do not depend on the quantiser displacement, so rate matching computes them once.
+type ModelLatents = ([Tensor<f32>; 2], [Tensor<i8>; 2]);
 
 /// Everything one component contributes to the codestream.
 struct Component {
@@ -248,15 +257,28 @@ impl Encoder {
     /// reference encoder's own `y` and compare the integer decisions exactly: our analysis
     /// transform agrees with PyTorch's only to about 1e-4 (`PORTING.md`), which is enough to
     /// move a residual symbol that sits on a rounding boundary.
+    ///
+    /// `z_hats` supplies the hyper-latents. Pass `None` to derive them here, which is what the
+    /// encoder does for a picture small enough to be one analysis tile; for a tiled picture each
+    /// tile's `z` comes from that tile's own (un-merged) latent, so the merged `y` alone cannot
+    /// reproduce it and the caller must hand them over.
     pub fn encode_latents(
         &self,
         latents: [&Tensor<f32>; 2],
+        z_hats: Option<[&Tensor<i8>; 2]>,
         width: usize,
         height: usize,
         params: EncodeParams,
     ) -> core::result::Result<(Vec<u8>, [ComponentTrace; 2]), At<Error>> {
         let (stream, components) = self
-            .encode_from_latents(latents, width, height, params, &enough::Unstoppable)
+            .encode_from_latents(
+                latents,
+                z_hats.map(|z| [z[0].clone(), z[1].clone()]),
+                width,
+                height,
+                params,
+                &enough::Unstoppable,
+            )
             .map_err(|e| at!(e))?;
         Self::trace(stream, components).map_err(|e| at!(e))
     }
@@ -269,20 +291,209 @@ impl Encoder {
     ) -> Result<(Vec<u8>, Vec<Component>)> {
         stop.check()?;
         let set = self.model_set(self.check_params(rgb.width, rgb.height, params)?, params.op)?;
-        let eng = &self.engine;
-        // 1. Colour pre-processing and the two analysis transforms.
+        // 1. Colour pre-processing, then the analysis transform and the hyper-encoder, tile by
+        //    tile (`sep_chan_tool.py::analysis_and_hyper_encoder`).
         let input = preprocess_rgb(rgb)?;
-        stop.check()?;
-        let y_luma = set
-            .analysis_y
-            .forward(eng, &input.luma, stop)?
-            .to_planar()?;
-        stop.check()?;
-        let y_chroma = set
-            .analysis_uv
-            .forward(eng, &input.chroma, stop)?
-            .to_planar()?;
-        self.encode_from_latents([&y_luma, &y_chroma], rgb.width, rgb.height, params, stop)
+        let planes = [&input.luma, &input.chroma];
+        let (mut ys, mut zs) = (Vec::with_capacity(2), Vec::with_capacity(2));
+        for (ccs, plane) in planes.into_iter().enumerate() {
+            let (y, z) = self.analyse_component(&set, ccs, plane, stop)?;
+            ys.push(y);
+            zs.push(z);
+        }
+        let z = [zs[0].clone(), zs[1].clone()];
+        self.encode_from_latents(
+            [&ys[0], &ys[1]],
+            Some(z),
+            rgb.width,
+            rgb.height,
+            params,
+            stop,
+        )
+    }
+
+    /// Encode to a target rate in bits per (luma) pixel, choosing the trained model and the
+    /// quantiser displacement (`bitrate_matcher`; see [`rate`] for what is and is not ported).
+    ///
+    /// The analysis transform and the hyper-encoder do not depend on the displacement, so each
+    /// model's latents are computed once and every trial re-codes from them; the reference
+    /// re-runs the whole analysis per trial.
+    pub fn encode_to_bpp(
+        &self,
+        rgb: &RgbImage,
+        target_bpp: f64,
+        op: OperatingPoint,
+    ) -> core::result::Result<(Vec<u8>, RateMatch), At<Error>> {
+        self.encode_to_bpp_with(rgb, target_bpp, op, &enough::Unstoppable)
+    }
+
+    /// [`Encoder::encode_to_bpp`] with cooperative cancellation.
+    pub fn encode_to_bpp_with(
+        &self,
+        rgb: &RgbImage,
+        target_bpp: f64,
+        op: OperatingPoint,
+        stop: &dyn enough::Stop,
+    ) -> core::result::Result<(Vec<u8>, RateMatch), At<Error>> {
+        self.rate_match(rgb, target_bpp, op, stop)
+            .map_err(|e| at!(e))
+    }
+
+    fn rate_match(
+        &self,
+        rgb: &RgbImage,
+        target_bpp: f64,
+        op: OperatingPoint,
+        stop: &dyn enough::Stop,
+    ) -> Result<(Vec<u8>, RateMatch)> {
+        if !(target_bpp.is_finite() && target_bpp > 0.0) {
+            return Err(Error::InvalidArgument("target bpp must be positive"));
+        }
+        let pixels = (rgb.width * rgb.height) as f64;
+        let input = preprocess_rgb(rgb)?;
+        let mut trials = 0usize;
+        // One analysis per model; every displacement re-codes from its latents.
+        let mut latents: Vec<Option<ModelLatents>> =
+            (0..model::MODEL_BETAS.len()).map(|_| None).collect();
+        let code = |ccs_model: usize,
+                    beta: i32,
+                    latents: &mut [Option<ModelLatents>],
+                    trials: &mut usize|
+         -> Result<Vec<u8>> {
+            if latents[ccs_model].is_none() {
+                let set = self.model_set(ccs_model, op)?;
+                let mut ys = Vec::with_capacity(2);
+                let mut zs = Vec::with_capacity(2);
+                for (ccs, plane) in [&input.luma, &input.chroma].into_iter().enumerate() {
+                    let (y, z) = self.analyse_component(&set, ccs, plane, stop)?;
+                    ys.push(y);
+                    zs.push(z);
+                }
+                latents[ccs_model] = Some((
+                    [ys[0].clone(), ys[1].clone()],
+                    [zs[0].clone(), zs[1].clone()],
+                ));
+            }
+            let (y, z) = latents[ccs_model].as_ref().expect("just computed");
+            *trials += 1;
+            let params = EncodeParams {
+                model_id: ccs_model as u8,
+                beta_displacement_log: [beta; 2],
+                op,
+            };
+            let (stream, _) = self.encode_from_latents(
+                [&y[0], &y[1]],
+                Some([z[0].clone(), z[1].clone()]),
+                rgb.width,
+                rgb.height,
+                params,
+                stop,
+            )?;
+            Ok(stream)
+        };
+
+        // `match_luma`: the model whose rate at displacement 0 is relatively closest.
+        let mut best_model = 0usize;
+        let mut best_diff = f64::INFINITY;
+        let mut base: Vec<Option<f64>> = alloc::vec![None; model::MODEL_BETAS.len()];
+        for id in 0..model::MODEL_BETAS.len() {
+            stop.check()?;
+            let bpp = code(id, 0, &mut latents, &mut trials)?.len() as f64 * 8.0 / pixels;
+            base[id] = Some(bpp);
+            let diff = (bpp - target_bpp).abs() / bpp;
+            if diff < best_diff {
+                best_diff = diff;
+                best_model = id;
+            }
+            // Only the chosen model's latents are needed from here on.
+        }
+        for (id, slot) in latents.iter_mut().enumerate() {
+            if id != best_model {
+                *slot = None;
+            }
+        }
+
+        let mut cache: std::collections::HashMap<i32, f64> = std::collections::HashMap::new();
+        cache.insert(0, base[best_model].expect("measured above"));
+        let beta = {
+            let mut cached = |b: i32| -> Result<f64> {
+                if let Some(&v) = cache.get(&b) {
+                    return Ok(v);
+                }
+                stop.check()?;
+                let bpp =
+                    code(best_model, b, &mut latents, &mut trials)?.len() as f64 * 8.0 / pixels;
+                cache.insert(b, bpp);
+                Ok(bpp)
+            };
+            rate::search_beta(target_bpp, rate::BDL_SEARCH_RANGE[best_model], &mut cached)?
+        };
+        let stream = code(best_model, beta, &mut latents, &mut trials)?;
+        let bpp = stream.len() as f64 * 8.0 / pixels;
+        Ok((
+            stream,
+            RateMatch {
+                model_id: best_model as u8,
+                beta_displacement_log: beta.clamp(BDL_RANGE.0, BDL_RANGE.1),
+                bpp,
+                trials,
+            },
+        ))
+    }
+
+    /// `compress_colocated_tiles` over every analysis tile of one component: the analysis
+    /// transform and the hyper-encoder run per tile and only each tile's core is kept.
+    fn analyse_component(
+        &self,
+        set: &ModelSet,
+        ccs: usize,
+        plane: &Tensor<f32>,
+        stop: &dyn enough::Stop,
+    ) -> Result<(Tensor<f32>, Tensor<i8>)> {
+        let (ph, pw) = (plane.h, plane.w);
+        let d = tiles::LATENT_DOWNSCALE[ccs];
+        let (lh, lw) = (ph.div_ceil(d), pw.div_ceil(d));
+        let (hz, wz) = (ph.div_ceil(4 * d), pw.div_ceil(4 * d));
+        let chs = LATENT_CHANNELS[ccs];
+        let eng = &self.engine;
+        let grid = tiles::analysis_tiles(ccs, ph, pw, lh, lw, hz, wz)?;
+        let mut y = Tensor::<f32>::zeros(chs, lh, lw)?;
+        let mut z_hat = Tensor::<i8>::zeros(chs, hz, wz)?;
+        for t in &grid {
+            stop.check()?;
+            let tile = if grid.len() == 1 {
+                plane.clone()
+            } else {
+                plane.window(t.image.x, t.image.y, t.image.width, t.image.height)?
+            };
+            let yt = match ccs {
+                0 => set.analysis_y.forward(eng, &tile, stop)?,
+                _ => set.analysis_uv.forward(eng, &tile, stop)?,
+            };
+            stop.check()?;
+            let zt = set.hyper[ccs]
+                .forward(eng, &yt, t.image.height, t.image.width, d, stop)?
+                .to_planar()?;
+            let yt = yt.to_planar()?;
+            if (yt.h, yt.w) != (t.latent.height, t.latent.width)
+                || (zt.h, zt.w) != (t.hyper.height, t.hyper.width)
+            {
+                return Err(Error::InvalidData("analysis tile: unexpected latent size"));
+            }
+            assign(&mut y, t.latent_core, &yt, t.latent_core_offset);
+            let max = (Z_OFFSET - 1) as f32;
+            let quantised = Tensor::from_vec(
+                zt.c,
+                zt.h,
+                zt.w,
+                zt.data
+                    .iter()
+                    .map(|&v| v.clamp(-(Z_OFFSET as f32), max).round_ties_even() as i8)
+                    .collect(),
+            )?;
+            assign(&mut z_hat, t.hyper_core, &quantised, t.hyper_core_offset);
+        }
+        Ok((y, z_hat))
     }
 
     fn check_params(&self, w: usize, h: usize, params: EncodeParams) -> Result<usize> {
@@ -294,11 +505,8 @@ impl Encoder {
                 "picture dimensions outside the format's 64..65599",
             ));
         }
-        if w * h > 4096 * 4096 {
-            // Larger pictures need the encoder's analysis tiling, which is not ported.
-            return Err(Error::Unsupported(
-                "pictures above 16 MP need analysis tiling (not ported)",
-            ));
+        if w * h > 120_000_000 {
+            return Err(Error::Unsupported("picture above 120 MP"));
         }
         Ok(params.model_id as usize)
     }
@@ -306,6 +514,7 @@ impl Encoder {
     fn encode_from_latents(
         &self,
         latents: [&Tensor<f32>; 2],
+        z_hats: Option<[Tensor<i8>; 2]>,
         w: usize,
         h: usize,
         params: EncodeParams,
@@ -320,9 +529,14 @@ impl Encoder {
         let (pw, ph) = (w + w % 2, h + h % 2);
         let sizes = [(ph, pw), (ph / 2, pw / 2)];
 
-        // 2. Hyper-encoder and `z` quantisation, per component.
-        let mut z_hats = Vec::with_capacity(2);
-        for (ccs, latent) in latents.iter().enumerate() {
+        // 2. Hyper-encoder and `z` quantisation, per component (already done when the caller
+        //    supplied the hyper-latents, which a tiled analysis must).
+        let mut z_hats = match z_hats {
+            Some(z) => z.into_iter().collect(),
+            None => Vec::with_capacity(2),
+        };
+        let need_z = z_hats.len() < 2;
+        for (ccs, latent) in latents.iter().enumerate().filter(|_| need_z) {
             stop.check()?;
             let (ph, pw) = sizes[ccs];
             let divider = if ccs == 0 { 16 } else { 8 };
@@ -502,6 +716,33 @@ fn png_err<E>(_e: E) -> &'static str {
     "the input is not a readable PNG"
 }
 
+/// `tiling.get_data` + `tiling.assign_data`: copy `src[:, oy.., ox..]` into `dst` at `core`,
+/// clamped the way tensor slicing clamps (the same helper `decoder::reconstruct` uses for
+/// regions, over any element type).
+fn assign<T: Copy + Default>(
+    dst: &mut Tensor<T>,
+    core: Area,
+    src: &Tensor<T>,
+    (ox, oy): (usize, usize),
+) {
+    let h = core
+        .height
+        .min(src.h.saturating_sub(oy))
+        .min(dst.h.saturating_sub(core.y));
+    let w = core
+        .width
+        .min(src.w.saturating_sub(ox))
+        .min(dst.w.saturating_sub(core.x));
+    let (dw, sw) = (dst.w, src.w);
+    for c in 0..dst.c.min(src.c) {
+        for y in 0..h {
+            let s: &[T] = &src.plane(c)[(oy + y) * sw + ox..][..w];
+            let d = (core.y + y) * dw + core.x;
+            dst.plane_mut(c)[d..d + w].copy_from_slice(s);
+        }
+    }
+}
+
 /// `_compress_ar_scale`'s branch for a component without a context model (chroma): the mean is
 /// `psi` up-shuffled, and the cube flags come from the whole reconstruction
 /// (`skip_mode.gen_skip_cubeflag`) rather than stage by stage.
@@ -607,13 +848,14 @@ fn picture_header(
         num_threads_z: 1,
         beta_displacement_log,
         regions: None,
+        // `tile_manager_synthesis` is set up from the coded luma size for both components.
         components: [0, 1].map(|ccs| ComponentHeader {
             num_threads_r: 1,
             num_chs: LATENT_CHANNELS[ccs] as u16,
             cube_flags: None,
             rvs_enabled: false,
             grfs_channel_flags: None,
-            synthesis_tiling: None,
+            synthesis_tiling: tiles::synthesis_tiling(height as usize, width as usize),
         }),
         quality_map: None,
     }

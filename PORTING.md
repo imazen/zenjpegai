@@ -27,7 +27,9 @@ against reference-produced data passes. "stub" and "partial" mean what they say.
 | `tools::qualmap` | `quality_map/quality_map.py` (`decode`, `quantize_scale`, `dequantize_resi`) | ported (decoder side): ANS-coded delta plane, DPCM reconstruction, log-scale offset and residual step per position, shared by both components | `tests/entropy_ref.rs` + `tests/decode_ref.rs` on 3 quality-map streams (plain, with RVS, with 8 ANS threads); oracle = reference decoder with its header defect patched (below) |
 | `tools::lsbs` | `ls_processing/lsbs/lsbs_scale_mode.py` (`buildTables`, `post_processing`), constants from `cfg/pipeline.json` | ported | `tests/decode_ref.rs` LSBS streams (`y_hat` within 5e-4 of the reference after scaling) |
 | `tools::regions` | `tiling/tiling.py::TileManagerHyper` | ported: region grids for y / psi / z, with and without overlap extension | unit tests + `tests/entropy_ref.rs` region streams (latent grid only) |
-| `encoder` | `ccs_sgmm_tool.py::compress`, `sep_chan_tool.py::compress`, `common_modules.py::{compress, _compress_z, encoder_get_scales, _compress_ar_scale, encoder_skip_and_cubeflag_for_tiles, encode, encode_z, encode_y, _ac_encode_y, _ac_encode_z}`, `image.py`/`colorspace.py` (`to_YUV_`, `pad_`, `pixel_unshuffle`) | ported for: a fixed model and operating point (SOP / BOP / HOP), 8-bit RGB 4:4:4 sources up to 16 MP, one analysis tile, one region, one ANS thread per substream, tools off. `Encoder::encode(rgb, EncodeParams { model_id, beta_displacement_log, op })`, CLI `zenjpegai encode`. **Not ported: analysis tiling (`tile_manager_enc`), regions, rate matching (`bitrate_matcher`), RVS / GRFS / LSBS / quality maps / post-filters, chroma-subsampled and 10-bit sources, multi-thread substreams, `num_chs` below the model's channel count** | `tests/encode_ref.rs` on seven fixed-model reference encodes (models 0..3, SOP / BOP / HOP, beta displacement -1069..+400): colour pre-processing bit-exact against the reference's own analysis inputs; `z_hat`, `skip_scale_log`, `scale_log` and the cube flags equal the reference encoder's exactly; six of seven streams byte-identical to the reference's; every stream decodes with `zenjpegai::Decoder` and with the reference decoder |
+| `encoder` | `ccs_sgmm_tool.py::compress`, `sep_chan_tool.py::compress`, `common_modules.py::{compress, _compress_z, encoder_get_scales, _compress_ar_scale, encoder_skip_and_cubeflag_for_tiles, encode, encode_z, encode_y, _ac_encode_y, _ac_encode_z}`, `image.py`/`colorspace.py` (`to_YUV_`, `pad_`, `pixel_unshuffle`) | ported for: a fixed model and operating point (SOP / BOP / HOP), 8-bit RGB 4:4:4 sources up to 120 MP, any number of analysis tiles, one region, one ANS thread per substream, tools off. `Encoder::encode(rgb, EncodeParams { model_id, beta_displacement_log, op })` and `Encoder::encode_to_bpp(rgb, bpp, op)`; CLI `zenjpegai encode [--model N --beta-disp B | --bpp R]`. **Not ported: regions, RVS / GRFS / LSBS / quality maps / post-filters on the encode side, chroma-subsampled and 10-bit sources, multi-thread substreams, `num_chs` below the model's channel count; the rate matcher's likelihood estimator (`ECLibLH`) and its `hyperopt` UV search (`src/encoder/rate.rs` says what is done instead)** | `tests/encode_ref.rs` on seven fixed-model reference encodes (models 0..3, SOP / BOP / HOP, beta displacement -1069..+400): colour pre-processing bit-exact against the reference's own analysis inputs; `z_hat`, `skip_scale_log`, `scale_log` and the cube flags equal the reference encoder's exactly; six of seven streams byte-identical to the reference's; every stream decodes with `zenjpegai::Decoder` and with the reference decoder |
+| `encoder::tiles` | `tiling.py::TileManager` (`setup_tiles_enc`, `_init_image_tiles_with_overlap`, `_get_latent_tile_from_image_tile`, the picture-border branch of `_get_core_of_overlapping_tile`), `sep_chan_tool.py::setup_enc_tile_managers_of_model`, `common_modules.py::compress_colocated_tiles` | ported: above 1 MP (luma) / 0.26 MP (chroma) the analysis transform and the hyper-encoder run per tile (1024 / overlap 64 luma, 512 / 32 chroma, from `cfg/CTC.json`) and only each tile's core is kept; the picture header's `synthesis_tiling` follows `tile_manager_synthesis`. **`_adjust_boundary_tiles` does not apply here** (the reference calls `setup_tiles_enc` without a minimum tile size) | unit test vs the layout `enc_img01_bop_m1_b0/encoder.log` logs, tile for tile; `tests/encode_ref.rs::colour_preprocessing_matches_reference` checks every tile's analysis input against the reference's own, and the 2096x1400 vector encodes to the reference's byte count |
+| `encoder::rate` | `bitrate_matcher/bitrate_matcher.py::{match_luma, beta_linear_interpolation}` | ported: model pre-selection at displacement 0, log-rate interpolation, +/-100 bisection, +/-1 % tolerance, per-model `BDL_range`. **Each trial codes the real stream instead of the reference's likelihood estimate, and `find_UV_beta_with_hyperopt` is not ported** (the shipped config never reaches it) | `tests/encode_ref.rs::rate_matching_hits_the_target`: same model as the reference at all five CTC rates, and closer to the target at every one (table below) |
 | `model::mcm` (compress) | `context.py::{forward, pred, gen_skip_cubeflag, convert_cubeflag_map, _mask_redundant_padding_*}` | ported: per stage quantise with the sigma-threshold mask, decide the stage's cube flags from its own reconstruction error, re-quantise with the cubes that must not be skipped | as above (`y.residual_quant`, `y.cube_flag`) |
 | `decoder::entropy` | `common_modules.py::decode/decode_z/decode_y/_ac_decode_y/_cal_step_size`, `gm.py::build_indexes` | ported for: all 4 models, 1..16 threads, no regions / dependent / independent regions, RVS, GRFS, the quality map, and progressive decode (`num_decode_chs`: a caller-chosen prefix of the latent channels) | `tests/entropy_ref.rs`: 21 reference streams (6 with RVS and/or GRFS, 3 with a quality map); z_hat, sigma, quantised residual exact, dequantised residual bit-identical |
 | `nn` + `nn::reference` | `torch.nn.functional` conv2d / conv_transpose2d / pixel_shuffle / ReLU / ReLU6 | ported as plain loops that *define* the crate's numeric contract (FMA accumulation in `(ic, ky, kx)` order). Kept as the oracle and as the fallback for geometries the fast engine does not cover (stride-2 convolutions) | `tests/nn_vectors.rs`: 11 tiny PyTorch-computed cases (groups, depthwise, stride 2, 2x2, 1x3/3x1, both transposed geometries) within 2e-6 relative; pixel shuffle exact |
@@ -101,14 +103,42 @@ unrounded value sits within that of a `.5` boundary lands on the other side. At 
 reference's stock configuration produces this never happens; it takes beta displacement +400
 (0.34 bpp -> 2.9 bpp) before 42 of 501,760 symbols move.
 
-Speed, 560x888, one process, checkpoints read from `.pth`: **0.12 s** of wall time (the encode
-itself 98 ms, AVX-512, threads on) against the reference encoder's **2.0 s** of process wall time
-at the same fixed model.
+### Rate matching (`--bpp`), 560x888 test image 00030, base profile
+
+Ours codes every trial; the reference scores trials with the entropy model's likelihood
+(`ECLibLH`) and only codes the winner, so its *achieved* rate drifts from the target.
+
+| target bpp | our model / displacement | our bpp | reference model / displacement | reference bpp |
+| --- | --- | --- | --- | --- |
+| 0.12 | 0 / +259 | 0.1165 (-3.0 %) | 0 / +211 | 0.1081 (-9.9 %) |
+| 0.25 | 1 / -222 | 0.2523 (+0.9 %) | 1 / -189 | 0.2643 (+5.7 %) |
+| 0.50 | 1 / +259 | 0.4827 (-3.5 %) | 1 / +203 | 0.4493 (-10.1 %) |
+| 0.75 | 2 / -248 | 0.7568 (+0.9 %) | 2 / -209 | 0.7946 (+5.9 %) |
+| 1.00 | 2 / -9   | 1.0088 (+0.9 %) | 2 / 0    | 1.0198 (+2.0 %) |
+
+The model choice is the reference's at every rate. The two that miss +/-1 % are capped by the
+model's own `BDL_range` (`cfg/BRM/default.json`): model 0 and model 1 stop at +259, which is as
+high a rate as they can reach. 12-15 trial encodes, 0.55 s of process wall time.
+
+### Speed (`benchmarks/encode_end_to_end_2026-09-18.{tsv,meta}`)
+
+Best of three steady-state runs of one fixed-model encode pass, `encode_ms`:
+
+| case | reference, 1 thread | reference, 32 | ours, 1 thread | ours, 32 |
+| --- | --- | --- | --- | --- |
+| 560x888 SOP model 1 | 596 | 5671 | 301 | 63.8 |
+| 560x888 BOP model 1 | 698 | 5577 | 307 | 73.3 |
+| 560x888 HOP model 2 | 5595 | 6177 | 1715 | 413 |
+| 2096x1400 BOP model 1 (6 analysis tiles) | 3997 | 5672 | 2007 | 423 |
+
+Whole-process wall time, one encode, checkpoints read from `.pth`: **0.13 s** against the
+reference's **1.5 s** at 560x888. The reference pins torch to one thread by default and gets
+*slower* when allowed more on this box, so its one-thread column is the fair comparison.
 
 Not started (decoder): eICCI on chroma-subsampled pictures, custom colour transform.
-Not started (encoder): analysis tiling, regions, rate matching (`--bpp`), the coding tools and
-post-filters on the encode side, chroma-subsampled / 10-bit / YUV sources, multi-threaded
-substreams. Not started (everything else): CI.
+Not started (encoder): regions, the coding tools and post-filters on the encode side,
+chroma-subsampled / 10-bit / YUV sources, multi-threaded substreams, the rate matcher's
+likelihood estimator. Not started (everything else): CI.
 
 ## WebAssembly numeric policy (measured 2026-09-17)
 
@@ -337,37 +367,33 @@ used by the parity tests live under `/mnt/v/output/zenjpegai/reference/`; they a
 Ordered by value. Each item names the upstream source and the gate that closes it. Agents append
 their own open items below when they stop.
 
-1. **Encoder, the rest of it.** A fixed-model, single-tile, tools-off encoder exists and is
-   byte-identical to the reference's on six of seven vectors (row `encoder` above). What is
-   left, in order:
-   1. **Analysis tiling** for pictures above ~1 MP (`sep_chan_tool.py::setup_enc_tile_managers_of_model`,
-      `common_modules.py::compress_colocated_tiles`, `tiling.py::TileManager`): image tiles of
-      1024 luma / 512 chroma with 64 / 32 overlap; the analysis transform AND the hyper-encoder
-      run per tile and only each tile's core is assigned into `y` / `z_hat`
-      (`get_core_of_overlapping_latent_tile{,_z}`). The tile log of
-      `img01_base_off_bpp050/encoder.log` shows the layout the reference picks for 2096x1400.
-      Gate: `enc_fixed` a vector on `data/test/00001_TE_2096x1400_8bit_sRGB.png` and require the
-      same `y` / `z_hat` as `dump_encode.py --enc2` records, then the same stream.
-      `Encoder::encode` currently refuses above 16 MP and produces a single-tile stream below,
-      which diverges from the reference above ~1 MP - **fix this before claiming large pictures
-      work**.
-   2. **Rate matching** (`--bpp`): `coding_tools/bitrate_matcher/bitrate_matcher.py` searches
-      (model, beta displacement) for a target bpp. `EncodeParams` already takes the pair, so this
-      is a search loop over `Encoder::encode_latents` plus the reference's rate estimate.
-   3. **Encode-side tools** where the decoder supports them: RVS / GRFS
+1. **Encoder, the rest of it.** The encoder is ported through analysis tiling and rate matching
+   (rows `encoder`, `encoder::tiles`, `encoder::rate` above); it reproduces the reference's
+   stream byte for byte on seven of eight fixed-model vectors. What is left, in order:
+   1. **Encode-side coding tools** where the decoder already supports them: RVS / GRFS
       (`quantization/rvs/res_var_scale.py::analyze` + `quantize_resi`), the quality map, LSBS,
-      regions (`region_partitioning_flag`, `region_residual_in_its_own_substream_flag`), multiple
-      ANS threads (`num_threads_z` / `num_threads_r`; `channel_step` already matches the
-      decoder's chunking), and the post-filters. Note
+      regions (`region_partitioning_flag`, `region_residual_in_its_own_substream_flag`) and
+      multiple ANS threads (`num_threads_z` / `num_threads_r`; `channel_step` already matches the
+      decoder's chunking). Seam to fill first:
       `decoder::entropy::ComponentScales::quantize` returns `None` as soon as RVS or a quality map
-      is enabled - that is the seam to fill first, and `ContextModel::compress` then needs a
-      per-position scaler instead of the per-channel one it takes today.
-   4. **Chroma-subsampled / 10-bit / YUV sources**: `ccs_sgmm_tool.py::compress` builds the
+      is on, and `ContextModel::compress` takes a per-channel scaler where those tools need a
+      per-position one (the reference down-shuffles the quantiser's tensors alongside the latent,
+      `context.py::forward`). Gate: `enc_fixed` vectors with `cfg/tools/{ResVarScale,LSBS,
+      DependentRegions,IndependentRegions,ECThread8}.json` and the same comparison as the
+      existing ones.
+   2. **Post-filters on the encode side** (EFE linear / non-linear, eICCI, LEF): each needs its
+      RDO search as well as its syntax. `scripts/ref_vectors/force_efe_encode.py` shows how to
+      pin the reference's decisions to get oracles for individual branches.
+   3. **Chroma-subsampled / 10-bit / YUV sources**: `ccs_sgmm_tool.py::compress` builds the
       12-plane chroma input differently for 4:2:0 and 4:2:2 (`encoder::colour` ports the 4:4:4
-      branch only), and the header's `s_ver/s_hor/c_ver/c_hor` follow.
-   5. **Encode benchmark** against the reference encoder (`scripts/bench/`), one thread and
-      threaded, committed as `benchmarks/encode_*.tsv` + `.meta`. Single measurement so far:
-      0.12 s of process wall time vs the reference's 2.0 s at 560x888 (fixed model).
+      branch only), and `s_ver/s_hor/c_ver/c_hor` in the header follow.
+   4. **The rate matcher's likelihood estimator** (`ECLibLH` + `GMProbModel.forward`), if
+      reproducing the reference's *choices* rather than beating them ever matters: our search
+      codes each trial, which is why it lands closer to the target (table above) but on different
+      displacements.
+   5. **Encoder memory**: nothing is measured. `Limits` / `estimate_memory` cover decoding only;
+      a rate-matched encode holds one model's latents plus a trial stream (554 MB max RSS at
+      560x888, `/usr/bin/time -v`, not heaptrack).
 2. **Browser**: wasm SIMD + threads builds, polyfill, Playwright, Pages workflow (`wasm/`, `web/`;
    status in `web/README.md`). GPU (`gpu/`, wgpu) synthesis backend and its wiring into the web
    build (status in `gpu/README.md`).
@@ -493,4 +519,10 @@ Appended by the second encoder agent, 2026-09-17:
   `encoder_end_to_end_matches_reference`, and `reference_decoder_accepts_our_streams`, which is
   `#[ignore]`d because it shells out to the reference's Python decoder - run it with
   `cargo test --all-features --test encode_ref reference_decoder -- --ignored`).
-- Open: everything in item 1 above. Nothing of items 1.1-1.5 is started.
+- Also landed (same session): `encoder::tiles` (analysis tiling + the header's synthesis
+  tiling), `encoder::rate` (`--bpp`), `scripts/bench/{encode_end_to_end.sh, ref_encode.py}` and
+  `benchmarks/encode_end_to_end_2026-09-18.{tsv,meta}`, and the vectors
+  `enc_img30_{bop_m1_bm300, sop_m0_bm300, bop_m3_b400, bop_m0_bm1069, hop_m3_bm1069}` +
+  `enc_img01_bop_m1_b0`.
+- Open: items 1.1-1.5 above. Nothing of them is started. The encoder is also **not** wired into
+  `zencodec` (the standards agent's item 3) and has no `Limits` of its own.

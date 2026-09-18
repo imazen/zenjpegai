@@ -1,0 +1,34 @@
+# encode_end_to_end_2026-09-18.tsv
+command:   scripts/bench/encode_end_to_end.sh > benchmarks/encode_end_to_end_2026-09-18.tsv
+commit:    417be42 (+ the analysis-tiling and rate-matching change in the same series)
+host:      dev, AMD Ryzen 9 9950X3D 16-Core (32 threads), Ubuntu, native (not WSL)
+build:     cargo build --release --features cli   (no -C target-cpu=native)
+reference: jpeg-ai-reference-software b9e573f, torch 1.10.2+cpu, Python 3.8 venv, -target_device cpu
+what:      one encode pass at a fixed (model, beta displacement) on both sides: the reference's
+           bitrate matcher is disabled (-model.bitrate_matcher.enabled 0), which is the mode
+           zenjpegai's --model / --beta-disp reproduces. Streams: identical bytes on every case
+           here (the `bytes` column).
+columns:   case, encoder, threads, run, encode_ms, process_wall_ms, bytes
+           run 0 of zenjpegai includes the model load; runs 1.. are steady state.
+           `encode_ms` for the reference is its own TOTAL (excludes interpreter start and model
+           load), `process_wall_ms` the whole process.
+
+Best of 3 steady-state runs, encode_ms:
+
+| case                  | ref 1 thr | ref 32 thr | zen 1 thr | zen 32 thr | zen 32 vs ref 1 |
+| --- | --- | --- | --- | --- | --- |
+| img30 SOP m1 b0       |   595.6   |   5671.0   |   300.7   |    63.8    |  9.3x |
+| img30 BOP m1 b0       |   697.5   |   5576.8   |   306.8   |    73.3    |  9.5x |
+| img30 HOP m2 b0       |  5595.0   |   6176.9   |  1715.2   |   412.6    | 13.6x |
+| img01 BOP m1 b0 (2.9 MP, 6 analysis tiles) | 3997.1 | 5672.3 | 2006.5 | 422.5 | 9.5x |
+
+Whole-process wall time, one encode, models read from .pth: zenjpegai 125-131 ms (560x888)
+against the reference's 1.47-1.63 s.
+
+The reference gets *slower* with more torch threads on this box (it pins itself to one thread by
+default; `--threads 32` replaces that call). Its one-thread column is the fair comparison.
+
+Rate matching is not in this table: with `--bpp` zenjpegai codes every trial for real
+(12-15 trial encodes, 0.55 s wall at 560x888) while the reference scores trials with a
+likelihood estimate; its own rate-matched encode of the same picture at 0.5 bpp reports
+TOTAL 4.9 s (`img30_base_off_bpp050/encoder.log`).

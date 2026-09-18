@@ -23,6 +23,11 @@ fn max_abs_diff(want: &[f32], got: &[f32]) -> f32 {
         .fold(0.0, f32::max)
 }
 
+fn z_tensor(t: &common::RefTensor) -> Tensor<i8> {
+    assert_eq!(t.shape.len(), 4);
+    Tensor::from_vec(t.shape[1], t.shape[2], t.shape[3], t.i8()).unwrap()
+}
+
 fn tensor(t: &common::RefTensor) -> Tensor<f32> {
     assert_eq!(t.shape.len(), 4);
     Tensor::from_vec(t.shape[1], t.shape[2], t.shape[3], t.f32()).unwrap()
@@ -195,6 +200,15 @@ const VECTORS: &[(&str, &str, u8, OperatingPoint, i32)] = &[
         OperatingPoint::Hop,
         -1069,
     ),
+    // 2096x1400: above the 1 MP threshold, so the analysis transform and the hyper-encoder run
+    // per tile (1024 luma / 512 chroma, overlap 64 / 32) and the header carries synthesis tiling.
+    (
+        "enc_img01_bop_m1_b0",
+        "00001_TE_2096x1400_8bit_sRGB.png",
+        1,
+        OperatingPoint::Bop,
+        0,
+    ),
 ];
 
 fn source(image: &str) -> zenjpegai::RgbImage {
@@ -208,8 +222,12 @@ fn present(vector: &str) -> bool {
 }
 
 /// Colour pre-processing: bit-exact against the reference's own analysis-transform inputs.
+///
+/// The reference records one input per analysis call, so on a tiled picture this also checks
+/// that our analysis tile grid is the reference's, tile for tile.
 #[test]
 fn colour_preprocessing_matches_reference() {
+    use zenjpegai::encoder::analysis_tiles;
     let mut ran = 0;
     for &(vector, image, ..) in VECTORS {
         if !present(vector) {
@@ -217,18 +235,47 @@ fn colour_preprocessing_matches_reference() {
         }
         let dump = load_encoder_dump(&vector_dir(vector).join("enc2"));
         let input = preprocess_rgb(&source(image)).unwrap();
-        for (name, got) in [
-            ("analysis_y.0.in", &input.luma),
-            ("analysis_uv.0.in", &input.chroma),
-        ] {
-            let want = dump[name].f32();
-            assert_eq!(want.len(), got.data.len(), "{vector} {name}: length");
-            let differing = want
-                .iter()
-                .zip(&got.data)
-                .filter(|(a, b)| a.to_bits() != b.to_bits())
-                .count();
-            assert_eq!(differing, 0, "{vector} {name}: {differing} samples differ");
+        for (ccs, (net, plane)) in [("analysis_y", &input.luma), ("analysis_uv", &input.chroma)]
+            .into_iter()
+            .enumerate()
+        {
+            let d = [16usize, 8][ccs];
+            let (lh, lw) = (plane.h.div_ceil(d), plane.w.div_ceil(d));
+            let tiles = analysis_tiles(
+                ccs,
+                plane.h,
+                plane.w,
+                lh,
+                lw,
+                plane.h.div_ceil(4 * d),
+                plane.w.div_ceil(4 * d),
+            )
+            .unwrap();
+            for (i, t) in tiles.iter().enumerate() {
+                let key = format!("{net}.{i}.in");
+                let want = dump
+                    .get(&key)
+                    .unwrap_or_else(|| panic!("{vector}: {key} missing (tile count differs)"));
+                assert_eq!(
+                    (want.shape[2], want.shape[3]),
+                    (t.image.height, t.image.width),
+                    "{vector} {key}: tile geometry"
+                );
+                let got = plane
+                    .window(t.image.x, t.image.y, t.image.width, t.image.height)
+                    .unwrap();
+                let differing = want
+                    .f32()
+                    .iter()
+                    .zip(&got.data)
+                    .filter(|(a, b)| a.to_bits() != b.to_bits())
+                    .count();
+                assert_eq!(differing, 0, "{vector} {key}: {differing} samples differ");
+            }
+            assert!(
+                !dump.contains_key(&format!("{net}.{}.in", tiles.len())),
+                "{vector} {net}: the reference used more tiles than we do"
+            );
         }
         ran += 1;
     }
@@ -300,21 +347,29 @@ fn compare_decisions(vector: &str, traces: &[zenjpegai::encoder::ComponentTrace;
 #[test]
 fn decisions_match_reference_given_its_latents() {
     let mut ran = 0;
-    for &(vector, _, model_id, op, beta) in VECTORS {
+    for &(vector, image, model_id, op, beta) in VECTORS {
         if !present(vector) {
             continue;
         }
         let dump = load_encoder_dump(&vector_dir(vector).join("enc2"));
         let (yl, yc) = (tensor(&dump["y.y"]), tensor(&dump["uv.y"]));
-        let shape = dump["analysis_y.0.in"].shape.clone();
+        let picture = source(image);
         let enc = Encoder::new(ref_root().join("models"));
         let params = EncodeParams {
             model_id,
             beta_displacement_log: [beta, beta],
             op,
         };
+        let zy = z_tensor(&dump["y.z_hat"]);
+        let zc = z_tensor(&dump["uv.z_hat"]);
         let (stream, traces) = enc
-            .encode_latents([&yl, &yc], shape[3], shape[2], params)
+            .encode_latents(
+                [&yl, &yc],
+                Some([&zy, &zc]),
+                picture.width,
+                picture.height,
+                params,
+            )
             .unwrap();
         let moved = compare_decisions(vector, &traces);
         let reference = std::fs::read(vector_dir(vector).join("stream.bits")).unwrap();
@@ -459,4 +514,66 @@ fn reference_decoder_accepts_our_streams() {
         println!("{vector}: reference decode differs in {differing} samples, worst {worst}");
         assert!(worst <= 1, "{vector}: reference decode differs by {worst}");
     }
+}
+
+/// Rate matching: the model and displacement `--bpp` settles on, against the reference
+/// encoder's own choice at the same target. Ours is measured on the real codestream, the
+/// reference's on a likelihood estimate (`src/encoder/rate.rs`), so the achieved rates differ.
+#[test]
+fn rate_matching_hits_the_target() {
+    let image = "00030_TE_560x888_8bit_sRGB.png";
+    let picture = source(image);
+    let pixels = (picture.width * picture.height) as f64;
+    let enc = Encoder::new(ref_root().join("models"));
+    let dec = zenjpegai::Decoder::new(ref_root().join("models"));
+    // (target bpp, the reference stream encoded at that target with its own rate matcher).
+    let cases = [
+        (0.12, "img30_base_off_bpp012"),
+        (0.25, "img30_base_off_bpp025"),
+        (0.50, "img30_base_off_bpp050"),
+        (0.75, "img30_base_off_bpp075"),
+        (1.00, "img30_base_off_bpp100"),
+    ];
+    let mut ran = 0;
+    for (target, vector) in cases {
+        let path = vector_dir(vector).join("stream.bits");
+        if !path.is_file() {
+            continue;
+        }
+        let (stream, m) = enc
+            .encode_to_bpp(&picture, target, OperatingPoint::Bop)
+            .unwrap();
+        let theirs = std::fs::read(&path).unwrap();
+        let their_bpp = theirs.len() as f64 * 8.0 / pixels;
+        let their_hdr = dec.read_headers(&theirs).unwrap().picture;
+        println!(
+            "target {target}: ours model {} beta {} -> {:.4} bpp ({:+.1} %, {} trials); \
+             reference model {} beta {} -> {:.4} bpp ({:+.1} %)",
+            m.model_id,
+            m.beta_displacement_log,
+            m.bpp,
+            (m.bpp / target - 1.0) * 100.0,
+            m.trials,
+            their_hdr.model_id,
+            their_hdr.beta_displacement_log[0],
+            their_bpp,
+            (their_bpp / target - 1.0) * 100.0,
+        );
+        assert_eq!(
+            m.model_id, their_hdr.model_id,
+            "target {target}: rate matching chose a different model than the reference"
+        );
+        // Within 1 % unless the model's `BDL_range` caps the search (0.12 and 0.50 here);
+        // measured worst case 3.5 %. Never loosen this without re-measuring.
+        assert!(
+            (m.bpp / target - 1.0).abs() < 0.04,
+            "target {target}: {:.4} bpp",
+            m.bpp
+        );
+        // The stream must still be a stream.
+        let ours = dec.decode(&stream).unwrap();
+        assert_eq!((ours.width, ours.height), (picture.width, picture.height));
+        ran += 1;
+    }
+    assert!(ran > 0, "no reference streams on disk");
 }

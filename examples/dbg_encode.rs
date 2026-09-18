@@ -1,6 +1,7 @@
 //! Diagnostic: where the encoder's integer decisions diverge from the reference encoder's.
 //!
-//! `cargo run --release --all-features --example dbg_encode -- <vector> <model_id> <op> <beta>`
+//! `cargo run --release --all-features --example dbg_encode -- <vector> <model_id> <op> <beta>
+//!  <height> <width>`
 //! with the reference dumps in `$ZENJPEGAI_VECTORS/<vector>/enc2`.
 
 #[path = "../tests/common/mod.rs"]
@@ -28,13 +29,23 @@ fn main() {
         Tensor::from_vec(r.shape[1], r.shape[2], r.shape[3], r.f32()).unwrap()
     };
     let (yl, yc) = (t("y.y"), t("uv.y"));
-    let shape = dump["analysis_y.0.in"].shape.clone();
+    let zi = |n: &str| {
+        let r = &dump[n];
+        Tensor::from_vec(r.shape[1], r.shape[2], r.shape[3], r.i8()).unwrap()
+    };
+    let (zy, zc) = (zi("y.z_hat"), zi("uv.z_hat"));
+    // The coded picture size, from the merged luma latent (16 samples per latent sample).
+    let (h, w) = (
+        a[4].parse::<usize>().unwrap(),
+        a[5].parse::<usize>().unwrap(),
+    );
     let enc = Encoder::new(common::ref_root().join("models"));
     let (_, traces) = enc
         .encode_latents(
             [&yl, &yc],
-            shape[3],
-            shape[2],
+            Some([&zy, &zc]),
+            w,
+            h,
             EncodeParams {
                 model_id,
                 beta_displacement_log: [beta, beta],
