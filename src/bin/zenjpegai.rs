@@ -60,6 +60,8 @@ OPTIONS:
     --efe-linear       encode: search and signal the EFE linear post-filter
     --efe-dctif-only   encode: signal EFE linear with no filters (DCTIF_only)
     --efe-nonlinear    encode: search and signal the EFE non-linear post-filter
+    --tools-on         encode: every coding tool (the reference's cfg/tools_on.json:
+                       --rvs --grfs --lsbs --lef --efe-linear --efe-nonlinear --eicci)
     --ans-threads <n>  encode: ANS threads per substream (1, 2, 4, 8 or 16)
     --regions <mode>   encode: region partitioning, `dependent` or `independent` (large
                        pictures only; the grid follows the picture size)
@@ -215,6 +217,15 @@ fn parse_args() -> Result<Args, String> {
                     v.parse()
                         .map_err(|e| format!("--eicci-tile-samples: {e}"))?
                 };
+            }
+            "--tools-on" => {
+                a.rvs = true;
+                a.grfs = true;
+                a.lsbs = true;
+                a.lef = true;
+                a.efe_linear = true;
+                a.efe_nonlinear = true;
+                a.eicci.get_or_insert_with(Default::default);
             }
             "--efe-linear" => a.efe_linear = true,
             "--efe-dctif-only" => {

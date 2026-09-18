@@ -2,7 +2,7 @@
 # Encode + decode a matrix of configurations with the reference software and dump the decoder's
 # intermediate tensors for the parity tests.
 #
-#   scripts/ref_vectors/make_reference_streams.sh [SET]      SET: smoke (default) | regions | tools | filters | efe | efesolves | filtertiles | qmap | formats | icci420 | encoder | cubeflags | rate | all
+#   scripts/ref_vectors/make_reference_streams.sh [SET]      SET: smoke (default) | regions | tools | filters | efe | efesolves | filtertiles | qmap | formats | icci420 | encoder | cubeflags | rate | toolson | all
 #
 # Output: $OUT/<name>/{stream.bits,encoder.log,tensors.bin,manifest.txt,decoded.png,stdout.log}
 # with OUT=/mnt/v/output/zenjpegai/reference/vectors. Existing streams are kept (delete the
@@ -255,6 +255,28 @@ if [ "$SET" = filtertiles ] || [ "$SET" = all ]; then
   for v in img01_base_eiccitiles_lef_bpp050 img30_base_lef_bpp050 img30_base_eicci_bpp050 img30_base_on_bpp025 img30_base_on_bpp100; do
     [ -f "$OUT/$v/filters_lef_icci/manifest.txt" ] || nice -n 19 python "$HERE/dump_filters_lef_icci.py" \
         "$OUT/$v/stream.bits" "$OUT/$v/filters_lef_icci" > "$OUT/$v/dump_filters_lef_icci.log" 2>&1
+  done
+fi
+if [ "$SET" = toolson ] || [ "$SET" = all ]; then
+  # E5: upstream's cfg/tools_on.json (RVS+GRFS, LSBS, EFE linear + non-linear, eICCI, LEF)
+  # at every CTC rate on both test pictures — the oracle for the `tools_on` preset gate.
+  # The post-filter dumps (filters/, filters_lef_icci/, efe_nonlinear/) make them full
+  # per-tool oracles like the two tools_on streams of the `filters` set.
+  for bpp in 012 025 050 075 100; do
+    one "img30_base_on_bpp$bpp" $IMG30 "$((10#$bpp))" cfg/tools_on.json cfg/profiles/base.json
+    one "img01_base_on_bpp$bpp" $IMG01 "$((10#$bpp))" cfg/tools_on.json cfg/profiles/base.json
+  done
+  for img in img30 img01; do
+    case $img in img30) SRC="data/test/$IMG30";; *) SRC="data/test/$IMG01";; esac
+    for bpp in 012 025 050 075 100; do
+      v=${img}_base_on_bpp$bpp
+      [ -f "$OUT/$v/manifest.txt" ] && filters_dump "$v"
+      if [ -f "$OUT/$v/manifest.txt" ] && [ ! -f "$OUT/$v/filters_lef_icci/manifest.txt" ]; then
+        nice -n 19 python "$HERE/dump_filters_lef_icci.py" "$OUT/$v/stream.bits" \
+            "$OUT/$v/filters_lef_icci" > "$OUT/$v/dump_filters_lef_icci.log" 2>&1
+      fi
+      [ -f "$OUT/$v/filters/manifest.txt" ] && nl_dump_probe "$v" "$SRC"
+    done
   done
 fi
 if [ "$SET" = formats ] || [ "$SET" = all ]; then

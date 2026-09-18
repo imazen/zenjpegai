@@ -197,6 +197,28 @@ impl Default for EncodeParams {
     }
 }
 
+impl EncodeParams {
+    /// The reference's `cfg/tools_on.json`: every coding tool on. That is `Default`
+    /// (`tools_off.json`) plus residual variance scaling and the channel gain flags
+    /// (`tools/ResVarScale.json`), latent scaling (`tools/LSBS.json`) and the four
+    /// post-filters of `tools/EnhancementFilters.json`: EFE linear, eICCI with the shipped
+    /// [`EicciConfig`], EFE non-linear and LEF. `tools_on.json` also points the bitrate
+    /// matcher at `betas_tools_on.txt`, which is only the reference's file of pregenerated
+    /// picks — the search itself is unchanged, so [`RateEstimate`] is left to the caller.
+    pub fn tools_on() -> Self {
+        Self {
+            rvs: true,
+            grfs: true,
+            lsbs: true,
+            lef: true,
+            efe_linear: true,
+            efe_nonlinear: true,
+            eicci: Some(EicciConfig::default()),
+            ..Self::default()
+        }
+    }
+}
+
 /// `BDL_clipping_range` (`CCS_SGMM/params.py`).
 pub const BDL_RANGE: (i32, i32) = (-1069, 702);
 

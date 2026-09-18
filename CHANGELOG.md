@@ -7,6 +7,18 @@
 - `EncodeParams` no longer derives `Eq` (the new `eicci` config carries `f32` loss weights).
 
 ### Added
+- Encoder: the `tools_on` preset (`E5`) — `EncodeParams::tools_on` / CLI `--tools-on`
+  enable the whole `cfg/tools_on.json` tool set at once (RVS, GRFS, LSBS, EFE linear,
+  eICCI, EFE non-linear, LEF); the individual flags `--efe-linear`, `--efe-nonlinear`
+  and `--eicci` work alongside the existing `--lef` / `--rvs` / `--grfs` / `--lsbs`.
+  Gate on all ten CTC points (`img30`/`img01` x 0.12-1.00 bpp, new `toolson` reference
+  vector set): the reference's `(model, beta)` pick every time, every tool signalled,
+  entropy payload symbol-identical except one-step rounding-boundary moves. The
+  post-filter decisions differ from the reference's (deterministic f64 least-squares
+  vs MKL's nondeterministic f32 `lstsq`) and reconstruct *better* on every vector
+  (+0.017..+0.122 dB through our decoder and the reference's alike) at +0.07..+1.93 %
+  size, all of it the larger TON header — measured numbers and the mechanism in
+  `PORTING.md` → "Encoder parity → tools_on".
 - Encoder: the EFE non-linear post-filter (`E2`) — `EncodeParams::efe_nonlinear` / CLI
   `--efe-nonlinear` run the reference's `EFEnonlinear.compress` on the post-eICCI
   reconstruction (`src/encoder/filters/efe_nonlinear.rs`): the 1200-px tile grid snapped to

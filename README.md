@@ -17,11 +17,13 @@ and planar-YUV (4:4:4 / 4:2:2 / 4:2:0, 8/10 bit) sources, the same coding tools 
 analysis tiling above 1 MP, fixed-model and target-bpp rate control with the reference's
 `ECLibLH` likelihood measure or the coded stream (`RateEstimate`), resource limits and a
 memory estimate (`EncodeLimits`, `estimate_encode_memory`); it reproduces the reference
-encoder's streams byte for byte on 14 of 18 fixed-model vectors (same length on the rest).
-Not ported: the EFE / eICCI post-filter decisions on the encode side (the LEF channel IS
-signalled), the hyperopt displacement search, the user-defined colour transform (the
-reference's own implementation is inconsistent — see `PORTING.md`), eICCI on subsampled
-pictures. Anything unsupported is rejected with `Error::Unsupported`; nothing is silently
+encoder's streams byte for byte on 14 of 18 fixed-model vectors (same length on the rest)
+and the `tools_on` tool set (`--tools-on`, or the individual `--rvs`/`--grfs`/`--lsbs`/
+`--lef`/`--efe-linear`/`--eicci`/`--efe-nonlinear` flags) with the post-filter decisions
+the reference's searches would make — modulo MKL `lstsq` nondeterminism that costs the
+reference up to 0.12 dB (`PORTING.md`). Not ported: the hyperopt displacement search,
+the user-defined colour transform (the reference's own implementation is inconsistent —
+see `PORTING.md`), eICCI on subsampled pictures. Anything unsupported is rejected with `Error::Unsupported`; nothing is silently
 approximated. The entropy stage is bit-exact; the reconstructed 8-bit picture differs from the
 reference decoder's in about 0.005 % of samples, each by one step (convolution summation
 order). Also here: a WebAssembly build with a browser polyfill and demo (`web/`, live at
@@ -66,6 +68,13 @@ stack (see `benchmarks/conv_kernels_2026-09-18.md`). Letting the reference use a
 hardware threads did not help it on this box (its best single run was never better than 0.9x of
 its one-thread time, and the median was 2x to 6x worse); those rows are in the TSV.
 Two picture sizes is a thin sample: no tiny pictures, nothing above 3 MP yet.
+
+Encode, all tools on (`--tools-on`; `benchmarks/encode_tools_on_2026-09-18.tsv`): the
+reference's post-filter searches dominate its encode — a rate-matched `tools_on` encode of
+the 2096x1400 picture takes ~35 s of its own TOTAL where zenjpegai's takes ~7.0 s threaded
+(~21 s on one thread), about 5x; at 560x888, 5.0 s vs 0.96 s. At a fixed operating point
+the gap is 2.3x (560x888) and 3.4x (2096x1400) threaded, roughly par on one thread at the
+smaller size.
 
 In the browser (Chromium 153, RTX 2080 via Dawn/Vulkan, ~1 MP demo corpus, medians from
 `benchmarks/wasm_decode_2026-09-18_gpu.tsv`): the WebGPU package decodes a warm stream in

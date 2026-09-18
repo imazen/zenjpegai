@@ -1,0 +1,33 @@
+# encode_tools_on_2026-09-18.tsv
+command:   CASES="..." RUNS=3 scripts/bench/encode_end_to_end.sh   (the *_on cases)
+commit:    E5 tools_on preset + post-filter encode flags
+host:      dev, AMD Ryzen 9 9950X3D 16-Core (32 threads), Ubuntu, native (not WSL)
+build:     cargo build --release --features cli   (no -C target-cpu=native)
+reference: jpeg-ai-reference-software b9e573f, torch 1.10.2+cpu, Python 3.8 venv, -target_device cpu,
+           cfg/tools_on.json + cfg/profiles/base.json
+what:      encodes with every coding tool on (RVS, GRFS, LSBS, EFE linear, eICCI, EFE non-linear,
+           LEF). `m1_b0` cases are one fixed-model pass like the tools_off table;
+           `bpp050` cases are rate-matched end-to-end (reference `--set_target_bpp 50`,
+           zenjpegai `--bpp 0.5`) — the mode the ~25-35 s reference figure comes from.
+columns:   case, encoder, threads, run, encode_ms, process_wall_ms, bytes
+           run 0 of zenjpegai includes the model load; runs 1.. are steady state.
+           `encode_ms` for the reference is its own TOTAL (excludes interpreter start and model
+           load), `process_wall_ms` the whole process. Bytes differ slightly between encoders:
+           the post-filter decisions differ (the documented MKL lstsq nondeterminism, see
+           PORTING.md) and rate-matched picks can differ a step.
+
+Best of 3 steady-state runs, encode_ms:
+
+| case                          | ref 1 thr | ref 32 thr | zen 1 thr | zen 32 thr | zen 32 vs ref 1 |
+| --- | --- | --- | --- | --- | --- |
+| img30 BOP m1 b0, tools on     |  1408.5   |  24835.2   |  1364.1   |   621.0    |  2.3x |
+| img30 BOP 0.50 bpp, tools on  |  4965.8   |   5130.6   |  3077.9   |   957.5    |  5.2x |
+| img01 BOP m1 b0, tools on     | 17321.3   |  55662.2   |  9693.9   |  5077.2    |  3.4x |
+| img01 BOP 0.50 bpp, tools on  | 34974.3   |  20843.8   | 21391.8   |  6970.1    |  5.0x |
+
+The reference's tools_on encodes spend most of their time in the post-filter searches
+(eICCI candidate models, EFE linear splits x lengths, the non-linear per-tile solves) and
+get dramatically *slower* with more torch threads on this box — the bpp050 32-thread runs
+spread 5-137 s — so its one-thread column is the fair comparison. zenjpegai's rate-matched
+encode also runs its 12-15 trial encodes; at one thread that is 1.6-1.8x the reference's
+whole encode, threaded 5.0-5.2x.

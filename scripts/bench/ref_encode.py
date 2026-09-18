@@ -3,9 +3,13 @@
 
 Usage (from the reference checkout, venv active, PYTHONPATH=.):
     python ref_encode.py <in.png> <out.bits> --model N --beta-disp B --profile base [--threads N]
+        [--tools on|off]
+    python ref_encode.py <in.png> <out.bits> --bpp N --profile base [--threads N] [--tools on|off]
 
 The bitrate matcher is off, so this is a single-pass encode at the given (model, beta
-displacement) - what `zenjpegai encode --model N --beta-disp B` does. Prints one line:
+displacement) - what `zenjpegai encode --model N --beta-disp B` does. With `--bpp N` (N in
+1/100 bpp) the matcher's `--set_target_bpp` path runs instead - the reference's
+rate-matched encode, like `zenjpegai encode --bpp`. Prints one line:
 `ref_total_s=<seconds> wall_s=<seconds> threads=<N> bytes=<n>`.
 """
 import contextlib
@@ -35,14 +39,19 @@ def main():
         torch.set_num_threads = lambda _n: real(threads)
     model, beta = arg("--model", "1"), arg("--beta-disp", "0")
     profile = arg("--profile", "base")
+    tools = arg("--tools", "off")
+    bpp = arg("--bpp")
     base = def_base_parser()
     coder = RecoEncoder(base, enc_mod.def_encoder_parser_decorator(base))
     sys.argv = [sys.argv[0], src, out,
-                "--cfg", "cfg/tools_off.json", f"cfg/profiles/{profile}.json",
-                "-target_device", "cpu",
-                "-model.bitrate_matcher.enabled", "0",
-                "-model.bitrate_matcher.target_tool_idx", model,
-                "-model.bitrate_matcher.target_beta_disp_Y", beta]
+                "--cfg", f"cfg/tools_{tools}.json", f"cfg/profiles/{profile}.json",
+                "-target_device", "cpu"]
+    if bpp is not None:
+        sys.argv += ["--set_target_bpp", bpp]
+    else:
+        sys.argv += ["-model.bitrate_matcher.enabled", "0",
+                     "-model.bitrate_matcher.target_tool_idx", model,
+                     "-model.bitrate_matcher.target_beta_disp_Y", beta]
     log = io.StringIO()
     with contextlib.redirect_stdout(log):
         process_encoder(coder, None, True, None, True, True)

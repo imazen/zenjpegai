@@ -37,6 +37,12 @@ fn main() {
                 .map(|b| i16::from_le_bytes(*b) as i32)
                 .collect(),
             "i8" => b.iter().map(|&v| v as i8 as i32).collect(),
+            "f32" => b
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|b| f32::from_le_bytes(*b) as i32)
+                .collect(),
             t => panic!("dtype {t}"),
         }
     };
