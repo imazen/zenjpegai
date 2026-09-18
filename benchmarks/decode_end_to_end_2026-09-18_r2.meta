@@ -1,0 +1,13 @@
+Re-run of decode_end_to_end.sh after the native convolution pass (f83e7f9) and the
+E5 tools_on landings, at commit 642ae5b + review cleanups.
+
+command:  THREADS="1 8" scripts/bench/decode_end_to_end.sh > benchmarks/decode_end_to_end_2026-09-18_r2.tsv
+host:     dev, AMD Ryzen 9 9950X3D 16-Core (32 threads), Ubuntu, native (not WSL), box otherwise idle
+ref:      upstream b9e573f, torch 1.10.2+cpu, decoder's own TOTAL (model load excluded)
+zen:      target/release/zenjpegai decode, --single-thread for th=1, RAYON_NUM_THREADS=8 for th=8;
+          steady state = min of --repeat runs after the cold first decode
+process:  whole CLI invocation (start-up + model load + decode + PNG), once per stream per thread count
+
+Why this file: the earlier decode_end_to_end_2026-09-18_d2native.tsv was collected during
+load spikes and sweeps 1/32 threads; this run sweeps 1/8 threads on an idle box and is the
+source of the README speed table.
