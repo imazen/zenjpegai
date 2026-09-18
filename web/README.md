@@ -11,7 +11,7 @@ Updated 2026-09-18. What follows is exact: missing things first.
 | # | Deliverable | State |
 | --- | --- | --- |
 | 6 | GitHub Pages | **enabled** (checked 2026-09-18: `gh api repos/imazen/zenjpegai/pages` returns `build_type: workflow`, site live at `https://imazen.github.io/zenjpegai/`; repo is public). The Pages deploy makes PUBLIC: the 16 demo `.jai` streams, the 8 packed model-bundle halves (`m{0,1,2,3}_{common,bop}.zjb`, BSD-licensed upstream weights — notice text embedded in every bundle and shown on the demo page + `upstream-notices/LICENSE`), the reference-decoder PNGs used as the test oracle, and this wasm build of the AGPL/commercial-licensed crate. Nothing else. |
-| 6 | GPU (`gpu/`) wiring into the web build | **wired and verified on hardware** (2026-09-18, RTX 2080 via Dawn/Vulkan in headless Chromium — §7): the `mappedAtCreation` trap is fixed at the root in `gpu/` (unmapped `create_buffer` + chunked `queue.write_buffer`); worker-side trap recovery stays as defence in depth but no longer fires. Remaining limitation: Dawn's SwiftShader adapter loses its device at model-2 (bpp75) load — the GPU path then falls back per call to the CPU engine (§7). `auto` takes the GPU when a hardware adapter exists: after the b3gpu pass (`pkg-webgpu-threads` + one submit per decode + batched readback maps) warm ~1 MP decode is ~55 ms vs ~95-104 ms on `threads` (§7). |
+| 6 | GPU (`gpu/`) wiring into the web build | **wired and verified on hardware** (2026-09-18, RTX 2080 via Dawn/Vulkan in headless Chromium — §7): the `mappedAtCreation` trap is fixed at the root in `gpu/` (unmapped `create_buffer` + chunked `queue.write_buffer`); worker-side trap recovery stays as defence in depth but no longer fires. Remaining limitation: Dawn's SwiftShader adapter loses its device at model-2 (bpp75) load — the GPU path then falls back per call to the CPU engine (§7). `auto` takes the GPU when a hardware adapter exists: after the b3gpu pass (`pkg-webgpu-threads` + one submit per decode + batched readback maps + GPU-side quantised readback) warm ~1 MP decode is ~46 ms vs ~88 ms on `threads` (§7). |
 
 | 1 | Bundle fetched **exactly** once per (model, op) actually needed | Done at the pool/worker level (`ensureModels` in `web/src/worker.js` checks `hasModels` before fetching, and the Cache API means a repeat visit skips the network entirely) but each `simd`-variant Worker in the pool has its OWN wasm memory, so if the pool spawns >1 simd worker (it does, up to `hardwareConcurrency`, capped at 4) and two images on the page need the same model, **that model's bundle is fetched+parsed once per worker that needs it**, not once globally. Acceptable (HTTP/Cache-API means only the first worker pays the network cost; the rest hit cache) but not "exactly once" in the strict sense — documented, not fixed. |
 | — | wasm SIMD128 caniuse | not independently re-checked this session (Firefox 155 / Chrome 153 / Safari 26 — the three actually installed and tested below — all ran the `simd` package correctly, which is itself evidence, but no browsers older than "currently installed by Playwright" were probed). |
@@ -190,6 +190,10 @@ build. The `gpu` feature adds `initGpu(mode)`, `gpuStatus()`, `present(stream, o
 | `pkg-threads` | 715,950 | 482,103 | 181,659 | 146,787 |
 | `pkg-webgpu` (later rebuild, §7) | 910,067 | 651,502 | 265,613 | 213,817 |
 
+Rebuilt 2026-09-18 after the E10 encoder + GPU readback changes (`web/scripts/build-wasm.sh`
+all four): `pkg-simd` 414,124 wasm-opt / 134,193 brotli, `pkg-threads` 541,698 / 155,602,
+`pkg-webgpu` 717,960 / 229,951, `pkg-webgpu-threads` 845,647 / 250,782.
+
 (`pkg-simd` was 389,178 bytes post-`wasm-opt` before this session's size audit — see next
 section — a 6.8% cut.)
 
@@ -284,30 +288,31 @@ it needs SharedArrayBuffer). `pkg-simd` and `pkg-threads` are unchanged.
   (CPU) was set when the webgpu package's CPU stages were single-threaded and per-call GPU
   orchestration cost ~150 ms. Phase instrumentation (`benchmarks/wasm_gpu_phases_2026-09-18.tsv`,
   RTX 2080, Chromium 153 headless, Dawn/Vulkan, `WEBGPU_ADAPTER=hardware`) found where that
-  actually went — median per ~1 MP demo stream, warm:
+  actually went — median per ~1 MP demo stream, warm; the "after" column is re-measured
+  after the GPU-side quantised readback (`emit_output`) pass of the same day:
 
   | phase | before (pkg-webgpu, 1-thread CPU) | after (pkg-webgpu-threads) |
   |---|---|---|
   | entropy stage (CPU) | ~20 ms | ~8 ms |
-  | latent reconstruction (CPU) | ~119 ms | ~17 ms |
-  | latent upload + plan + submit (host) | ~1-3 ms | ~1-3 ms |
-  | GPU device time (timestamp query) | ~22 ms | ~20 ms |
-  | readback / drain wait (decode) | ~34 ms | ~27 ms |
-  | **wall `decode_ms` median** | **~179 ms** | **~55 ms** |
-  | `present` wall `decode_ms` | ~170 ms | ~53 ms |
+  | latent reconstruction (CPU) | ~119 ms | ~15 ms |
+  | latent upload + plan + submit (host) | ~1-3 ms | ~1 ms |
+  | GPU device time (timestamp query) | ~22 ms | ~15 ms |
+  | readback / drain wait (decode) | ~34 ms | ~20 ms |
+  | **wall `decode_ms` median** | **~179 ms** | **~46 ms** |
+  | `present` wall `decode_ms` | ~170 ms | ~44 ms |
 
   i.e. the "~150 ms overhead" was ~120 ms of *serial CPU latent work* in the single-threaded
   package, not upload/submit cost — weights are already resident across decodes
   (`weights_ms`≈0 warm, `plans_built`=0), and all tile plans + the RGBA convert + the readback
   copy now go out in **one** queue submit per decode, with the staging-buffer and
-  timestamp-query maps issued together (one device-drain round-trip instead of two). The ~27 ms
-  residual readback is the device drain itself (~20 ms device time) plus one IPC round-trip.
+  timestamp-query maps issued together (one device-drain round-trip instead of two). The ~20 ms
+  residual readback is the device drain itself (~15 ms device time) plus one IPC round-trip.
   CPU comparisons from the same runs (`benchmarks/wasm_decode_2026-09-18_gpu.tsv`, medians over
-  the ~1 MP demo corpus): `threads` ~98-104 ms, `simd` ~675-765 ms — the GPU path beats both on
+  the ~1 MP demo corpus): `threads` ~88 ms, `simd` ~640 ms — the GPU path beats both on
   this hardware class, so `auto` takes it (isolated → `pkg-webgpu-threads`, non-isolated →
-  `pkg-webgpu`, which at ~193 ms warm still beats `simd` ~3.7x). The GPU win is
+  `pkg-webgpu`, which at ~193 ms warm still beats `simd` ~3.3x). The GPU win is
   measured only on the ~0.5-1 MP demo corpus; no smaller-size crossover was measured. Cold
-  cost: +~90 KB brotli over `pkg-threads`, and the first decode pays pipeline compilation +
+  cost: +~96 KB brotli over `pkg-threads`, and the first decode pays pipeline compilation +
   weight upload (~90-140 ms extra) — with even a handful of images on the page the GPU still
   wins on total time vs `simd`, and on warm throughput vs `threads`.
 - **One encoder per decode** (`gpu/src/synthesis.rs`, `RunTail`): `GpuSynthesis::run` previously
@@ -341,8 +346,10 @@ it needs SharedArrayBuffer). `pkg-simd` and `pkg-threads` are unchanged.
   `swiftshader` adds `--use-webgpu-adapter=swiftshader` for the software path;
   unset keeps the base flags. `webgpu-decode.spec.ts` covers `on`, `software`, `off`, and
   canvas presentation. Hardware run (this host's RTX 2080): all decodes on `path: 'gpu'`,
-  `presented: 'gpu'`, 195 of 3,000,000 samples differ from the reference PNG (all by 1 — same
-  bound as the CPU tests; GPU output is not bit-identical to CPU output).
+  `presented: 'gpu'`, 203 of 3,000,000 samples differ from the reference PNG (all by 1 — same
+  bound as the CPU tests; GPU output is not bit-identical to CPU output; the count moved from
+  195 after `conv_tiled` changed the accumulation association for `KH > 1` — measured, within
+  bound).
 - **Benchmarks**: `tests/benchmark-gpu.spec.ts` writes `benchmarks/wasm_decode_<date>_gpu.tsv`
   (+ `.meta` with adapter name / launch flags) — GPU rows plus `off (threads)` / `off (simd)`
   CPU rows for the crossover above. SwiftShader (`WEBGPU_ADAPTER=swiftshader`): bpp25 streams
@@ -350,8 +357,8 @@ it needs SharedArrayBuffer). `pkg-simd` and `pkg-threads` are unchanged.
   ("async map a buffer" device error — a tighter software-adapter ceiling, requests are already
   clamped to adapter limits) and remaining rows are honest per-call CPU fallbacks.
 - **Package sizes** appended to `benchmarks/wasm_size_2026-09-18.md` §7: `pkg-webgpu` is
-  674,692 bytes after `wasm-opt` (+75% over `pkg-simd`), ~218 KB brotli; `pkg-webgpu-threads`
-  (b3gpu, 2026-09-18) is 805,557 bytes after `wasm-opt`, 241,098 brotli — only ever fetched on
+  717,960 bytes after `wasm-opt` (+73% over `pkg-simd`), ~230 KB brotli; `pkg-webgpu-threads`
+  is 845,647 bytes after `wasm-opt`, 250,782 brotli — only ever fetched on
   isolated pages when a hardware adapter exists.
 
 ## Next steps, in order
@@ -359,8 +366,9 @@ it needs SharedArrayBuffer). `pkg-simd` and `pkg-threads` are unchanged.
 1. ~~Re-run §7's benchmark on a hardware adapter + fix the `create_buffer_init` trap~~ — done
    2026-09-18 (§7): RTX 2080 through Dawn/Vulkan, all decodes on the GPU path, trap removed at
    the root. ~~`auto` on the CPU engine~~ — flipped 2026-09-18 (b3gpu): `pkg-webgpu-threads` +
-   single-submit/batched-map changes brought warm ~1 MP decode from ~179 ms to ~55 ms, ~1.7x
-   faster than `threads`, so `auto` takes a hardware adapter when one exists. Open leftover:
+   single-submit/batched-map changes + GPU-side quantised readback brought warm ~1 MP decode
+   from ~179 ms to ~46 ms, ~1.9x faster than `threads` (~88 ms), so `auto` takes a hardware
+   adapter when one exists. Open leftover:
    Dawn's SwiftShader device loss at model-2 load.
 2. Speed: the `Wasm128` micro-kernel is still slower than native AVX-512 on one thread (measured
    2026-09-17: 0.35s vs 0.093s). Untried: relaxed-simd is ruled out by the numeric policy, a wider
