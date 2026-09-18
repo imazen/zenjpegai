@@ -30,6 +30,9 @@
 
 pub mod fast;
 pub mod reference;
+mod resample;
+
+pub use resample::resize_bilinear;
 
 use alloc::vec::Vec;
 

@@ -12,7 +12,7 @@
   chroma plane size and `c_ver`/`c_hor` from `EncodeParams` (`-c_ver_value`/`-c_hor_value`;
   4:2:2 coded as 4:2:0 is `Unsupported`, as upstream), `EncodeParams::diff_display` for the
   non-displayed border, and 16-bit PNG input (`bit_depth_idc` 4). Chroma down-sampling is
-  `encoder::resample::resize_bilinear`, bit-identical to PyTorch's bilinear
+  `nn::resize_bilinear`, bit-identical to PyTorch's bilinear
   `align_corners=True` kernel (`tests/vectors/nn/bilinear_align_corners.bin`). CLI:
   `zenjpegai encode in.yuv …`, `--c-ver`/`--c-hor`/`--diff-display`. On the nine `formats`
   vectors the analysis-transform inputs are bit-for-bit the reference's, seven streams are
@@ -20,7 +20,7 @@
   residual symbols moved by 1; the reference decoder reads all nine.
 - eICCI on chroma-subsampled pictures (4:2:0 and 4:2:2): the reference decoder's
   `Image.to_444_` bicubic chroma up-sampling, eICCI at luma size, then `to_format_` bilinear
-  down-sampling back (`filters::icci::resize_bilinear` reproduces PyTorch's channels-last
+  down-sampling back (`nn::resize_bilinear` reproduces PyTorch's channels-last
   kernel bit for bit — weight products rounded once, then nested FMAs). Oracle vectors are
   forced encodes (`scripts/ref_vectors/force_icci_encode.py`, `make_reference_streams.sh`
   set `icci420`): the reference encoder never enables eICCI for subsampled sources. The 4:2:2

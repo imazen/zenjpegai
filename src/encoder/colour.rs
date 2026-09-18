@@ -16,10 +16,10 @@
 
 use alloc::vec::Vec;
 
-use super::resample::resize_bilinear;
 use crate::decoder::output::{RgbImage, YuvImage};
 use crate::error::{Error, Result};
 use crate::header::ColourTransform;
+use crate::nn::resize_bilinear;
 use crate::tensor::Tensor;
 
 /// BT.709 luma weights and the two chroma denominators (`colorspace.py`).

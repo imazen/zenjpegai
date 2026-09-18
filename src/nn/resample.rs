@@ -1,6 +1,7 @@
 //! `F.interpolate(x, size, mode="bilinear", align_corners=True)` as PyTorch 1.10.2's CPU
-//! build evaluates it — the chroma down-sampler behind `Image.to_420_` / `Image.to_422_`
-//! (`TensorOps.resize_tensor`).
+//! build evaluates it — the chroma re-sampler behind `Image.to_420_` / `to_422_` /
+//! `to_format_` (`TensorOps.resize_tensor`), used on the encode side (`SourceImage` chroma
+//! to the coded subsampling) and by eICCI's `filters::icci` down-sampling.
 //!
 //! For a `[1, 1, H, W]` float32 tensor `upsample_bilinear2d` takes the channels-last kernel:
 //! per output sample the four corner weights are pre-multiplied (`hλ * wλ`, each in f32) and
@@ -8,12 +9,15 @@
 //! impulses over ~135k samples found that expression bit-exact; the unfused sum and every
 //! other contraction order are off by an ulp in up to a third of the samples
 //! (`scripts/ref_vectors/gen_resize_vectors.py` has the vectors `nn_vectors.rs` checks).
+//! The multiply-adds go through [`fmadd`], so on wasm32 they are unfused like the rest of the
+//! crate's arithmetic.
 
 use alloc::vec::Vec;
 
 use crate::error::{Error, Result};
-use crate::nn::fmadd;
 use crate::tensor::Tensor;
+
+use super::fmadd;
 
 /// Source indices and weights of one output coordinate (`align_corners = True`), the kernel's
 /// `compute_source_index_and_lambda` on `scalar_t` (f32) arithmetic.
@@ -35,7 +39,7 @@ fn linear_taps(dst: usize, in_len: usize, out_len: usize) -> (usize, usize, f32,
 }
 
 /// Bilinear-resample every plane of `src` to `out_h x out_w`, bit-identical to PyTorch's CPU
-/// kernel (see the module docs). Used to take 4:4:4 chroma to 4:2:2 / 4:2:0.
+/// kernel (see the module docs).
 pub fn resize_bilinear(src: &Tensor<f32>, out_h: usize, out_w: usize) -> Result<Tensor<f32>> {
     if src.h == 0 || src.w == 0 || out_h == 0 || out_w == 0 {
         return Err(Error::InvalidArgument("resize: empty dimension"));

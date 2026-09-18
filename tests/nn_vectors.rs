@@ -132,14 +132,14 @@ fn pixel_shuffle_order() {
 /// `Image.to_420_` / `to_422_`'s resampler (the encoder's chroma down-sampler). For
 /// `[1, 1, H, W]` tensors PyTorch 1.10.2 dispatches to its channels-last bilinear kernel —
 /// four pre-multiplied weights `hλ * wλ` accumulated `fma(p0, a, p1*b)`, `fma(p2, c, _)`,
-/// `fma(p3, d, _)` — which `encoder::resample::resize_bilinear` repeats operation for
+/// `fma(p3, d, _)` — which `nn::resize_bilinear` repeats operation for
 /// operation, so this agrees to the bit.
 #[test]
 fn bilinear_align_corners_matches_torch() {
     let t = load("bilinear_align_corners");
     for i in 0..8 {
         let (x, want) = (tensor(&t[&format!("x{i}")]), tensor(&t[&format!("y{i}")]));
-        let got = zenjpegai::encoder::resize_bilinear(&x, want.h, want.w).unwrap();
+        let got = zenjpegai::nn::resize_bilinear(&x, want.h, want.w).unwrap();
         let worst = got
             .data
             .iter()

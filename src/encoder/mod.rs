@@ -21,12 +21,10 @@ pub mod filters;
 #[cfg(not(feature = "unstable-internals"))]
 pub(crate) mod filters;
 mod rate;
-mod resample;
 mod tiles;
 
 pub use colour::{AnalysisInput, SourceImage, SourceMeta, preprocess, preprocess_rgb};
 pub use rate::{BDL_SEARCH_RANGE, RateMatch, search_beta};
-pub use resample::resize_bilinear;
 pub use tiles::{AnalysisTile, analysis_tiles};
 
 use alloc::vec::Vec;

@@ -16,7 +16,8 @@
 //!
 //! Chroma-subsampled pictures (`4:2:0`, `4:2:2` sources): the reference up-samples the chroma
 //! planes to the luma size (`Image.to_444_`, bicubic), filters at 4:4:4, then down-samples back
-//! (`Image.to_format_`, bilinear); [`resize_bilinear`] reproduces its kernel bit for bit.
+//! (`Image.to_format_`, bilinear); [`crate::nn::resize_bilinear`] reproduces its kernel bit
+//! for bit.
 //! `4:2:0` can never be *signalled* (`icci_enable_flag` is not coded for `s_ver == s_hor == 2`),
 //! but the filter path itself is exercised by a forced stream (see `PORTING.md`).
 
@@ -30,6 +31,7 @@ use crate::model::ModelSource;
 use crate::model::icci;
 pub use crate::model::icci::NetCache;
 use crate::nn::fast::Engine;
+use crate::nn::resize_bilinear;
 use crate::tensor::Tensor;
 use crate::tools::regions::Area;
 
@@ -152,55 +154,6 @@ fn selection(
         .then(|| pick(&CHROMA_SHORT_LIST, t.index_uv))
         .transpose()?;
     Ok((y, uv))
-}
-
-/// Source index pair and blend weights of one output coordinate for `mode="bilinear"`,
-/// `align_corners=True` (`compute_source_index_and_lambda` in PyTorch's upsample kernel: a
-/// same-size axis just copies; otherwise `l1 = real - trunc(real)`, `l0 = 1 - l1`).
-fn linear_taps(dst: usize, in_len: usize, out_len: usize) -> (usize, usize, f32, f32) {
-    if out_len == in_len {
-        return (dst, dst, 1.0, 0.0);
-    }
-    let scale = if out_len > 1 {
-        (in_len - 1) as f32 / (out_len - 1) as f32
-    } else {
-        0.0
-    };
-    let real = scale * dst as f32;
-    let i0 = real as usize; // `static_cast<int64_t>`: truncates, and `real` is never negative
-    let i1 = i0 + usize::from(i0 + 1 < in_len);
-    let l1 = real - i0 as f32;
-    (i0, i1, 1.0 - l1, l1)
-}
-
-/// `F.interpolate(x, size, mode="bilinear", align_corners=True)` as PyTorch's CPU kernel
-/// computes it for the single-channel planes `Image.to_420_`/`to_422_` resize (a (1,1,H,W)
-/// tensor is contiguous in channels-last order, so the specialised kernel runs):
-/// `fma(h1*w1, i11, fma(h1*w0, i10, fma(h0*w0, i00, (h0*w1)*i01)))` — the weight products are
-/// rounded once, then each taps into the sum via a fused multiply-add. Verified bit for bit
-/// against `torch` 1.10.2 over every size this filter needs.
-fn resize_bilinear(src: &Tensor<f32>, out_h: usize, out_w: usize) -> Result<Tensor<f32>> {
-    if src.h == 0 || src.w == 0 {
-        return Err(Error::InvalidArgument("resize: empty input"));
-    }
-    let mut out = Tensor::<f32>::zeros(src.c, out_h, out_w)?;
-    let xs: Vec<(usize, usize, f32, f32)> =
-        (0..out_w).map(|x| linear_taps(x, src.w, out_w)).collect();
-    for c in 0..src.c {
-        let plane = src.plane(c);
-        for y in 0..out_h {
-            let (y0, y1, h0, h1) = linear_taps(y, src.h, out_h);
-            let row0 = &plane[y0 * src.w..][..src.w];
-            let row1 = &plane[y1 * src.w..][..src.w];
-            let dst = &mut out.plane_mut(c)[y * out_w..][..out_w];
-            for (d, &(x0, x1, w0, w1)) in dst.iter_mut().zip(&xs) {
-                let acc = libm::fmaf(h0 * w0, row0[x0], (h0 * w1) * row0[x1]);
-                let acc = libm::fmaf(h1 * w0, row1[x0], acc);
-                *d = libm::fmaf(h1 * w1, row1[x1], acc);
-            }
-        }
-    }
-    Ok(out)
 }
 
 /// The core of a filtered tile (`full`: the tile at padded size) written back to `plane`.
