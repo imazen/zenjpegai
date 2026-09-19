@@ -108,6 +108,15 @@ jobs:
         with:
           path: web/dist/site
 
+      # The same built tree for the Cloudflare Pages deploy below (upload-pages-artifact's
+      # bundle is reserved for actions/deploy-pages, so this is a second, ordinary artifact).
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          name: cf-pages-site
+          path: web/dist/site
+          retention-days: 1
+          if-no-files-found: error
+
   deploy:
     needs: build
     if: github.ref == 'refs/heads/main'
@@ -121,3 +130,28 @@ jobs:
     steps:
       - id: deployment
         uses: actions/deploy-pages@v5.0.1
+
+  # Same `dist/site` on Cloudflare Pages. The Pages project `zenjpegai` already exists
+  # (classic Pages); `--branch main` makes this a production deploy — no `--force`.
+  # `_headers` in the tree sends COOP/COEP there, so the demo is cross-origin isolated on
+  # the first load (no sw-coi.js service worker, no reload — see web/README.md).
+  deploy-cloudflare:
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    environment:
+      name: cloudflare-pages
+      url: https://zenjpegai.pages.dev
+    steps:
+      - uses: actions/download-artifact@v8.0.1
+        with:
+          name: cf-pages-site
+          path: dist/site
+
+      - uses: cloudflare/wrangler-action@v4.0.0
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy dist/site --project-name zenjpegai --branch main

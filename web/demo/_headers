@@ -1,0 +1,38 @@
+# Cloudflare Pages `_headers` (https://developers.cloudflare.com/pages/configuration/headers/).
+# Copied to the site root by build-site.mjs; ignored (served as a plain file) by GitHub Pages
+# and by serve.mjs. This is what makes the Cloudflare-hosted demo cross-origin isolated on the
+# FIRST load — GitHub Pages cannot send COOP/COEP and needs the sw-coi.js service-worker shim
+# (one reload) instead; here the headers arrive on the navigation response itself.
+#
+# Matching rules combine: a request inherits every matching block's headers, and a header set
+# by two matching rules is comma-joined — so Cache-Control is set ONLY on the specific blocks
+# below, never on `/*`.
+
+/*
+  Cross-Origin-Opener-Policy: same-origin
+  Cross-Origin-Embedder-Policy: require-corp
+  Cross-Origin-Resource-Policy: same-origin
+
+# Content-addressed assets: the page only ever requests these with a `?v=<sha256>` query
+# derived from manifest.json (worker.js keys its Cache API entries the same way), so bytes
+# under a given URL never change and can be cached forever.
+/streams/*
+  Cache-Control: public, max-age=31536000, immutable
+
+/models/*
+  Cache-Control: public, max-age=31536000, immutable
+
+# The wasm packages change only with a redeploy; the demo page itself is the entry point and
+# is never cached (below), so a new deploy is picked up on the next navigation.
+/dist/*
+  Cache-Control: public, max-age=31536000, immutable
+
+# The manifest is the version authority — it must always be revalidated.
+/manifest.json
+  Cache-Control: no-cache
+
+/
+  Cache-Control: no-cache
+
+/index.html
+  Cache-Control: no-cache
