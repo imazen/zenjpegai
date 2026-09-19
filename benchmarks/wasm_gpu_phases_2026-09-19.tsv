@@ -1,3 +1,4 @@
+
 browser	browser_version	os	slug	bpp	model_id	width	height	gpu_mode	call	path	presented	adapter	tiles	dispatches	plans_built	headers_ms	common_ms	weights_ms	entropy_ms	latent_ms	upload_ms	plan_ms	submit_ms	convert_ms	readback_ms	wait_ms	present_ms	finish_ms	gpu_ns	decode_ms	total_ms
 chromium	153.0.8010.12	linux	car	0.25	1	1155	866	on	decode	gpu		nvidia/turing	1	28	1	0.00	10.00	4.00	22.00	49.00	3.00	1.00	1.00	0.00	92.00	0.00	0.00	0.00	14787456	185.71	240.65
 chromium	153.0.8010.12	linux	car	0.25	1	1155	866	on	present	gpu	gpu	nvidia/turing	1	28	0	0.00	0.00	0.00	9.00	28.00	2.00	0.00	0.00	0.00	0.00	20.00	1.00	0.00	14555584	60.58	60.63
@@ -95,3 +96,67 @@ chromium	153.0.8010.12	linux	clipart	0.25	2	816	1225	on	decode	gpu		nvidia/turin
 chromium	153.0.8010.12	linux	clipart	0.25	2	816	1225	on	present	gpu	gpu	nvidia/turing	1	26	0	0.00	0.00	0.00	6.00	14.00	2.00	0.00	0.00	0.00	0.00	23.00	0.00	0.00	15893664	45.14	45.19
 chromium	153.0.8010.12	linux	clipart	0.75	3	816	1225	on	decode	gpu		nvidia/turing	1	26	1	0.00	6.00	2.00	6.00	14.00	1.00	0.00	0.00	0.00	23.00	0.00	0.00	0.00	15874624	52.98	105.01
 chromium	153.0.8010.12	linux	clipart	0.75	3	816	1225	on	present	gpu	gpu	nvidia/turing	1	26	0	0.00	0.00	0.00	7.00	13.00	2.00	0.00	0.00	0.00	0.00	22.00	1.00	0.00	16397760	44.44	44.48
+chromium	153.0.8010.12	linux	car	0.25	1	1155	866	on	decode	gpu		nvidia/turing	1	28	1	0.00	10.00	4.00	22.00	52.00	4.00	1.00	1.00	0.00	101.00	0.00	0.00	0.00	14839904	197.64	243.78
+chromium	153.0.8010.12	linux	car	0.25	1	1155	866	on	present	gpu	gpu	nvidia/turing	1	28	0	0.00	0.00	0.00	7.00	23.00	2.00	0.00	1.00	0.00	0.00	21.00	0.00	0.00	14652416	54.94	54.99
+chromium	153.0.8010.12	linux	car	0.75	2	1155	866	on	decode	gpu		nvidia/turing	1	28	1	0.00	6.00	2.00	9.00	19.00	3.00	0.00	0.00	0.00	22.00	0.00	0.00	0.00	14649344	62.39	103.15
+chromium	153.0.8010.12	linux	car	0.75	2	1155	866	on	present	gpu	gpu	nvidia/turing	1	28	0	0.00	0.00	0.00	7.00	17.00	1.00	0.00	0.00	0.00	0.00	21.00	0.00	0.00	14655936	45.81	45.85
+chromium	153.0.8010.12	linux	mountain	0.25	1	1155	866	on	decode	gpu		nvidia/turing	1	28	0	0.00	0.00	0.00	6.00	15.00	2.00	0.00	0.00	0.00	30.00	0.00	0.00	0.00	14660480	53.07	53.13
+chromium	153.0.8010.12	linux	mountain	0.25	1	1155	866	on	present	gpu	gpu	nvidia/turing	1	28	0	0.00	0.00	0.00	6.00	15.00	2.00	0.00	0.00	0.00	0.00	20.00	1.00	0.00	14663680	42.73	44.79
+chromium	153.0.8010.12	linux	mountain	0.75	2	1155	866	on	decode	gpu		nvidia/turing	1	28	0	0.00	0.00	0.00	5.00	15.00	1.00	0.00	1.00	0.00	20.00	0.00	0.00	0.00	14656256	42.75	42.78
+chromium	153.0.8010.12	linux	mountain	0.75	2	1155	866	on	present	gpu	gpu	nvidia/turing	1	28	0	0.00	0.00	0.00	5.00	16.00	1.00	0.00	1.00	0.00	0.00	31.00	0.00	0.00	14647264	54.03	54.08
+chromium	153.0.8010.12	linux	dumplings	0.25	1	1155	866	on	decode	gpu		nvidia/turing	1	28	0	0.00	0.00	0.00	5.00	16.00	2.00	0.00	0.00	0.00	29.00	0.00	0.00	0.00	14655488	52.37	52.41
+chromium	153.0.8010.12	linux	dumplings	0.25	1	1155	866	on	present	gpu	gpu	nvidia/turing	1	28	0	0.00	0.00	0.00	6.00	14.00	1.00	0.00	0.00	0.00	0.00	21.00	1.00	0.00	14612480	42.45	44.50
+chromium	153.0.8010.12	linux	dumplings	0.75	2	1155	866	on	decode	gpu		nvidia/turing	1	28	0	0.00	0.00	0.00	6.00	14.00	1.00	0.00	1.00	0.00	19.00	0.00	0.00	0.00	14651392	41.36	41.41
+chromium	153.0.8010.12	linux	dumplings	0.75	2	1155	866	on	present	gpu	gpu	nvidia/turing	1	28	0	0.00	0.00	0.00	5.00	15.00	2.00	0.00	0.00	0.00	0.00	20.00	0.00	0.00	14623936	42.80	42.85
+chromium	153.0.8010.12	linux	artwork	0.25	1	1178	849	on	decode	gpu		nvidia/turing	1	28	1	0.00	0.00	0.00	5.00	15.00	2.00	0.00	0.00	0.00	22.00	0.00	0.00	0.00	14995456	44.69	44.71
+chromium	153.0.8010.12	linux	artwork	0.25	1	1178	849	on	present	gpu	gpu	nvidia/turing	1	28	0	0.00	0.00	0.00	5.00	15.00	2.00	0.00	0.00	0.00	0.00	20.00	1.00	0.00	14794752	41.83	43.85
+chromium	153.0.8010.12	linux	artwork	0.75	2	1178	849	on	decode	gpu		nvidia/turing	1	28	1	0.00	0.00	0.00	6.00	16.00	1.00	0.00	0.00	0.00	21.00	0.00	0.00	0.00	14751456	44.65	44.70
+chromium	153.0.8010.12	linux	artwork	0.75	2	1178	849	on	present	gpu	gpu	nvidia/turing	1	28	0	0.00	0.00	0.00	6.00	15.00	1.00	0.00	0.00	0.00	0.00	21.00	0.00	0.00	14812416	43.32	43.35
+chromium	153.0.8010.12	linux	brochure	0.25	1	841	1189	on	decode	gpu		nvidia/turing	1	28	1	0.00	0.00	0.00	9.00	15.00	2.00	0.00	0.00	0.00	23.00	0.00	0.00	0.00	14943232	49.49	49.52
+chromium	153.0.8010.12	linux	brochure	0.25	1	841	1189	on	present	gpu	gpu	nvidia/turing	1	28	0	0.00	0.00	0.00	6.00	15.00	1.00	0.00	0.00	0.00	0.00	21.00	1.00	0.00	14826496	42.94	44.96
+chromium	153.0.8010.12	linux	brochure	0.75	1	841	1189	on	decode	gpu		nvidia/turing	1	28	0	0.00	0.00	0.00	5.00	17.00	1.00	0.00	0.00	0.00	22.00	0.00	0.00	0.00	14787360	45.86	45.89
+chromium	153.0.8010.12	linux	brochure	0.75	1	841	1189	on	present	gpu	gpu	nvidia/turing	1	28	0	0.00	0.00	0.00	6.00	14.00	1.00	0.00	1.00	0.00	0.00	20.00	1.00	0.00	14780416	41.61	43.65
+chromium	153.0.8010.12	linux	patent-scan	0.25	0	825	1212	on	decode	gpu		nvidia/turing	1	26	1	0.00	6.00	2.00	5.00	15.00	1.00	0.00	0.00	0.00	23.00	0.00	0.00	0.00	14520736	53.45	94.33
+chromium	153.0.8010.12	linux	patent-scan	0.25	0	825	1212	on	present	gpu	gpu	nvidia/turing	1	26	0	0.00	0.00	0.00	5.00	15.00	2.00	0.00	0.00	0.00	0.00	20.00	1.00	0.00	14498304	42.09	44.15
+chromium	153.0.8010.12	linux	patent-scan	0.75	1	825	1212	on	decode	gpu		nvidia/turing	1	26	1	0.00	0.00	0.00	6.00	14.00	1.00	0.00	0.00	0.00	21.00	0.00	0.00	0.00	14520672	42.93	42.96
+chromium	153.0.8010.12	linux	patent-scan	0.75	1	825	1212	on	present	gpu	gpu	nvidia/turing	1	26	0	0.00	0.00	0.00	6.00	13.00	1.00	0.00	0.00	0.00	0.00	21.00	0.00	0.00	14513184	41.13	41.17
+chromium	153.0.8010.12	linux	line-plot	0.25	0	1000	1000	on	decode	gpu		nvidia/turing	1	27	1	0.00	0.00	0.00	6.00	14.00	2.00	0.00	0.00	0.00	20.00	0.00	0.00	0.00	13969696	43.11	43.13
+chromium	153.0.8010.12	linux	line-plot	0.25	0	1000	1000	on	present	gpu	gpu	nvidia/turing	1	27	0	0.00	0.00	0.00	5.00	13.00	1.00	0.00	0.00	0.00	0.00	20.00	0.00	0.00	13929504	38.88	38.93
+chromium	153.0.8010.12	linux	line-plot	0.75	1	1000	1000	on	decode	gpu		nvidia/turing	1	27	1	0.00	0.00	0.00	5.00	14.00	2.00	0.00	0.00	0.00	19.00	0.00	0.00	0.00	13979680	41.56	41.59
+chromium	153.0.8010.12	linux	line-plot	0.75	1	1000	1000	on	present	gpu	gpu	nvidia/turing	1	27	0	0.00	0.00	0.00	6.00	14.00	1.00	0.00	0.00	0.00	0.00	22.00	0.00	0.00	15076544	42.90	42.93
+chromium	153.0.8010.12	linux	clipart	0.25	2	816	1225	on	decode	gpu		nvidia/turing	1	26	1	0.00	0.00	0.00	6.00	14.00	2.00	0.00	0.00	0.00	21.00	0.00	0.00	0.00	16171008	43.95	43.99
+chromium	153.0.8010.12	linux	clipart	0.25	2	816	1225	on	present	gpu	gpu	nvidia/turing	1	26	0	0.00	0.00	0.00	7.00	15.00	1.00	0.00	0.00	0.00	0.00	23.00	0.00	0.00	16138912	45.75	45.78
+chromium	153.0.8010.12	linux	clipart	0.75	3	816	1225	on	decode	gpu		nvidia/turing	1	26	1	0.00	6.00	2.00	7.00	12.00	1.00	0.00	1.00	0.00	21.00	0.00	0.00	0.00	16195584	52.47	94.22
+chromium	153.0.8010.12	linux	clipart	0.75	3	816	1225	on	present	gpu	gpu	nvidia/turing	1	26	0	0.00	0.00	0.00	6.00	15.00	1.00	0.00	0.00	0.00	0.00	23.00	1.00	0.00	16527232	44.16	46.20
+chromium	153.0.8010.12	linux	car	0.25	1	1155	866	on	decode	gpu		nvidia/turing	1	28	1	0.00	10.00	4.00	29.00	56.00	4.00	2.00	0.00	1.00	93.00	0.00	0.00	0.00	14883776	201.49	247.71
+chromium	153.0.8010.12	linux	car	0.25	1	1155	866	on	present	gpu	gpu	nvidia/turing	1	28	0	0.00	0.00	0.00	8.00	29.00	2.00	0.00	1.00	0.00	0.00	22.00	0.00	0.00	14657056	63.37	63.42
+chromium	153.0.8010.12	linux	car	0.75	2	1155	866	on	decode	gpu		nvidia/turing	1	28	1	0.00	5.00	2.00	8.00	24.00	3.00	0.00	1.00	0.00	21.00	0.00	0.00	0.00	14642432	65.49	109.56
+chromium	153.0.8010.12	linux	car	0.75	2	1155	866	on	present	gpu	gpu	nvidia/turing	1	28	0	0.00	0.00	0.00	6.00	17.00	2.00	0.00	0.00	0.00	0.00	20.00	1.00	0.00	14671936	45.05	47.10
+chromium	153.0.8010.12	linux	mountain	0.25	1	1155	866	on	decode	gpu		nvidia/turing	1	28	0	0.00	0.00	0.00	7.00	21.00	2.00	0.00	0.00	0.00	32.00	0.00	0.00	0.00	14669536	62.73	62.77
+chromium	153.0.8010.12	linux	mountain	0.25	1	1155	866	on	present	gpu	gpu	nvidia/turing	1	28	0	0.00	0.00	0.00	5.00	20.00	2.00	0.00	0.00	0.00	0.00	20.00	0.00	0.00	14605568	47.75	47.79
+chromium	153.0.8010.12	linux	mountain	0.75	2	1155	866	on	decode	gpu		nvidia/turing	1	28	0	0.00	0.00	0.00	6.00	16.00	2.00	0.00	0.00	0.00	20.00	0.00	0.00	0.00	14614528	44.67	44.71
+chromium	153.0.8010.12	linux	mountain	0.75	2	1155	866	on	present	gpu	gpu	nvidia/turing	1	28	0	0.00	0.00	0.00	7.00	15.00	1.00	0.00	0.00	0.00	0.00	21.00	0.00	0.00	14675968	43.70	43.76
+chromium	153.0.8010.12	linux	dumplings	0.25	1	1155	866	on	decode	gpu		nvidia/turing	1	28	0	0.00	0.00	0.00	6.00	17.00	1.00	0.00	0.00	0.00	32.00	0.00	0.00	0.00	14647296	57.01	57.07
+chromium	153.0.8010.12	linux	dumplings	0.25	1	1155	866	on	present	gpu	gpu	nvidia/turing	1	28	0	0.00	0.00	0.00	7.00	15.00	1.00	0.00	0.00	0.00	0.00	20.00	0.00	0.00	14632960	43.03	43.07
+chromium	153.0.8010.12	linux	dumplings	0.75	2	1155	866	on	decode	gpu		nvidia/turing	1	28	0	0.00	0.00	0.00	5.00	15.00	2.00	0.00	0.00	0.00	20.00	0.00	0.00	0.00	14628768	42.85	42.93
+chromium	153.0.8010.12	linux	dumplings	0.75	2	1155	866	on	present	gpu	gpu	nvidia/turing	1	28	0	0.00	0.00	0.00	7.00	13.00	2.00	0.00	0.00	0.00	0.00	20.00	1.00	0.00	14633280	41.32	43.36
+chromium	153.0.8010.12	linux	artwork	0.25	1	1178	849	on	decode	gpu		nvidia/turing	1	28	1	0.00	0.00	0.00	5.00	14.00	1.00	0.00	0.00	0.00	22.00	0.00	0.00	0.00	15014848	43.41	43.44
+chromium	153.0.8010.12	linux	artwork	0.25	1	1178	849	on	present	gpu	gpu	nvidia/turing	1	28	0	0.00	0.00	0.00	6.00	14.00	2.00	0.00	0.00	0.00	0.00	21.00	0.00	0.00	14757888	43.00	43.05
+chromium	153.0.8010.12	linux	artwork	0.75	2	1178	849	on	decode	gpu		nvidia/turing	1	28	1	0.00	0.00	0.00	6.00	13.00	1.00	1.00	0.00	0.00	21.00	0.00	0.00	0.00	14846176	42.87	42.90
+chromium	153.0.8010.12	linux	artwork	0.75	2	1178	849	on	present	gpu	gpu	nvidia/turing	1	28	0	0.00	0.00	0.00	5.00	14.00	2.00	0.00	0.00	0.00	0.00	20.00	0.00	0.00	14802784	41.51	41.56
+chromium	153.0.8010.12	linux	brochure	0.25	1	841	1189	on	decode	gpu		nvidia/turing	1	28	1	0.00	0.00	0.00	8.00	15.00	1.00	0.00	0.00	0.00	22.00	0.00	0.00	0.00	14997504	48.38	48.42
+chromium	153.0.8010.12	linux	brochure	0.25	1	841	1189	on	present	gpu	gpu	nvidia/turing	1	28	0	0.00	0.00	0.00	7.00	15.00	1.00	0.00	0.00	0.00	0.00	21.00	0.00	0.00	14795904	43.46	43.49
+chromium	153.0.8010.12	linux	brochure	0.75	1	841	1189	on	decode	gpu		nvidia/turing	1	28	0	0.00	0.00	0.00	7.00	15.00	2.00	0.00	0.00	0.00	21.00	0.00	0.00	0.00	14829568	45.44	45.48
+chromium	153.0.8010.12	linux	brochure	0.75	1	841	1189	on	present	gpu	gpu	nvidia/turing	1	28	0	0.00	0.00	0.00	6.00	15.00	1.00	0.00	0.00	0.00	0.00	20.00	1.00	0.00	14791360	41.46	43.51
+chromium	153.0.8010.12	linux	patent-scan	0.25	0	825	1212	on	decode	gpu		nvidia/turing	1	26	1	0.00	6.00	3.00	4.00	15.00	1.00	1.00	0.00	0.00	22.00	0.00	0.00	0.00	14519552	53.03	97.73
+chromium	153.0.8010.12	linux	patent-scan	0.25	0	825	1212	on	present	gpu	gpu	nvidia/turing	1	26	0	0.00	0.00	0.00	6.00	13.00	2.00	0.00	0.00	0.00	0.00	20.00	0.00	0.00	14494720	40.98	41.03
+chromium	153.0.8010.12	linux	patent-scan	0.75	1	825	1212	on	decode	gpu		nvidia/turing	1	26	1	0.00	0.00	0.00	5.00	13.00	1.00	1.00	0.00	0.00	20.00	0.00	0.00	0.00	14438400	41.07	41.10
+chromium	153.0.8010.12	linux	patent-scan	0.75	1	825	1212	on	present	gpu	gpu	nvidia/turing	1	26	0	0.00	0.00	0.00	5.00	14.00	1.00	0.00	0.00	0.00	0.00	21.00	0.00	0.00	14512128	41.04	41.07
+chromium	153.0.8010.12	linux	line-plot	0.25	0	1000	1000	on	decode	gpu		nvidia/turing	1	27	1	0.00	0.00	0.00	6.00	13.00	2.00	0.00	0.00	0.00	20.00	0.00	0.00	0.00	13945632	41.98	42.03
+chromium	153.0.8010.12	linux	line-plot	0.25	0	1000	1000	on	present	gpu	gpu	nvidia/turing	1	27	0	0.00	0.00	0.00	4.00	14.00	2.00	0.00	0.00	0.00	0.00	19.00	0.00	0.00	13956192	39.16	39.21
+chromium	153.0.8010.12	linux	line-plot	0.75	1	1000	1000	on	decode	gpu		nvidia/turing	1	27	1	0.00	0.00	0.00	5.00	14.00	2.00	1.00	0.00	0.00	19.00	0.00	0.00	0.00	13938624	42.55	42.59
+chromium	153.0.8010.12	linux	line-plot	0.75	1	1000	1000	on	present	gpu	gpu	nvidia/turing	1	27	0	0.00	0.00	0.00	6.00	14.00	1.00	0.00	0.00	0.00	0.00	20.00	0.00	0.00	14794112	41.15	41.19
+chromium	153.0.8010.12	linux	clipart	0.25	2	816	1225	on	decode	gpu		nvidia/turing	1	26	1	0.00	0.00	0.00	6.00	13.00	2.00	0.00	0.00	0.00	22.00	0.00	0.00	0.00	15908992	43.50	43.55
+chromium	153.0.8010.12	linux	clipart	0.25	2	816	1225	on	present	gpu	gpu	nvidia/turing	1	26	0	0.00	0.00	0.00	6.00	13.00	1.00	0.00	0.00	0.00	0.00	21.00	1.00	0.00	15921152	40.53	42.58
+chromium	153.0.8010.12	linux	clipart	0.75	3	816	1225	on	decode	gpu		nvidia/turing	1	26	1	0.00	7.00	2.00	6.00	14.00	1.00	0.00	1.00	0.00	22.00	0.00	0.00	0.00	15853344	53.83	94.30
+chromium	153.0.8010.12	linux	clipart	0.75	3	816	1225	on	present	gpu	gpu	nvidia/turing	1	26	0	0.00	0.00	0.00	6.00	14.00	2.00	0.00	0.00	0.00	0.00	22.00	1.00	0.00	16159200	43.53	45.57

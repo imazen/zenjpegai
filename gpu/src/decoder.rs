@@ -311,6 +311,24 @@ impl GpuDecoder {
         self.decode_to_gpu_stop(stream, out, &enough::Unstoppable)
     }
 
+    /// [`decode_to_gpu_with`](Self::decode_to_gpu_with) reading only the first `max_channels`
+    /// latent channels per component for this call (progressive decode, the reference's
+    /// `num_decode_chs`; the remaining channels decode as zero residual). Unlike
+    /// [`GpuDecoder::max_channels`], which caps every decode of this decoder, this applies to
+    /// one call; a component's `None` keeps the decoder's own setting.
+    pub fn decode_to_gpu_progressive(
+        &self,
+        stream: &[u8],
+        out: GpuOut,
+        max_channels: [Option<u16>; 2],
+    ) -> Result<GpuDecoded> {
+        let mc = [
+            max_channels[0].or(self.max_channels[0]),
+            max_channels[1].or(self.max_channels[1]),
+        ];
+        self.decode_to_gpu_inner(stream, out, mc, &enough::Unstoppable)
+    }
+
     /// [`decode_to_gpu_with`](Self::decode_to_gpu_with) with cooperative cancellation: the
     /// `stop` token the CPU decoder uses, checked in the entropy and latent stages (they accept
     /// it directly) and before the synthesis submission — the GPU cannot be recalled once
@@ -319,6 +337,16 @@ impl GpuDecoder {
         &self,
         stream: &[u8],
         out: GpuOut,
+        stop: &dyn enough::Stop,
+    ) -> Result<GpuDecoded> {
+        self.decode_to_gpu_inner(stream, out, self.max_channels, stop)
+    }
+
+    fn decode_to_gpu_inner(
+        &self,
+        stream: &[u8],
+        out: GpuOut,
+        max_channels: [Option<u16>; 2],
         stop: &dyn enough::Stop,
     ) -> Result<GpuDecoded> {
         stop.check().map_err(zenjpegai::Error::from)?;
@@ -352,7 +380,7 @@ impl GpuDecoder {
             &cs,
             hdr,
             [&set.common[0], &set.common[1]],
-            self.max_channels,
+            max_channels,
             stop,
         )?;
         phases.entropy_host_ns = since(t);

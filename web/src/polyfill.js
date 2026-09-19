@@ -13,12 +13,17 @@
 // 'wasm-unsafe-eval'`. Needs `worker-src 'self'` (or default-src covering it) for the module
 // Worker, and `img-src ... blob:` only if a page opts a picture into render mode "img" (see
 // below); the default "canvas" mode needs neither `blob:` nor `data:`.
-import { DecoderPool } from './pool.js';
+import { DecoderPool, hasWasmSimd } from './pool.js';
 import { prefetchModelPairs, takeModelBuffers, modelPairNames } from './prefetch.js';
 import { probeStreamInfo } from './stream-info.js';
 
 export const EXTENSION = '.jai';
 export const MIME = 'image/jpeg-ai';
+
+// The header probe lives in `stream-info.js` (`probeStreamInfo`) — it reads `modelId` and
+// the operating point straight off the codestream bytes so the model bundles a decode will
+// need can be prefetched without wasm. `prefetch.js` (`prefetchModelPairs`) fetches those
+// bundles into the worker's Cache API namespace.
 
 const ATTR_HANDLED = 'data-jai-handled';
 const SELECTOR = [
@@ -45,6 +50,21 @@ const SELECTOR = [
  *   'auto' (default) stays on the CPU engine (the GPU path does not beat it at typical sizes);
  *   'on' opts into WebGPU, which also presents through it without a CPU readback where the
  *   browser and the stream allow it.
+ * @property {number[]} [maxChannels] - `[y, uv]` latent-channel caps forwarded to every decode
+ *   (progressive/num_decode_chs decode — a coarser, faster picture; omit for full quality).
+ * @property {number} [maxPixels] - reject pictures whose header declares more pixels, before
+ *   any model fetch or decode work; the failure is a `jpegaierror` with reason 'too-large'
+ *   and the <img>/<picture> fallback stays untouched.
+ * @property {'auto'|false} [prefetch] - model-bundle prefetching. 'auto' (default) probes each
+ *   matched stream's header and warms the worker's Cache API namespace
+ *   (`zenjpegai-models-v2`) with the `m<N>_common`/`m<N>_<op>` bundles those pictures need —
+ *   for near-viewport pictures this starts at handle time (a small Range fetch) so it overlaps
+ *   the worker's wasm load; every decode also hands the fetched bytes to its worker by
+ *   transfer. false disables prefetching.
+ *   (`<link rel="preload">` was tried and dropped: a Worker's fetch() cannot consume the
+ *   document's preload map, so every bundle double-downloaded — see web/README.md. A page with
+ *   a known model set can warm the same cache keys directly at install time via
+ *   `prefetch.js`/`prefetchModelPairs`.)
  */
 
 // Scheduling (see pool.js's contract): every decode enters the pool's shared queue ordered by
@@ -61,8 +81,11 @@ const FAR_PRIORITY = 1_000_000_000;
 
 /** @param {PolyfillOptions} options */
 export function installJpegAiPolyfill(options) {
-  const opts = { renderMode: 'canvas', root: document, ...options };
+  const opts = { renderMode: 'canvas', root: document, prefetch: 'auto', ...options };
   const pool = new DecoderPool({ modelsBaseUrl: opts.modelsBaseUrl, maxWorkers: opts.maxWorkers, workerUrl: opts.workerUrl, bundleVersions: opts.bundleVersions, gpu: opts.gpu });
+  // img -> Map<fileName, Promise<ArrayBuffer>> from prefetchModelPairs: the in-flight
+  // bundle fetches a decodeAndSwap can hand to its worker by transfer (`modelBuffers`).
+  const prefetches = new WeakMap();
 
   const visRank = new WeakMap();
   let rankSeq = 0;
@@ -90,12 +113,12 @@ export function installJpegAiPolyfill(options) {
       : null;
 
   const scan = () => {
-    for (const el of opts.root.querySelectorAll(SELECTOR)) handle(el, pool, opts, { visRank, nextRank: () => rankSeq++, nextDom: () => domSeq++, io, lazyRun });
+    for (const el of opts.root.querySelectorAll(SELECTOR)) handle(el, pool, opts, { visRank, nextRank: () => rankSeq++, nextDom: () => domSeq++, io, lazyRun, prefetches });
   };
   scan();
 
   const observer = new MutationObserver((mutations) => {
-    const sched = { visRank, nextRank: () => rankSeq++, nextDom: () => domSeq++, io, lazyRun };
+    const sched = { visRank, nextRank: () => rankSeq++, nextDom: () => domSeq++, io, lazyRun, prefetches };
     for (const m of mutations) {
       for (const node of m.addedNodes) {
         if (node.nodeType !== Node.ELEMENT_NODE) continue;
@@ -126,6 +149,22 @@ function nearViewport(el) {
   return r.bottom > -vh && r.top < 2 * vh;
 }
 
+// Probe one stream's header and start fetching the model bundles it will need
+// (`prefetch.js` writes the same Cache API keys the worker reads). The Range fetch asks for
+// the PIH only; servers that ignore Range return the whole stream (which the decode fetch
+// then hits in HTTP cache — still a win). The returned prefetch map is stashed on the
+// picture so `decodeAndSwap` can hand the bytes to its worker by transfer.
+// Best-effort: any failure just skips prefetch — the worker's `ensureModels` is the fallback.
+async function prefetchModels(img, url, pool, opts, prefetches) {
+  try {
+    const res = await fetch(url, { headers: { Range: 'bytes=0-4095' } });
+    if (!res.ok) return;
+    const head = probeStreamInfo(await res.arrayBuffer());
+    if (!head) return;
+    prefetches.set(img, prefetchModelPairs(pool.modelsBaseUrl, [head], opts.bundleVersions));
+  } catch { /* see above */ }
+}
+
 function handle(el, pool, opts, sched) {
   const img = el.tagName === 'SOURCE' ? el.closest('picture')?.querySelector('img') : el;
   if (!img || img.hasAttribute(ATTR_HANDLED)) return;
@@ -138,22 +177,38 @@ function handle(el, pool, opts, sched) {
     sched.io.observe(img);
     if (nearViewport(img) && !sched.visRank.has(img)) sched.visRank.set(img, sched.nextRank());
   }
+  // Prefetch while the worker is still loading wasm — the window is seconds wide, so even a
+  // warm that starts here lands well before ensureModels needs the bundles. Only for images
+  // that will decode soon (eager, or already near the viewport); deep-lazy images' models
+  // are fetched on demand.
+  if (opts.prefetch && !pool.noSimd && (img.loading !== 'lazy' || nearViewport(img))) {
+    prefetchModels(img, url, pool, opts, sched.prefetches);
+  }
 
   const run = () => {
+    if (pool.noSimd) {
+      // No wasm SIMD in this browser: no package can run — keep the <img>/<picture>
+      // fallback exactly as authored and report why.
+      img.setAttribute('data-jai-state', 'error');
+      img.dispatchEvent(new CustomEvent('jpegaierror', { bubbles: true, detail: { error: new Error('no WebAssembly SIMD128'), reason: 'no-wasm-simd', url } }));
+      return;
+    }
     img.setAttribute('data-jai-state', 'queued');
     decodeAndSwap(img, url, pool, opts, {
       priority: () => sched.visRank.get(img) ?? FAR_PRIORITY + domIdx,
       onDispatch: () => img.setAttribute('data-jai-state', 'decoding'),
-    }).catch((err) => {
+    }, sched.prefetches.get(img)).catch((err) => {
       img.setAttribute('data-jai-state', 'error');
-      img.dispatchEvent(new CustomEvent('jpegaierror', { detail: { error: err, url } }));
+      img.dispatchEvent(new CustomEvent('jpegaierror', { bubbles: true, detail: { error: err, reason: err.reason || null, url } }));
     });
   };
 
   if (img.loading === 'lazy' && sched.io) {
     sched.lazyRun.set(img, run);
   } else {
-    run();
+    // A microtask, not a direct call: install-time failures (no-wasm-simd, too-large) then
+    // reach listeners a page attaches right after installJpegAiPolyfill returns.
+    queueMicrotask(run);
   }
 }
 
@@ -187,7 +242,7 @@ function pickFromSrcset(srcset, img) {
   return candidates[candidates.length - 1].url;
 }
 
-async function decodeAndSwap(img, url, pool, opts, decodeOpts = {}) {
+async function decodeAndSwap(img, url, pool, opts, decodeOpts = {}, prefetched = null) {
   const t0 = performance.now();
   const res = await fetch(url);
   if (!res.ok) throw new Error(`fetch ${url} failed: ${res.status}`);
@@ -198,15 +253,18 @@ async function decodeAndSwap(img, url, pool, opts, decodeOpts = {}) {
   // the stream bytes, overlaps that download with the queue ahead of this job (`prefetch.js`
   // writes the same Cache API keys `ensureModels` checks). The fetched pair is then handed
   // to the worker by transfer — awaited BEFORE enqueueing so the worker never starts a
-  // second, racing fetch for the same bundle. Best-effort: a stream that does not probe gets
-  // no prefetch and the worker fetches exactly as before.
+  // second, racing fetch for the same bundle. `prefetched` is the map handle() started when
+  // this picture first came near the viewport; a stream that does not probe (or with
+  // prefetch disabled) gets no modelBuffers and the worker fetches exactly as before.
   const head = probeStreamInfo(bytes);
-  const modelBuffers = head
+  const modelBuffers = head && opts.prefetch
     ? await takeModelBuffers(
-        prefetchModelPairs(pool.modelsBaseUrl, [head], opts.bundleVersions),
+        prefetched ?? prefetchModelPairs(pool.modelsBaseUrl, [head], opts.bundleVersions),
         modelPairNames(head.modelId, head.op),
       )
     : null;
+  if (opts.maxChannels && !decodeOpts.maxChannels) decodeOpts.maxChannels = opts.maxChannels;
+  if (opts.maxPixels && !decodeOpts.maxPixels) decodeOpts.maxPixels = opts.maxPixels;
   const mode = img.getAttribute('data-jai-render') || opts.renderMode;
   const alt = img.getAttribute('alt') ?? '';
   // Canvas mode can draw entirely inside the worker (`pool.decodeToCanvas`): the GPU path

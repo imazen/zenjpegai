@@ -138,6 +138,15 @@ test.describe('decode scheduling', () => {
       });
       const t0 = Date.now();
       await page.goto(`${BASE_PLAIN}/index.html`);
+      // unregister() resolves before the dying worker stops intercepting: the navigation
+      // above can still be served by it (COOP/COEP rewrite → isolated). If so, the worker's
+      // last client is now gone — one more navigation lands uncontrolled for real.
+      for (let i = 0; i < 2 && (await page.evaluate(() => !!navigator.serviceWorker.controller)); i++) {
+        await page.evaluate(async () => {
+          for (const r of await navigator.serviceWorker.getRegistrations()) await r.unregister();
+        });
+        await page.goto(`${BASE_PLAIN}/index.html`);
+      }
       await page.waitForFunction(`${DONE_COUNT_SRC} >= 1`, { timeout: 60_000, polling: 100 });
       metrics.first_ms_simd = Date.now() - t0;
       console.log(`[metric] first_image_simd_ms=${metrics.first_ms_simd}`);

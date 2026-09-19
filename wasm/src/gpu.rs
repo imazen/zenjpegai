@@ -23,7 +23,7 @@ use zenjpegai::Picture;
 use zenjpegai::nn::fast::{Engine, Tier};
 use zenjpegai_gpu::{Blitter, ContextOptions, GpuContext, GpuDecoder, GpuError, GpuOut, Timing};
 
-use crate::{decode_cpu, js_err, rgb_to_rgba, set, set_rgba, state};
+use crate::{decode_cpu_opts, js_err, rgb_to_rgba, set, set_rgba, state};
 
 /// GPU state for the worker's lifetime: the instance (surfaces are created from it), the
 /// adapter (surface capabilities come from it) and the decoder (holds uploaded weights and the
@@ -181,19 +181,23 @@ pub fn gpu_status() -> js_sys::Object {
     out
 }
 
-/// `decode` for the `gpu` build: GPU synthesis when a context exists, the CPU engine
-/// otherwise; any [`GpuError`] mid-decode falls back to the CPU engine and reports
-/// `gpuError`.
-pub async fn decode(stream: &[u8]) -> Result<js_sys::Object, JsError> {
+/// `decode`/`decodePartial` for the `gpu` build: GPU synthesis when a context exists, the
+/// CPU engine otherwise; any [`GpuError`] mid-decode falls back to the CPU engine and
+/// reports `gpuError`. `max_channels` caps the latent channels decoded per component for
+/// this call (`num_decode_chs` progressive decode).
+pub async fn decode_opts(
+    stream: &[u8],
+    max_channels: Option<[Option<u16>; 2]>,
+) -> Result<js_sys::Object, JsError> {
     let Some(g) = gpu() else {
-        let out = decode_cpu(stream)?;
+        let out = decode_cpu_opts(stream, max_channels)?;
         set(&out, "path", "cpu");
         return Ok(out);
     };
-    match decode_on_gpu(&g, stream).await {
+    match decode_on_gpu(&g, stream, max_channels).await {
         Ok(out) => Ok(out),
         Err(e) => {
-            let out = decode_cpu(stream)?;
+            let out = decode_cpu_opts(stream, max_channels)?;
             set(&out, "path", "cpu");
             set(&out, "gpuError", e.to_string());
             Ok(out)
@@ -202,10 +206,19 @@ pub async fn decode(stream: &[u8]) -> Result<js_sys::Object, JsError> {
 }
 
 /// `{width, height, rgba, path:"gpu", gpu:{tiles,dispatches,plansBuilt,gpuNs?,*Ms}}`.
-async fn decode_on_gpu(g: &GpuInner, stream: &[u8]) -> Result<js_sys::Object, GpuError> {
+async fn decode_on_gpu(
+    g: &GpuInner,
+    stream: &[u8],
+    max_channels: Option<[Option<u16>; 2]>,
+) -> Result<js_sys::Object, GpuError> {
     // `RgbaReadback`: the RGBA conversion and its staged copy ride in the decode's single
     // submission (presentable streams), so the map below is the only GPU wait.
-    let mut decoded = g.decoder.decode_to_gpu_with(stream, GpuOut::RgbaReadback)?;
+    let mut decoded = match max_channels {
+        Some(mc) => g
+            .decoder
+            .decode_to_gpu_progressive(stream, GpuOut::RgbaReadback, mc)?,
+        None => g.decoder.decode_to_gpu_with(stream, GpuOut::RgbaReadback)?,
+    };
     let out = js_sys::Object::new();
     let mut ph = Phases::default();
     if decoded.presentable_on_gpu() {
@@ -301,6 +314,26 @@ pub async fn present(
     stream: Vec<u8>,
     canvas: web_sys::OffscreenCanvas,
 ) -> Result<js_sys::Object, JsError> {
+    present_opts(stream, canvas, None).await
+}
+
+/// [`present`] reading only the first `max_y` / `max_uv` latent channels of each component
+/// (`0` = all): progressive decode for a coarser but cheaper picture.
+#[wasm_bindgen(js_name = presentPartial)]
+pub async fn present_partial(
+    stream: Vec<u8>,
+    canvas: web_sys::OffscreenCanvas,
+    max_y: u16,
+    max_uv: u16,
+) -> Result<js_sys::Object, JsError> {
+    present_opts(stream, canvas, Some(crate::channel_cap(max_y, max_uv))).await
+}
+
+async fn present_opts(
+    stream: Vec<u8>,
+    canvas: web_sys::OffscreenCanvas,
+    max_channels: Option<[Option<u16>; 2]>,
+) -> Result<js_sys::Object, JsError> {
     let g = gpu().ok_or_else(|| {
         let why = GPU_ERR
             .with(|e| e.borrow().clone())
@@ -309,10 +342,16 @@ pub async fn present(
     })?;
     // `Rgba`: the conversion is part of the decode's single submission; `to_rgba_texture`
     // returns the already-queued texture.
-    let decoded = g
-        .decoder
-        .decode_to_gpu_with(stream.as_slice(), GpuOut::Rgba)
-        .map_err(js_err)?;
+    let decoded = match max_channels {
+        Some(mc) => g
+            .decoder
+            .decode_to_gpu_progressive(stream.as_slice(), GpuOut::Rgba, mc)
+            .map_err(js_err)?,
+        None => g
+            .decoder
+            .decode_to_gpu_with(stream.as_slice(), GpuOut::Rgba)
+            .map_err(js_err)?,
+    };
     if !decoded.presentable_on_gpu() {
         return Err(JsError::new(
             "GPU canvas presentation needs an 8-bit 4:4:4 BT.709 picture without post-filters",

@@ -794,6 +794,40 @@ measured numbers in the status table above when you close an item.
   staging canvas at natural size, dropped on close. Compare chips flip 0.25/0.75 bpp through
   the card's queue-jump decode (timings land on the card, exactly-once proven by pool stats)
   plus an optional `_native/` reference-PNG state, all at identical zoom/pan.
+  **B7 done 2026-09-19** (demotiming) — startup vs per-image timing UX + degradation hooks:
+  the demo page separates one-time runtime cost from each picture's own cost. `worker.js`
+  streams `{type:'milestone'}` events (worker start, wasm fetch bytes+provenance,
+  compile+instantiate, thread pool, GPU init, ready, one row per model pair with
+  `network|cache|cache-storage|prefetch` provenance) which `pool.js` re-bases onto the
+  navigation clock and the page renders as a live startup timeline; `pool.decode()`'s
+  `timings` gains `ttr`/`stream`/`wait` (=`waitQueue`+`waitRuntime`+`waitModel`)/`decode`/
+  `present`/`cpu`/`cpuSynth`/`gpuMs`/`xfer`/`stats`/`modelRows`/`info`, so a card shows
+  `ttr <ms> · stream · wait (runtime·model·queue) · decode (cpu+gpu+xfer | cpu+cpu) ·
+  present`. `DecodeStats` needed a clock on wasm (`Instant::now` panics there): new
+  `wasm-clock` feature makes `Tick` read `js_sys::Date::now`; `decode`/`present` results now
+  carry `stats` (CPU path) and `gpu` phase timings. `info()` reports chroma format / bit
+  depth / post-filters for the card's image-facts line. Progressive decode is exposed
+  end-to-end: `Decoder::decode_picture_stats_progressive` +
+  `GpuDecoder::decode_to_gpu_progressive` → wasm `decodePartial`/`presentPartial` → `pool.decode(stream,
+  {maxChannels})` / `installJpegAiPolyfill({maxChannels})` / the demo's `quality: reduced`
+  toggle — measured honestly: `num_decode_chs` truncates only the residual ANS stage
+  (~1-3 ms of a ~1 s simd decode; latent nets and synthesis run full-width, same as the
+  reference). `maxPixels` fails oversized pictures with `reason:'too-large'` before any
+  model fetch. A 31-byte `WebAssembly.validate` simd128 probe in `pool.js`/`worker.js` makes
+  `DecoderPool`/`ready()` report `no-wasm-simd` and the polyfill keep the authored
+  `<img>`/`<picture>` fallback with a bubbling `jpegaierror`; a scalar non-SIMD package was
+  built and measured (406,687 B wasm-opt vs 425,005 B; ~1827 ms vs ~466 ms on img30 —
+  ~3.9x slower for ~4% fewer bytes, `benchmarks/wasm_scalar_2026-09-19.tsv`) and is NOT
+  shipped. `installJpegAiPolyfill({prefetch})`: `'auto'` warms the worker's cache namespace
+  from a Range-fetch PIH probe (and `decodeAndSwap` hands the pair over by `modelBuffers`
+  transfer); a `'head'` `<link rel=preload>` mode was built, measured double-downloading in
+  Chromium (a Worker fetch cannot consume the document's preload map unless credentials
+  match exactly), and dropped — documented in `web/README.md` §9 with the
+  `crossorigin="use-credentials"` hand-place recipe. Demo toggles persist in the URL
+  (`?gpu=`, `?threads=`, `?prefetch=off`, quality select) plus a clear-model-cache button.
+  Tests: `tests/demo.spec.ts` (5 tests: timeline, provenance rows, ttr arithmetic,
+  cache-storage on reload, reduced quality), `tests/polyfill.spec.ts` (+4: no-SIMD fallback,
+  preload-not-consumed, prefetch warm, maxPixels).
   **B3** GPU kernels: mostly done (b3gpu + b3gpu2, 2026-09-18). **Still missing:** `shader-f16`
   (opt-in feature; the RTX 2080 exposes `shaderFloat16` + 16-bit storage access, so it is
   feasible — needs f16 weight copies, f16 kernel variants, and a separately measured parity

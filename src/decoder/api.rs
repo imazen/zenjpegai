@@ -179,7 +179,7 @@ impl Decoder {
     /// Decode a codestream to whatever it holds: RGB, or YUV planes in the source's chroma
     /// subsampling (4:4:4, 4:2:2 or 4:2:0), 8 or 10 bits per sample.
     pub fn decode_picture(&self, stream: &[u8]) -> Result<Picture, At<Error>> {
-        self.decode_inner(stream, None, &enough::Unstoppable)
+        self.decode_inner(stream, self.max_channels, None, &enough::Unstoppable)
     }
 
     /// [`Decoder::decode_picture`] that also reports how long each pipeline stage took
@@ -187,7 +187,32 @@ impl Decoder {
     /// under a millisecond.
     pub fn decode_picture_stats(&self, stream: &[u8]) -> Result<(Picture, DecodeStats), At<Error>> {
         let probe = Probe::new();
-        let picture = self.decode_inner(stream, Some(&probe), &enough::Unstoppable)?;
+        let picture = self.decode_inner(
+            stream,
+            self.max_channels,
+            Some(&probe),
+            &enough::Unstoppable,
+        )?;
+        Ok((picture, probe.finish()))
+    }
+
+    /// [`Decoder::decode_picture_stats`] decoding only the first `max_channels` latent
+    /// channels per component for this call (the reference's `num_decode_chs` progressive
+    /// path; the remaining channels decode as zero residual, so the picture is coarser but
+    /// the entropy stage is cheaper). Unlike [`Decoder::max_channels`], which sets a cap for
+    /// every decode of the decoder, this applies to one call; a component's `None` keeps
+    /// the decoder's own setting (all channels by default).
+    pub fn decode_picture_stats_progressive(
+        &self,
+        stream: &[u8],
+        max_channels: [Option<u16>; 2],
+    ) -> Result<(Picture, DecodeStats), At<Error>> {
+        let probe = Probe::new();
+        let mc = [
+            max_channels[0].or(self.max_channels[0]),
+            max_channels[1].or(self.max_channels[1]),
+        ];
+        let picture = self.decode_inner(stream, mc, Some(&probe), &enough::Unstoppable)?;
         Ok((picture, probe.finish()))
     }
 
@@ -197,7 +222,7 @@ impl Decoder {
         stream: &[u8],
         stop: &dyn enough::Stop,
     ) -> Result<Picture, At<Error>> {
-        self.decode_inner(stream, None, stop)
+        self.decode_inner(stream, self.max_channels, None, stop)
     }
 
     /// [`Decoder::decode`] with cooperative cancellation.
@@ -210,7 +235,7 @@ impl Decoder {
         stream: &[u8],
         stop: &dyn enough::Stop,
     ) -> Result<RgbImage, At<Error>> {
-        match self.decode_inner(stream, None, stop)? {
+        match self.decode_inner(stream, self.max_channels, None, stop)? {
             Picture::Rgb(image) => Ok(image),
             Picture::Yuv(_) => Err(at!(Error::Unsupported(
                 "the stream decodes to YUV planes: use decode_picture"
@@ -230,6 +255,7 @@ impl Decoder {
     fn decode_inner(
         &self,
         stream: &[u8],
+        max_channels: [Option<u16>; 2],
         probe: Option<&Probe>,
         stop: &dyn enough::Stop,
     ) -> Result<Picture, At<Error>> {
@@ -290,7 +316,7 @@ impl Decoder {
             &headers.tools,
             eng,
             [&set.common[0], &set.common[1]],
-            self.max_channels,
+            max_channels,
             filters_on,
             Some(reconstruct::LumaSynth {
                 tiles: &tiles,

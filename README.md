@@ -96,6 +96,18 @@ In the browser (Chromium 153, RTX 2080 via Dawn/Vulkan, ~1 MP demo corpus, media
 `benchmarks/wasm_decode_2026-09-18_gpu.tsv`): the WebGPU package decodes a warm stream in
 ~46 ms vs ~89 ms on the threaded CPU package and ~642 ms on the single-threaded SIMD one,
 so `auto` uses the GPU when a hardware adapter exists (details: `web/README.md` §7).
+Whichever package runs, headers + entropy decode (integer me-tANS) + hyper-scale decoder
+(int8) + latent reconstruction always run on the CPU — bit-exact/integer stages plus a few ms
+of float work, multi-threaded on the `*-threads` packages — while synthesis (the heavy conv
+net) + output conversion + presentation run on the GPU only when the GPU path is taken.
+Post-filters, when a stream signals them, are CPU after synthesis. The demo page reports
+startup cost (wasm fetch/instantiate, thread pool, GPU init, per-model-bundle load rows with
+network/cache/prefetch provenance) separately from each picture's own `ttr` split
+(stream/wait/decode/present with the CPU/GPU stage split above); the polyfill keeps the
+authored `<img>`/`<picture>` fallback on `no-wasm-simd`, `too-large` (`maxPixels`), or any
+decode error, and can prefetch model bundles into the worker's Cache API namespace. Full
+timing schema and degradation knobs (`maxChannels` progressive decode, `maxPixels`, prefetch
+modes): `web/README.md` §9.
 
 ## Running the checks
 

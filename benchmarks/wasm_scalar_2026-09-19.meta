@@ -1,0 +1,5 @@
+commit	93b4f2d8c472
+host	dev
+command	RUSTFLAGS="-Ctarget-feature=+bulk-memory,+nontrapping-fptoint,+sign-ext,+mutable-globals" cargo +nightly-2026-09-02 build -p zenjpegai-wasm --target wasm32-unknown-unknown --profile wasm-release -Z build-std=panic_abort,std  (scalar: the simd variant minus +simd128); decode timed under node v26 on enc_img30_bop_m1_b0/stream.bits after one warmup, models m1_common+m1_bop
+date	2026-09-19
+note	simd is ~3.9x faster than scalar for ~4.6% more gzip bytes — scalar is NOT shipped by default; browsers without wasm SIMD keep the <img>/<picture> fallback (no-wasm-simd)

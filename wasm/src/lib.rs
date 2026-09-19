@@ -138,8 +138,21 @@ fn set(obj: &js_sys::Object, key: &str, value: impl Into<JsValue>) {
     let _ = js_sys::Reflect::set(obj, &JsValue::from_str(key), &value.into());
 }
 
+/// The coded chroma subsampling label for `info()` (factors are 1 or 2).
+fn chroma_format(c_ver: u8, c_hor: u8) -> String {
+    match (c_ver, c_hor) {
+        (1, 1) => "4:4:4".to_string(),
+        (1, 2) => "4:2:2".to_string(),
+        (2, 2) => "4:2:0".to_string(),
+        (2, 1) => "4:4:0".to_string(),
+        (v, h) => format!("subsamp {v}x{h}"),
+    }
+}
+
 /// Header fields of a codestream: `{ width, height, bitDepth, modelId, operatingPoint,
-/// operatingPoints }`. `operatingPoint` is the one [`decode`] uses (the stream's first listed).
+/// operatingPoints, chromaFormat, postFilters }`. `operatingPoint` is the one [`decode`]
+/// uses (the stream's first listed). `chromaFormat` is the coded subsampling; `postFilters`
+/// is whether the stream switches any post-filter on (they run on the CPU after synthesis).
 /// Needs no weights.
 #[wasm_bindgen]
 pub fn info(stream: &[u8]) -> Result<js_sys::Object, JsError> {
@@ -150,6 +163,8 @@ pub fn info(stream: &[u8]) -> Result<js_sys::Object, JsError> {
     set(&out, "height", pic.height);
     set(&out, "bitDepth", pic.bit_depth as u32);
     set(&out, "modelId", pic.model_id as u32);
+    set(&out, "chromaFormat", chroma_format(pic.c_ver, pic.c_hor));
+    set(&out, "postFilters", headers.tools.any_post_filter());
     let ops = js_sys::Array::new();
     for &op in &pic.synthesis_transforms {
         ops.push(&JsValue::from_str(op_name(op)));
@@ -182,24 +197,75 @@ fn set_rgba(out: &js_sys::Object, rgba: &[u8]) {
     set(out, "rgba", array);
 }
 
-/// The CPU decode behind [`decode`], shared with the GPU path's fallback.
-fn decode_cpu(stream: &[u8]) -> Result<js_sys::Object, JsError> {
-    let img = state().decoder.decode(stream).map_err(js_err)?;
+/// Per-stage wall times of one decode, ms (a flat snapshot of `DecodeStats`; `[2]` fields
+/// are per component — luma, chroma — and overlap each other on the thread pool, so their
+/// sum can exceed `chains`). On builds without the `wasm-clock` feature every field is 0.
+fn stats_obj(s: &zenjpegai::DecodeStats) -> js_sys::Object {
+    let ms = |d: core::time::Duration| d.as_secs_f64() * 1000.0;
+    let pair = |a: &[core::time::Duration; 2]| {
+        let arr = js_sys::Array::new();
+        arr.push(&JsValue::from_f64(ms(a[0])));
+        arr.push(&JsValue::from_f64(ms(a[1])));
+        arr
+    };
+    let out = js_sys::Object::new();
+    set(&out, "headers", ms(s.headers));
+    set(&out, "models", ms(s.models));
+    set(&out, "entropyZ", pair(&s.entropy_z));
+    set(&out, "entropyQmap", ms(s.entropy_quality_map));
+    set(&out, "entropyBody", pair(&s.entropy_body));
+    set(&out, "entropyResidual", pair(&s.entropy_residual));
+    set(&out, "entropyDequantize", pair(&s.entropy_dequantize));
+    set(&out, "latent", pair(&s.latent));
+    set(&out, "latentHyper", pair(&s.latent_hyper));
+    set(&out, "latentMcm", pair(&s.latent_mcm));
+    set(&out, "lsbs", pair(&s.post_process));
+    set(&out, "chains", ms(s.chains));
+    set(&out, "synthLuma", ms(s.synthesis_luma));
+    set(&out, "synthesis", ms(s.synthesis));
+    set(&out, "chroma", ms(s.chroma_convert));
+    set(&out, "filters", ms(s.filters));
+    set(&out, "output", ms(s.output));
+    set(&out, "total", ms(s.total));
+    out
+}
+
+/// `0` for "all coded channels" in the `decodePartial`/`presentPartial` arguments.
+pub(crate) fn channel_cap(y: u16, uv: u16) -> [Option<u16>; 2] {
+    [(y > 0).then_some(y), (uv > 0).then_some(uv)]
+}
+
+/// The CPU decode behind [`decode`], shared with the GPU path's fallback. `max_channels`
+/// caps the latent channels decoded per component (progressive decode, `num_decode_chs`).
+fn decode_cpu_opts(
+    stream: &[u8],
+    max_channels: Option<[Option<u16>; 2]>,
+) -> Result<js_sys::Object, JsError> {
+    let (picture, stats) = match max_channels {
+        Some(mc) => state().decoder.decode_picture_stats_progressive(stream, mc),
+        None => state().decoder.decode_picture_stats(stream),
+    }
+    .map_err(js_err)?;
+    let zenjpegai::Picture::Rgb(img) = picture else {
+        return Err(JsError::new("the stream decodes to YUV planes, not RGB"));
+    };
     let out = js_sys::Object::new();
     set(&out, "width", img.width as u32);
     set(&out, "height", img.height as u32);
     set_rgba(&out, &rgb_to_rgba(&img));
+    set(&out, "stats", stats_obj(&stats));
     Ok(out)
 }
 
-/// Decode a codestream: `{ width, height, rgba: Uint8ClampedArray, path }` (alpha 255), ready
-/// for `new ImageData(rgba, width, height)`. In the `gpu` build this is async (a Promise) and
-/// `path` is `"gpu"` when synthesis ran on WebGPU or `"cpu"` after a fallback (`gpuError`
-/// carries why); otherwise it is synchronous and `path` is `"cpu"`.
+/// Decode a codestream: `{ width, height, rgba: Uint8ClampedArray, path, stats }` (alpha 255),
+/// ready for `new ImageData(rgba, width, height)`. In the `gpu` build this is async (a
+/// Promise) and `path` is `"gpu"` when synthesis ran on WebGPU or `"cpu"` after a fallback
+/// (`gpuError` carries why); otherwise it is synchronous and `path` is `"cpu"`. `stats` is
+/// the CPU stages' wall-time breakdown (present on the CPU path).
 #[cfg(not(feature = "gpu"))]
 #[wasm_bindgen]
 pub fn decode(stream: &[u8]) -> Result<js_sys::Object, JsError> {
-    let out = decode_cpu(stream)?;
+    let out = decode_cpu_opts(stream, None)?;
     set(&out, "path", "cpu");
     Ok(out)
 }
@@ -208,7 +274,29 @@ pub fn decode(stream: &[u8]) -> Result<js_sys::Object, JsError> {
 #[cfg(feature = "gpu")]
 #[wasm_bindgen]
 pub async fn decode(stream: Vec<u8>) -> Result<js_sys::Object, JsError> {
-    gpu::decode(&stream).await
+    gpu::decode_opts(&stream, None).await
+}
+
+/// [`decode`] reading only the first `max_y` / `max_uv` latent channels of each component
+/// (`0` = all): the reference's `num_decode_chs` progressive decode — a coarser picture for
+/// less entropy-stage work.
+#[cfg(not(feature = "gpu"))]
+#[wasm_bindgen(js_name = decodePartial)]
+pub fn decode_partial(stream: &[u8], max_y: u16, max_uv: u16) -> Result<js_sys::Object, JsError> {
+    let out = decode_cpu_opts(stream, Some(channel_cap(max_y, max_uv)))?;
+    set(&out, "path", "cpu");
+    Ok(out)
+}
+
+/// See the non-`gpu` doc above.
+#[cfg(feature = "gpu")]
+#[wasm_bindgen(js_name = decodePartial)]
+pub async fn decode_partial(
+    stream: Vec<u8>,
+    max_y: u16,
+    max_uv: u16,
+) -> Result<js_sys::Object, JsError> {
+    gpu::decode_opts(&stream, Some(channel_cap(max_y, max_uv))).await
 }
 
 /// Drop the feature-map buffers kept between decodes (wasm memory itself never shrinks; this

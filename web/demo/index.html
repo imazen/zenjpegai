@@ -25,6 +25,46 @@
 
   <section id="gpu-note" class="notice"></section>
 
+  <section id="startup" class="notice startup">
+    <div class="controls">
+      <label>GPU
+        <select id="ctl-gpu">
+          <option value="auto">auto</option>
+          <option value="on">on</option>
+          <option value="off">off</option>
+        </select>
+      </label>
+      <label>threads
+        <select id="ctl-threads">
+          <option value="on">on</option>
+          <option value="off">off</option>
+        </select>
+      </label>
+      <label>quality
+        <select id="ctl-quality">
+          <option value="full">full</option>
+          <option value="reduced">reduced (y64,uv32)</option>
+        </select>
+      </label>
+      <button id="ctl-clearcache" type="button">clear model cache</button>
+      <span id="ctl-note" class="ctl-note"></span>
+    </div>
+    <p class="split-expl">
+      Where a decode's time goes: headers, integer entropy decode, hyper-scale decoder and
+      latent reconstruction always run on the CPU (bit-exact/integer stages; multi-threaded on
+      the <em>threads</em> packages). Synthesis, output conversion and presentation run on the
+      GPU when the WebGPU path is taken, else on the CPU; post-filters a stream signals run on
+      the CPU after synthesis (these demo streams are tools-off). Last decode:
+    </p>
+    <div id="splitbar" class="splitbar" hidden>
+      <span class="seg cpu" title="CPU (entropy+latent)"></span><span class="seg gpu" title="GPU (synthesis+output, device time)"></span><span class="seg xfer" title="host↔device transfer/sync"></span><span class="seglabel"></span>
+    </div>
+    <div id="startup-facts" class="facts-line"></div>
+    <dl id="startup-timeline" class="timeline"></dl>
+    <div id="startup-models" class="models"></div>
+    <div id="startup-totals" class="totals"></div>
+  </section>
+
   <div id="gallery" class="gallery"></div>
 </main>
 

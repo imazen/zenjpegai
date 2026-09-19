@@ -29,7 +29,7 @@ gpu = [
 ]
 
 [dependencies]
-zenjpegai = { path = "..", default-features = false, features = ["std", "unstable-internals"] }
+zenjpegai = { path = "..", default-features = false, features = ["std", "unstable-internals", "wasm-clock"] }
 zenjpegai-gpu = { path = "../gpu", default-features = false, optional = true }
 wgpu = { version = "30.0.1", default-features = false, features = ["webgpu"], optional = true }
 web-sys = { version = "0.3.104", features = ["OffscreenCanvas"], optional = true }

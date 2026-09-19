@@ -17,7 +17,9 @@ use crate::error::Result;
 /// [`std::time::Instant`]; without `std` — and on bare `wasm32-unknown-unknown`, where
 /// `std` exists but `Instant::now()` panics (no clock in that std) — it is a zero-sized
 /// value whose [`elapsed`](Self::elapsed) is always [`Duration::ZERO`]. `wasm32-wasip1`
-/// keeps a real clock (WASI provides one).
+/// keeps a real clock (WASI provides one), and the `wasm-clock` feature gives
+/// `wasm32-unknown-unknown` one too: `js_sys::Date::now()` (ms as f64), the same timer the
+/// `gpu` crate's host-side phase timings already use.
 #[derive(Clone, Copy)]
 pub(crate) struct Tick {
     #[cfg(all(
@@ -25,6 +27,8 @@ pub(crate) struct Tick {
         not(all(target_arch = "wasm32", target_os = "unknown"))
     ))]
     t: std::time::Instant,
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown", feature = "wasm-clock"))]
+    t: f64,
 }
 
 impl Tick {
@@ -36,6 +40,8 @@ impl Tick {
                 not(all(target_arch = "wasm32", target_os = "unknown"))
             ))]
             t: std::time::Instant::now(),
+            #[cfg(all(target_arch = "wasm32", target_os = "unknown", feature = "wasm-clock"))]
+            t: js_sys::Date::now(),
         }
     }
 
@@ -46,9 +52,15 @@ impl Tick {
             not(all(target_arch = "wasm32", target_os = "unknown"))
         ))]
         return self.t.elapsed();
+        #[cfg(all(target_arch = "wasm32", target_os = "unknown", feature = "wasm-clock"))]
+        return Duration::from_secs_f64((js_sys::Date::now() - self.t).max(0.0) / 1000.0);
         #[cfg(any(
             not(feature = "std"),
-            all(target_arch = "wasm32", target_os = "unknown")
+            all(
+                target_arch = "wasm32",
+                target_os = "unknown",
+                not(feature = "wasm-clock")
+            )
         ))]
         Duration::ZERO
     }

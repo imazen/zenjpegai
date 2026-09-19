@@ -1,0 +1,3 @@
+variant	wasm_bindgen_bytes	wasm_opt_O3_bytes	gzip_9	brotli_11	stream	width	height	model_id	decode_ms_runs	decode_ms_median
+scalar	493576	406687	163297	133319	enc_img30_bop_m1_b0	560	888	1	1827,2009,1939,1808,1681	1827
+simd	509212	425005	168807	138000	enc_img30_bop_m1_b0	560	888	1	451,495,466,455,505	466

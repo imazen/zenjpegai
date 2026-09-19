@@ -20,6 +20,29 @@ h1 { font-size: 1.4rem; }
 .card button { font-size: 0.78rem; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--border); background: transparent; color: inherit; cursor: pointer; }
 .card button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #fff; }
 .card .timing { font-size: 0.75rem; font-family: ui-monospace, monospace; opacity: 0.8; min-height: 2.4em; }
+.startup { font-size: 0.85rem; }
+.startup .controls { display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; margin-bottom: 8px; }
+.startup .controls label { display: flex; gap: 6px; align-items: center; font-weight: 600; }
+.startup .controls select, .startup .controls button { font: inherit; color: inherit; background: transparent; border: 1px solid var(--border); border-radius: 6px; padding: 2px 8px; cursor: pointer; }
+.startup .ctl-note { font-size: 0.78rem; opacity: 0.7; }
+.startup .split-expl { font-size: 0.78rem; opacity: 0.85; margin: 6px 0; }
+.splitbar { display: flex; height: 10px; border-radius: 5px; overflow: hidden; background: var(--border); margin: 6px 0; align-items: center; }
+.splitbar .seg { display: block; height: 100%; min-width: 0; }
+.splitbar .seg.cpu { background: #2a6df4; }
+.splitbar .seg.gpu { background: #3aa655; }
+.splitbar .seg.xfer { background: #d8a02a; }
+.splitbar .seglabel { font-size: 0.72rem; margin-left: 8px; white-space: nowrap; }
+.startup .facts-line { font-size: 0.78rem; font-family: ui-monospace, monospace; opacity: 0.8; margin: 4px 0; }
+.timeline { font-size: 0.78rem; font-family: ui-monospace, monospace; margin: 6px 0; }
+.timeline div { display: flex; gap: 10px; }
+.timeline dt { min-width: 74px; text-align: right; opacity: 0.65; }
+.timeline dd { margin: 0; }
+.startup .models { font-size: 0.78rem; font-family: ui-monospace, monospace; margin: 6px 0; }
+.startup .models .mrow { display: flex; gap: 10px; }
+.startup .models .msrc { opacity: 0.65; }
+.startup .totals { font-size: 0.78rem; font-family: ui-monospace, monospace; font-weight: 600; margin-top: 6px; }
+.card .facts { font-size: 0.72rem; font-family: ui-monospace, monospace; opacity: 0.7; }
+.card .badge { font-size: 0.68rem; border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; margin-left: 4px; opacity: 0.8; }
 footer { margin-top: 40px; font-size: 0.8rem; opacity: 0.7; }
 a { color: var(--accent); }
 

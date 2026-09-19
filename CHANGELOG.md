@@ -207,6 +207,43 @@
 - `mans`: me-tANS entropy coder (tables, decoder, encoder), bit-exact against the reference C++ extension.
 
 #### Browser & WebAssembly
+- Demo timing UX + graceful degradation (`demotiming`, 2026-09-19): the demo page now
+  separates one-time page cost from each picture's own cost. A live startup panel above the
+  cards lists navigation-relative milestones — worker spawn, wasm fetch (bytes +
+  network/cache provenance), compile+instantiate, thread pool, GPU probe/init, runtime ready
+  — plus one row per model pair actually loaded (`m<N> common+<op>  16.2 MB  412 ms
+  network|cache|cache-storage|prefetch`, a Cache API hit honestly reporting ~0 ms) and the
+  totals "runtime ready / first model ready / first image rendered (ttr)". Each card shows
+  `ttr` decomposed into `stream` (.jai fetch), `wait` (split `runtime`/`model`/`queue` — a
+  card that waited for a model download now says so instead of hiding it in "queued"),
+  `decode` (with `cpu <a> + gpu <b> + xfer <c>` on the GPU path or `cpu <a> + cpu <d>` on
+  CPU — entropy+latent are always CPU, synthesis+output run where the path dictates), and
+  `present`, plus a hoverable `DecodeStats` stage breakdown and an image-facts line
+  (W×H, model id + operating point, chroma format, bit depth, bpp). `worker.js` emits the
+  milestones and per-bundle `modelRows`; `pool.js` re-bases worker times onto the navigation
+  clock and returns the documented `timings` schema (`web/README.md` §9). Wasm-side: a new
+  `wasm-clock` feature gives `Tick` a real clock (`js_sys::Date::now` — `Instant::now`
+  panics on `wasm32-unknown-unknown`), `decode`/`present` results carry `stats` and GPU
+  phase timings, and `info()` reports chroma format/bit depth/post-filters. Progressive
+  decode is wired end-to-end — `Decoder::decode_picture_stats_progressive`,
+  `GpuDecoder::decode_to_gpu_progressive`, wasm `decodePartial`/`presentPartial`,
+  `pool.decode(stream, {maxChannels})`, `installJpegAiPolyfill({maxChannels})`, and a demo
+  `quality: full/reduced` toggle — with the honest caveat that `num_decode_chs` truncates
+  only the residual ANS stage (a few ms of a ~1 s simd decode; the latent nets and synthesis
+  run full-width, same as the reference). `maxPixels` fails oversized pictures with
+  `reason:'too-large'` before any model fetch or decode. Browsers without WebAssembly
+  SIMD128 (Safari ≤ 16.3, old Firefox ESR) are detected by a 31-byte `WebAssembly.validate`
+  probe: `DecoderPool` reports `no-wasm-simd`, decodes reject with that reason, and the
+  polyfill keeps the authored `<img>`/`<picture>` fallback while dispatching a bubbling
+  `jpegaierror`; a scalar non-SIMD package was measured (406,687 vs 425,005 B wasm-opt;
+  ~3.9x slower on img30 — `benchmarks/wasm_scalar_2026-09-19.tsv`) and is not shipped.
+  `installJpegAiPolyfill({prefetch:'auto'|false})` warms the worker's Cache API namespace
+  from a Range-fetch PIH probe and hands bundles to the worker via `modelBuffers`; a `'head'`
+  (`<link rel=preload>`) mode was measured double-downloading in Chromium and dropped
+  (credentials-mode mismatch — the recipe that does work is documented in `web/README.md`
+  §9). Demo controls persist in the URL (`?gpu=`, `?threads=`, `?prefetch=off`, quality
+  select) plus a clear-model-cache button. Coverage: `tests/demo.spec.ts` (5 tests),
+  `tests/polyfill.spec.ts` (+4 degradation/prefetch tests).
 - Demo: fill-window decoded-image viewer (`viewer`, 2026-09-19) — click a card for a
   full-window overlay with a prominent device-pixel-ratio readout
   (`1 image px = <r> device px · dppx <n> · zoom <z>% · <W>×<H> image · <cw>×<ch> CSS px ·

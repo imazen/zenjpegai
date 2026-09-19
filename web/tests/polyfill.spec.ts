@@ -49,3 +49,69 @@ test.describe('polyfill', () => {
     expect(events.some((u) => u?.includes('mountain'))).toBe(true);
   });
 });
+
+test.describe('polyfill degradation + prefetch', () => {
+  test('no wasm SIMD: fallback <img> stays untouched, jpegaierror reason no-wasm-simd', async ({ page }) => {
+    // Break the SIMD probe before any page script runs: every pkg-* requires +simd128, so
+    // this is exactly what Safari <= 16.3 / old Firefox ESR look like to the polyfill.
+    await page.addInitScript(() => {
+      const orig = WebAssembly.validate;
+      WebAssembly.validate = (bytes) => bytes?.length === 31 ? false : orig(bytes);
+    });
+    await page.goto(`http://127.0.0.1:${PORTS.isolated}/polyfill.html`);
+    await page.waitForFunction(() => window.__jaiEvents.some((e) => e.error), null, { timeout: 15_000 });
+    const img = page.locator('img#direct');
+    await expect(img).toHaveCount(1); // the original <img> is still there
+    expect(await img.getAttribute('src')).toContain('.jai'); // src untouched
+    await expect(img).toHaveAttribute('data-jai-state', 'error');
+    expect(page.locator('canvas')).toHaveCount(0); // nothing was swapped in
+  });
+
+  test('documented finding: a document preload link is NOT consumed by a Worker fetch', async ({ page }) => {
+    // This is why `prefetch` has no 'head' mode: Chromium scopes <link rel=preload> to the
+    // initiating document, so the worker's fetch() for the same URL cannot join it and every
+    // bundle would download twice. If a future browser starts matching worker fetches to
+    // document preloads this test fails — then 'head' is worth revisiting.
+    const requests = [];
+    page.on('request', (r) => { if (r.url().includes('m0_common.zjb')) requests.push(r.url()); });
+    await page.addInitScript(() => {
+      window.__noPrefetch = true;
+      window.__insertPreload = true;
+    });
+    await page.goto(`http://127.0.0.1:${PORTS.isolated}/polyfill.html`);
+    await page.evaluate(() => {
+      const l = document.createElement('link');
+      l.rel = 'preload';
+      l.as = 'fetch';
+      l.crossOrigin = 'anonymous';
+      l.href = 'models/m0_common.zjb';
+      document.head.append(l);
+    });
+    await page.waitForFunction(() => window.__jaiEvents.length > 0, null, { timeout: 60_000 });
+    expect(requests.length).toBe(2); // the preload AND the worker's own fetch
+  });
+
+  test('prefetch "auto" warms the worker Cache API namespace', async ({ page }) => {
+    await page.goto(`http://127.0.0.1:${PORTS.isolated}/polyfill.html`);
+    // The default install prefetches: once the first image decodes, the model bundles sit in
+    // the shared cache under the same ?v= keys the worker uses (no version tokens in the
+    // fixture — the key is the bare URL).
+    await page.waitForFunction(() => window.__jaiEvents.length > 0, null, { timeout: 60_000 });
+    const cached = await page.evaluate(async () => {
+      const c = await caches.open('zenjpegai-models-v2');
+      const keys = await c.keys();
+      return keys.map((k) => k.url);
+    });
+    expect(cached.some((u) => u.includes('m0_common.zjb'))).toBe(true);
+    expect(cached.some((u) => u.includes('m0_bop.zjb'))).toBe(true);
+  });
+
+  test('maxPixels fails fast to the fallback with reason too-large', async ({ page }) => {
+    await page.addInitScript(() => { window.__maxPixels = 1024; });
+    await page.goto(`http://127.0.0.1:${PORTS.isolated}/polyfill.html`);
+    await page.waitForFunction(() => window.__jaiEvents.some((e) => e.error), null, { timeout: 15_000 });
+    const events = await page.evaluate(() => window.__jaiEvents.filter((e) => e.error));
+    expect(events[0].reason).toBe('too-large');
+    expect(await page.locator('img#direct').count()).toBe(1); // fallback untouched
+  });
+});

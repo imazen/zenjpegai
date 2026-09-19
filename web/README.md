@@ -162,9 +162,10 @@ viewport height of the viewport (`IntersectionObserver`, `rootMargin: '100% 0px'
 visibility order — a synchronous rect check starts already-near cards without waiting for the
 first observer callback), and clicking the other rate decodes it with queue-jumping priority.
 Each card's canvas is pre-sized from the manifest so the layout never shifts while a decode is
-queued (`data-state`: pending/queued/decoding/done/error). Timing shows fetch, queue wait,
-model-load, and decode ms, plus build variant (`simd`/`threads`), SIMD tier, and a WebGPU
-feature-detection note (see the "Not done" table).
+queued (`data-state`: pending/queued/decoding/done/error). Timing shows `ttr` split into
+`stream` / `wait` (runtime + model + queue) / `decode` (with a CPU/GPU stage split) /
+`present`, plus build variant, SIMD tier, and a WebGPU feature-detection note — see §9 for the
+schema and the startup panel above the cards (see the "Not done" table for open items).
 
 Clicking a decoded card opens a fill-window viewer (`web/demo/viewer.js`, overlay
 `role=dialog`/`aria-modal`, focus trap; Esc, click/tap outside, or browser Back — via a
@@ -430,6 +431,117 @@ CF is the fast path because it can send response headers GitHub Pages cannot:
   cached set for up to a year. Accepted deliberately (the alternative is a manifest-driven
   `?v=` stamp on package URLs, not implemented); revisit if mixed-version breakage is ever
   observed.
+
+### 9. Startup vs per-image timing, degradation, fallback matrix (`demotiming`, 2026-09-19)
+
+The demo used to fold everything before pixels into one "queued" figure, so a card that sat
+behind wasm download + model fetch reported thousands of ms of "queue" that was really the
+page's one-time startup. Now the page reports startup and per-image costs separately.
+
+**Page-level startup panel** (top of `index.html`, live): isolation state / build / SIMD tier /
+worker count, a capability-matrix line ("isolated+WebGPU → webgpu-threads · isolated → threads
+· WebGPU only → webgpu · otherwise → simd · no wasm SIMD → no package"), then a timeline of
+milestones stamped in absolute ms since navigation start (`performance.timeOrigin` basis —
+the worker posts `{type:'milestone', name, at, ...}` on its own clock and `pool.js` re-bases
+it by the spawn time): worker spawned → worker script running → glue loaded → wasm fetched
+(bytes + `network`/`cache` provenance from resource timing) → wasm compiled+instantiated →
+thread pool ready (N) → GPU adapter probed / device ready (or the CPU line) → runtime ready.
+One row per model pair actually loaded follows: `m<N> common+<op>  16.2 MB  412 ms
+network|cache|cache-storage|prefetch` — a Cache API hit honestly reports `~0 ms ·
+cache-storage` (that row IS the answer to "why don't I see the download"), and `prefetch`
+means the bytes arrived by transfer from the page-side prefetch (§8). Totals line: "runtime
+ready at X ms · first model ready at Y ms · first image rendered at Z ms (ttr)".
+
+**Per-card line** (`ttr` = time-to-render, request → pixels on canvas): `ttr <ms> · stream
+<ms> (<KB>) · wait <ms> (runtime <a> · model <b> · queue <c>) · decode <ms> (cpu <a> + cpu <d>)
+· present <ms> · threads · cpu` on the CPU path; the GPU path shows `cpu <a> + gpu <b> + xfer
+<c>`. A card's `model` wait is the same number as that model's row in the panel. The decode
+figure's `title` attribute breaks the wasm `DecodeStats` down further (entropy / latent /
+synthesis / output).
+
+**`timings` schema** (`pool.decode()`/`decodeToCanvas()` results, all ms, additive):
+
+| field | meaning |
+| --- | --- |
+| `ttr` | enqueue → result on the page clock |
+| `stream` / `streamBytes` | the caller's `.jai` fetch (`opts.streamMs`) and its size |
+| `wait` | `waitQueue + waitRuntime + waitModel` — everything before this image's own decode |
+| `waitQueue` | page-side queue behind OTHER decodes |
+| `waitRuntime` | worker-side wait while wasm/GPU/thread-pool were still starting |
+| `waitModel` | model-bundle load inside the worker (≈0 on prefetch/cache hit) |
+| `decode` | the wasm call, minus `present` |
+| `present` | GPU present host time, or 2d `putImageData` |
+| `cpu` | entropy+latent stages — ALWAYS CPU (headers/weights/entropy/latent host ms on the GPU path; headers+models+chains on the CPU path) |
+| `cpuSynth` | CPU path only: synthesis+chroma+filters+output (null on GPU) |
+| `gpuMs` | GPU device ms (null on CPU / without timestamp queries) |
+| `xfer` | GPU path only: upload/plan/submit/convert/wait/readback host ms |
+| `stats` | `DecodeStats` stage table (CPU path; needs the `wasm-clock` feature — `Instant::now` panics on `wasm32-unknown-unknown`, so `Tick` reads `js_sys::Date::now` there) |
+| `modelRows` | `[{file, bytes, ms, source}]` this call loaded; `[]` if the model was already resident |
+| `info` | `{width, height, bitDepth, modelId, operatingPoint, chromaFormat, postFilters}` from the wasm `info` export |
+| `variant`, `tier`, `path`, `gpuError`, `gpu` | package / SIMD tier / `cpu`|`gpu` path / trap notes / raw GPU `Timing` |
+
+**Which stages run where, and why** (stated wherever a decode time is shown): headers +
+entropy decode (integer me-tANS) + hyper-scale decoder (int8) + latent reconstruction
+(hyper-decoder + context model) are ALWAYS CPU — bit-exact/integer stages plus a few ms of
+float work; on the `*-threads` packages this part is multi-threaded (rayon). Then synthesis
+(the heavy conv net) + output conversion + presentation run on the GPU when `path: 'gpu'`,
+else on the CPU. Post-filters (EFE/eICCI/LEF), when a stream signals them, run on the CPU
+after synthesis (the demo streams are tools-off). The panel carries this sentence and a per-run
+CSS bar of CPU vs GPU vs transfer for the last decode.
+
+**User toggles** (persisted in the URL so a shared link reproduces the mode): `?gpu=auto|on|off`,
+`?threads=` (off → `threads=1`), `?prefetch=off` (disables the §8 page-side prefetch so the
+worker's own network → cache-storage path is observable), a live `quality: full / reduced
+(y64,uv32)` select, and a "clear model cache" button that deletes the `zenjpegai-models-v2`
+Cache API namespace so the download can be watched again.
+
+**No-wasm-SIMD fallback**: every `pkg-*` is built `+simd128`; browsers without it (Safari ≤
+16.3, old Firefox ESR) used to throw inside the worker. `pool.js`/`worker.js` now run a
+`WebAssembly.validate` probe of a 31-byte simd128 module up front; `DecoderPool` reports
+`ready() -> {ok:false, reason:'no-wasm-simd'}`, decode calls reject with
+`err.reason === 'no-wasm-simd'`, and the polyfill leaves the `<img>`/`<picture>` fallback
+untouched while dispatching `jpegaierror` (bubbling — register listeners before or right after
+`installJpegAiPolyfill`; install-time failures fire on a microtask). A scalar (non-SIMD)
+package was measured and rejected for shipping: 406,687 B vs 425,005 B wasm (~4% smaller;
+163,297 vs 168,807 gzip) but **~3.9x slower** on the img30 stream under node (median ~1827 ms
+vs ~466 ms, `benchmarks/wasm_scalar_2026-09-19.tsv`) — a browser that old is better served by
+the authored fallback than a 4-second decode.
+
+**Graceful degradation knobs** (`pool.decode(stream, opts)` / `installJpegAiPolyfill(opts)`):
+`maxChannels: [y, uv]` caps the latent channels decoded per component — the reference's
+`num_decode_chs` progressive path (wasm exports `decodePartial`/`presentPartial`;
+`Decoder::decode_picture_stats_progressive` / `GpuDecoder::decode_to_gpu_progressive` in Rust).
+Measured honestly: it truncates only the residual ANS stage — the latent networks and
+synthesis still run at full channel count, exactly like the reference — so the saving is a few
+percent of a ~1 s simd decode (the residual stage is ~1-3 ms at `Date.now()`'s 1 ms
+granularity), not a headline number. `maxPixels: N` rejects a picture whose header declares
+more pixels with `reason: 'too-large'`, checked from the stream header before any model fetch
+or decode work, leaving the fallback markup alone. The natural degradation path for a page
+remains `<picture><source type="image/jpeg-ai" srcset="x.jai"><img src="fallback.jpg">` — the
+browser shows the JPEG until/unless the polyfill swaps, and on any `jpegaierror` it stays.
+
+**Prefetch** (`installJpegAiPolyfill({ prefetch })`): `'auto'` (default) probes each matched
+stream's PIH (`stream-info.js`) — a 4 KB Range fetch for near-viewport pictures so the model
+download overlaps the worker's wasm load, and per-decode off the already-fetched bytes —
+and warms `zenjpegai-models-v2` via `prefetch.js`; the fetched pair is also handed to the
+worker by `modelBuffers` transfer. `false` disables it. A `'head'` mode (`<link rel="preload"
+as="fetch">` tags) was built, measured, and dropped: a dedicated Worker's `fetch()` cannot
+consume the document's preload map unless the credentials modes match exactly — anonymous
+`crossorigin` + a default `same-origin` fetch double-downloaded every bundle (Chromium).
+Correctly attributed preloads DO work — `crossorigin="use-credentials"` + `fetch(...,
+{credentials:'include'})` is what `build-site.mjs` stamps for the first model pair and what
+`prefetch.js` uses — so a page author with a known model set can hand-place
+`<link rel="preload" as="fetch" crossorigin="use-credentials" href="models/m<N>_common.zjb?v=<sha256>">`
+(and the `_<op>` twin), or warm the same cache keys directly
+(`caches.open('zenjpegai-models-v2').then(c => c.add(...))`), and the worker's `cache.match`
+hits either way.
+
+**Events**: `jpegaidecoded` (document, `detail.timings` is the schema above plus the page-side
+`fetch`/`decodeCall`/`render`/`total` split), `jpegaierror` (bubbles from the image;
+`detail.reason` ∈ `no-wasm-simd` | `too-large` | decode errors, `detail.url`). Tests:
+`tests/demo.spec.ts` (panel fields, ttr arithmetic, provenance rows, reduced-quality),
+`tests/polyfill.spec.ts` (+ no-SIMD fallback, `maxPixels`, prefetch), `tests/prefetch.spec.ts`
+(cfpages).
 
 ## Next steps, in order
 

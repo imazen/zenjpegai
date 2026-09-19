@@ -35,6 +35,10 @@ avx512 = ["archmage/avx512", "magetypes/avx512"]
 # still change), but the escape hatch this crate's own CLI/tests/benches and the `gpu`/`wasm`
 # sibling crates need. See PORTING.md "API hygiene".
 unstable-internals = []
+# A real clock for `DecodeStats` on `wasm32-unknown-unknown`, where `Instant::now()` panics:
+# `Tick` then reads `js_sys::Date::now()` (ms as f64). Only the browser packages turn this on;
+# without it (or on a non-JS wasm host) the probe stays zero-cost and reports zeros, as before.
+wasm-clock = ["std", "dep:js-sys"]
 # The `zenjpegai` command line tool (PNG output through zenpng). Needs unstable-internals: the
 # CLI reaches nn::fast::{Engine, Tier, set_pool_limit}, model::*, weights::packed::*.
 cli = ["std", "pth", "dep:zenpng", "dep:imgref", "dep:rgb", "unstable-internals"]
@@ -64,6 +68,10 @@ rgb = { version = "0.8.53", optional = true }
 enough = { version = "0.4.4", default-features = false }
 zencodec = { version = "0.1.26", optional = true }
 zenpixels = { version = "0.2.16", optional = true }
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+# Browser timer for the `wasm-clock` feature (Instant::now panics on this target).
+js-sys = { version = "0.3.105", optional = true }
 
 [[example]]
 name = "make_roi_mask"
