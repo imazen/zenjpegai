@@ -62,6 +62,31 @@ fn regression_seeds_do_not_panic() {
     }
 }
 
+/// The committed seed streams (`fuzz/seeds/`: TON, region, qmap, truncations)
+/// are the campaign's starting corpus — replay them through every entry point
+/// so the real syntax paths are exercised on stable CI too. Missing dir is a
+/// broken checkout, same as `fuzz/regression`.
+#[test]
+fn seed_streams_do_not_panic() {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fuzz/seeds");
+    let rd = fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("{}: unreadable seeds dir: {e}", dir.display()));
+    let mut seeds: Vec<PathBuf> = rd
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.is_file())
+        .collect();
+    seeds.sort();
+    assert!(!seeds.is_empty(), "{}: no seed streams", dir.display());
+    for seed in &seeds {
+        let input = fs::read(seed).expect("read seed stream");
+        for (name, entry) in ENTRY_POINTS {
+            if let Err(e) = run_one(name, *entry, &input) {
+                panic!("{}: {e}", seed.display());
+            }
+        }
+    }
+}
+
 /// A regression directory may be empty on a fresh clone — still smoke-test the
 /// entry points on a handful of boundary inputs so the harness itself is
 /// exercised by `cargo test`.
