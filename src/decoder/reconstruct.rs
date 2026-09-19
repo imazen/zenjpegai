@@ -4,6 +4,7 @@
 //! context / synthesis steps of `common_modules.py`, including region partitioning (dependent and
 //! independent) and synthesis tiling.
 
+use alloc::vec::Vec;
 use enough::Stop;
 
 use super::entropy::ComponentEntropy;
