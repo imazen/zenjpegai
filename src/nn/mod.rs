@@ -67,6 +67,8 @@ pub struct Conv2d {
     pub groups: usize,
     pub weight: Vec<f32>,
     pub bias: Option<Vec<f32>>,
+    /// `weight`/`bias` bytes in the tracked ledger (see [`crate::mem`]).
+    _charge: crate::mem::Charge,
 }
 
 impl Conv2d {
@@ -102,6 +104,9 @@ impl Conv2d {
                 "conv2d: bias size does not match out_ch".into(),
             ));
         }
+        let _charge = crate::mem::Charge::new(
+            crate::mem::vec_bytes(&weight) + bias.as_ref().map_or(0, crate::mem::vec_bytes),
+        );
         Ok(Self {
             in_ch,
             out_ch,
@@ -113,6 +118,7 @@ impl Conv2d {
             groups,
             weight,
             bias,
+            _charge,
         })
     }
 
@@ -137,6 +143,8 @@ pub struct ConvTranspose2d {
     pub out_pad: usize,
     pub weight: Vec<f32>,
     pub bias: Option<Vec<f32>>,
+    /// `weight`/`bias` bytes in the tracked ledger (see [`crate::mem`]).
+    _charge: crate::mem::Charge,
 }
 
 impl ConvTranspose2d {
@@ -166,6 +174,9 @@ impl ConvTranspose2d {
                 "conv_transpose2d: bias size does not match out_ch".into(),
             ));
         }
+        let _charge = crate::mem::Charge::new(
+            crate::mem::vec_bytes(&weight) + bias.as_ref().map_or(0, crate::mem::vec_bytes),
+        );
         Ok(Self {
             in_ch,
             out_ch,
@@ -175,6 +186,7 @@ impl ConvTranspose2d {
             out_pad,
             weight,
             bias,
+            _charge,
         })
     }
 

@@ -216,6 +216,7 @@ pub fn channel_attention(
 
     // Normalised q and k.
     let mut qk = qkv.data[..2 * dim * n].to_vec();
+    let _qk_charge = crate::mem::Charge::of_vec(&qk);
     for_each_row(eng, &mut qk, n, |_, row| {
         let norm = dot8(row, row).sqrt() as f32;
         div_slice(row, norm.max(1e-12));
@@ -225,6 +226,7 @@ pub fn channel_attention(
 
     // attn[head][i][j], row-wise softmax.
     let mut attn = alloc::vec![0.0f32; dim * c];
+    let _attn_charge = crate::mem::Charge::of_vec(&attn);
     for_each_row(eng, &mut attn, c, |row_idx, row| {
         let head = row_idx / c;
         let qi = &q[row_idx * n..][..n];
@@ -250,6 +252,7 @@ pub fn channel_attention(
         let head = row_idx / c;
         let weights = &attn[row_idx * c..][..c];
         let mut acc = alloc::vec![0.0f64; n];
+        let _acc_charge = crate::mem::Charge::of_vec(&acc);
         for (j, &a) in weights.iter().enumerate() {
             axpy64(&mut acc, a as f64, &v[(head * c + j) * n..][..n]);
         }

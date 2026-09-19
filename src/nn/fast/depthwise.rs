@@ -110,6 +110,8 @@ pub struct PackedDepthwise {
     weight: Vec<f32>,
     /// `[cb][V]`.
     bias: Vec<f32>,
+    /// `weight` + `bias` bytes in the tracked ledger (see [`crate::mem`]).
+    _charge: crate::mem::Charge,
 }
 
 impl PackedDepthwise {
@@ -136,6 +138,8 @@ impl PackedDepthwise {
         if let Some(b) = &conv.bias {
             bias[..ch].copy_from_slice(b);
         }
+        let charge =
+            crate::mem::Charge::new(crate::mem::vec_bytes(&weight) + crate::mem::vec_bytes(&bias));
         Ok(Self {
             ch,
             kh: conv.kh,
@@ -144,6 +148,7 @@ impl PackedDepthwise {
             v,
             weight,
             bias,
+            _charge: charge,
         })
     }
 

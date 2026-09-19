@@ -374,6 +374,8 @@ pub struct PackedIntConv {
     /// `[ocb][V]`.
     bias: Vec<i32>,
     shift: Vec<u8>,
+    /// `weight` + `bias` + `shift` bytes in the tracked ledger (see [`crate::mem`]).
+    _charge: crate::mem::Charge,
 }
 
 impl PackedIntConv {
@@ -410,6 +412,10 @@ impl PackedIntConv {
         }
         let mut b = alloc::vec![0i32; ocb * v];
         b[..out_ch].copy_from_slice(bias);
+        let shift = shift.to_vec();
+        let charge = crate::mem::Charge::new(
+            crate::mem::vec_bytes(&w) + crate::mem::vec_bytes(&b) + crate::mem::vec_bytes(&shift),
+        );
         Ok(Self {
             in_ch,
             out_ch,
@@ -417,7 +423,8 @@ impl PackedIntConv {
             v,
             weight: w,
             bias: b,
-            shift: shift.to_vec(),
+            shift,
+            _charge: charge,
         })
     }
 
@@ -434,6 +441,7 @@ impl PackedIntConv {
         let (ph, pw) = (h + 2 * pad, w + 2 * pad);
         let pairs = self.in_ch.div_ceil(2);
         let mut xp = alloc::vec![0i16; pairs * ph * pw * 2];
+        let _xp_charge = crate::mem::Charge::of_vec(&xp);
         for c in 0..self.in_ch {
             let (p, half) = (c / 2, c % 2);
             for y in 0..h {
@@ -448,6 +456,7 @@ impl PackedIntConv {
         let ntaps = k * k;
         let wlen = pairs * ntaps * 2 * v;
         let mut blocked = alloc::vec![0i32; ocb * h * w * v];
+        let _blocked_charge = crate::mem::Charge::of_vec(&blocked);
         let tier = eng.tier;
         for_each_row(eng, &mut blocked, w * v, |idx, row| {
             let (ob, oy) = (idx / h, idx % h);

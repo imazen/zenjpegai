@@ -61,6 +61,7 @@ pub mod header;
 pub mod mans;
 #[cfg(not(feature = "unstable-internals"))]
 pub(crate) mod mans;
+mod mem;
 #[cfg(feature = "unstable-internals")]
 pub mod model;
 #[cfg(not(feature = "unstable-internals"))]
@@ -91,6 +92,9 @@ pub use decoder::output::{Picture, RgbImage, YuvImage};
 #[cfg(feature = "std")]
 pub use encoder::{EncodeLimits, EncodeParams, Encoder, estimate_encode_memory};
 pub use error::Error;
+pub use mem::MemoryReport;
+#[cfg(feature = "std")]
+pub use mem::MemoryWatch;
 // `Decoder::with_engine` / `Decoder::engine` (always public, `std`-gated only) take/return
 // `nn::fast::Engine`, so it must stay reachable regardless of `unstable-internals` — otherwise
 // those two methods would take a type callers could not name.

@@ -23,6 +23,8 @@ pub enum Error {
     InvalidArgument(&'static str),
     /// A resource limit set by the caller would be exceeded.
     LimitExceeded(&'static str),
+    /// A shared resource (`MemoryBudget`) cannot admit the job right now; retry may succeed.
+    ResourceBusy(&'static str),
     /// The caller's [`enough::Stop`] token asked the operation to stop (cancelled or timed out).
     Cancelled(enough::StopReason),
 }
@@ -37,6 +39,7 @@ impl fmt::Display for Error {
             Error::Model(s) => write!(f, "model error: {s}"),
             Error::InvalidArgument(s) => write!(f, "invalid argument: {s}"),
             Error::LimitExceeded(s) => write!(f, "limit exceeded: {s}"),
+            Error::ResourceBusy(s) => write!(f, "resource busy: {s}"),
             Error::Cancelled(r) => write!(f, "stopped: {r}"),
         }
     }

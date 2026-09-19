@@ -110,6 +110,8 @@ impl Cab {
 struct LayerNorm {
     weight: Vec<f32>,
     bias: Vec<f32>,
+    /// `weight` + `bias` bytes in the tracked ledger (see [`crate::mem`]).
+    _charge: crate::mem::Charge,
 }
 
 impl LayerNorm {
@@ -121,9 +123,13 @@ impl LayerNorm {
                 "{prefix}: unexpected layer norm shape"
             )));
         }
+        let (weight, bias) = (weight.data, bias.data);
+        let charge =
+            crate::mem::Charge::new(crate::mem::vec_bytes(&weight) + crate::mem::vec_bytes(&bias));
         Ok(Self {
-            weight: weight.data,
-            bias: bias.data,
+            weight,
+            bias,
+            _charge: charge,
         })
     }
 
@@ -151,6 +157,8 @@ struct TransformerBlock {
     ffn_dw: ConvLayer,
     ffn_out: ConvLayer,
     hidden: usize,
+    /// `temperature`'s bytes in the tracked ledger (see [`crate::mem`]).
+    _charge: crate::mem::Charge,
 }
 
 impl TransformerBlock {
@@ -169,17 +177,20 @@ impl TransformerBlock {
         let dw = |name: &str, c: usize| -> Result<ConvLayer> {
             ConvLayer::new(load::conv3x3(ck, &p(name), c, c, c, false)?, eng)
         };
+        let temperature = temperature.data;
+        let charge = crate::mem::Charge::of_vec(&temperature);
         Ok(Self {
             prep_norm: LayerNorm::load(ck, &p("prep_data.norm1"), dim)?,
             prep_conv1: pw("prep_data.conv1", dim, 3 * dim)?,
             prep_conv2: dw("prep_data.conv2", 3 * dim)?,
-            temperature: temperature.data,
+            temperature,
             attn_out: pw("attn.project_out", dim, dim)?,
             ffn_norm: LayerNorm::load(ck, &p("ffn.norm1"), dim)?,
             ffn_in: pw("ffn.project_in", dim, 2 * hidden)?,
             ffn_dw: dw("ffn.dwconv", 2 * hidden)?,
             ffn_out: pw("ffn.project_out", hidden, dim)?,
             hidden,
+            _charge: charge,
         })
     }
 

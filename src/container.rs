@@ -265,6 +265,7 @@ pub fn split_threads(payload: &[u8], num_threads: usize) -> Result<Vec<&[u8]>> {
 #[derive(Default)]
 pub struct CodestreamWriter {
     out: Vec<u8>,
+    charge: crate::mem::Charge,
     wrote_any: bool,
 }
 
@@ -274,6 +275,7 @@ impl CodestreamWriter {
         out.extend_from_slice(&(Marker::Soc as u16).to_be_bytes());
         Self {
             out,
+            charge: crate::mem::Charge::EMPTY,
             wrote_any: false,
         }
     }
@@ -292,6 +294,7 @@ impl CodestreamWriter {
         w.write_ue(payload.len() as u64);
         self.out.extend_from_slice(&w.finish());
         self.out.extend_from_slice(payload);
+        self.charge.resize(crate::mem::vec_bytes(&self.out));
         Ok(())
     }
 
@@ -299,6 +302,7 @@ impl CodestreamWriter {
     pub fn finish(mut self) -> Vec<u8> {
         self.out
             .extend_from_slice(&(Marker::Eoc as u16).to_be_bytes());
+        self.charge.resize(crate::mem::vec_bytes(&self.out));
         self.out
     }
 }

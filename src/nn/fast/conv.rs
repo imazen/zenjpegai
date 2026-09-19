@@ -394,6 +394,8 @@ pub struct PackedConv {
     v: usize,
     weight: Vec<f32>,
     bias: Vec<f32>,
+    /// `weight` + `bias` bytes in the tracked ledger (see [`crate::mem`]).
+    _charge: crate::mem::Charge,
 }
 
 impl PackedConv {
@@ -429,6 +431,9 @@ impl PackedConv {
             }
             w
         };
+        let bias = pack_bias(v, conv.out_ch, conv.bias.as_deref());
+        let charge =
+            crate::mem::Charge::new(crate::mem::vec_bytes(&weight) + crate::mem::vec_bytes(&bias));
         Ok(Self {
             in_ch: conv.in_ch,
             out_ch: conv.out_ch,
@@ -444,7 +449,8 @@ impl PackedConv {
             stride: conv.stride,
             v,
             weight,
-            bias: pack_bias(v, conv.out_ch, conv.bias.as_deref()),
+            bias,
+            _charge: charge,
         })
     }
 
@@ -617,13 +623,17 @@ fn border_buf(n: usize, f: impl FnOnce(&mut [f32])) {
     {
         use std::cell::RefCell;
         thread_local! {
-            static SCRATCH: RefCell<Vec<f32>> = const { RefCell::new(Vec::new()) };
+            /// The scratch and the ledger token for its capacity; both die at thread exit.
+            static SCRATCH: RefCell<(Vec<f32>, crate::mem::Charge)> =
+                const { RefCell::new((Vec::new(), crate::mem::Charge::EMPTY)) };
         }
         SCRATCH.with(|s| {
             let mut s = s.borrow_mut();
-            s.clear();
-            s.resize(n, 0.0);
-            f(s.as_mut_slice());
+            s.0.clear();
+            s.0.resize(n, 0.0);
+            let bytes = crate::mem::vec_bytes(&s.0);
+            s.1.resize(bytes);
+            f(s.0.as_mut_slice());
         });
     }
     #[cfg(not(feature = "std"))]
@@ -643,6 +653,8 @@ pub struct PackedConvTranspose {
     /// and their packed weights.
     phases: [[Phase; 2]; 2],
     bias: Vec<f32>,
+    /// `phases` + `bias` bytes in the tracked ledger (see [`crate::mem`]).
+    _charge: crate::mem::Charge,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -680,6 +692,17 @@ impl PackedConvTranspose {
                 });
             }
         }
+        let bias = pack_bias(v, conv.out_ch, conv.bias.as_deref());
+        let phase_bytes: usize = phases
+            .iter()
+            .flatten()
+            .map(|p| {
+                crate::mem::vec_bytes(&p.ky)
+                    + crate::mem::vec_bytes(&p.kx)
+                    + crate::mem::vec_bytes(&p.weight)
+            })
+            .sum();
+        let charge = crate::mem::Charge::new(phase_bytes + crate::mem::vec_bytes(&bias));
         Ok(Self {
             in_ch: conv.in_ch,
             out_ch: conv.out_ch,
@@ -688,7 +711,8 @@ impl PackedConvTranspose {
             out_pad: conv.out_pad,
             v,
             phases,
-            bias: pack_bias(v, conv.out_ch, conv.bias.as_deref()),
+            bias,
+            _charge: charge,
         })
     }
 

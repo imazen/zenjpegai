@@ -42,6 +42,12 @@ pub fn with_checkpoint<T>(
     load: impl FnOnce(&crate::weights::Checkpoint<'_>) -> crate::error::Result<T>,
 ) -> crate::error::Result<T> {
     let file = src.read(rel)?;
+    // Owned checkpoint bytes (a `.pth` read off disk is the biggest transient of a first
+    // decode); a borrowed bundle's bytes are the caller's and aren't counted.
+    let _file_charge = match &file {
+        alloc::borrow::Cow::Owned(b) => crate::mem::Charge::of_vec(b),
+        alloc::borrow::Cow::Borrowed(_) => crate::mem::Charge::EMPTY,
+    };
     let ck = crate::weights::Checkpoint::parse(&file)?;
     let out = load(&ck)?;
     src.accessed(rel, &ck.touched_names());

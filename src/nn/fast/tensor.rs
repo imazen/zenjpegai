@@ -29,6 +29,11 @@ mod pool {
     /// Most floats parked at once.
     static MAX_FLOATS: AtomicUsize = AtomicUsize::new(DEFAULT_MAX_FLOATS);
 
+    /// Bytes of one parked `Vec<f32>`.
+    fn cap_bytes(buf: &Vec<f32>) -> usize {
+        crate::mem::vec_bytes(buf)
+    }
+
     pub fn set_limit(floats: usize) {
         MAX_FLOATS.store(floats, Ordering::Relaxed);
         // Shrink to the new limit, smallest buffers first (the policy of `give`).
@@ -37,7 +42,8 @@ mod pool {
             let Some((i, _)) = pool.iter().enumerate().min_by_key(|(_, b)| b.capacity()) else {
                 break;
             };
-            pool.swap_remove(i);
+            let buf = pool.swap_remove(i);
+            crate::mem::unparked(cap_bytes(&buf));
         }
     }
 
@@ -50,6 +56,7 @@ mod pool {
     static POOL: Mutex<Vec<Vec<f32>>> = Mutex::new(Vec::new());
 
     /// A buffer of length `n` with arbitrary (but initialised) contents, if one fits.
+    /// Leaves the pool's side of the tracked ledger; the caller's `Charge` marks it live.
     pub fn take(n: usize) -> Option<Vec<f32>> {
         if n < MIN_LEN {
             return None;
@@ -62,13 +69,18 @@ mod pool {
             .filter(|(_, b)| b.capacity() >= n && b.capacity() / 2 <= n)
             .min_by_key(|(_, b)| b.capacity())
             .map(|(i, _)| i)?;
-        let mut buf = pool.swap_remove(best);
+        let buf = pool.swap_remove(best);
+        crate::mem::unparked(cap_bytes(&buf));
         drop(pool);
+        let mut buf = buf;
         buf.resize(n, 0.0);
         Some(buf)
     }
 
-    pub fn give(buf: Vec<f32>) {
+    /// Park `buf` if the pool takes it; `charge` is the live-side charge of its bytes.
+    /// Accepted: the bytes move live → parked. Rejected or lock lost: both drop, the bytes
+    /// leave the ledger.
+    pub fn give(buf: Vec<f32>, charge: crate::mem::Charge) {
         if buf.capacity() < MIN_LEN {
             return;
         }
@@ -90,13 +102,17 @@ mod pool {
             if pool[i].capacity() >= buf.capacity() {
                 return;
             }
-            pool.swap_remove(i);
+            let evicted = pool.swap_remove(i);
+            crate::mem::unparked(cap_bytes(&evicted));
         }
         pool.push(buf);
+        crate::mem::parked_move(charge.release());
     }
 
     pub fn clear() {
         if let Ok(mut pool) = POOL.lock() {
+            let parked: usize = pool.iter().map(cap_bytes).sum();
+            crate::mem::unparked(parked);
             pool.clear();
         }
     }
@@ -133,6 +149,9 @@ pub struct BTensor {
     /// Block size (8 or 16).
     pub v: usize,
     pub data: Vec<f32>,
+    /// `data`'s bytes in the tracked ledger (see [`crate::mem`]). On drop the bytes move to
+    /// the pool's side if `pool::give` accepts the buffer.
+    charge: crate::mem::Charge,
 }
 
 impl Clone for BTensor {
@@ -146,7 +165,10 @@ impl Clone for BTensor {
 impl Drop for BTensor {
     fn drop(&mut self) {
         #[cfg(feature = "std")]
-        pool::give(core::mem::take(&mut self.data));
+        pool::give(
+            core::mem::take(&mut self.data),
+            core::mem::take(&mut self.charge),
+        );
     }
 }
 
@@ -154,14 +176,25 @@ impl BTensor {
     fn scratch_unchecked(c: usize, h: usize, w: usize, v: usize, n: usize) -> Self {
         #[cfg(feature = "std")]
         if let Some(data) = pool::take(n) {
-            return Self { c, h, w, v, data };
+            let charge = crate::mem::Charge::of_vec(&data);
+            return Self {
+                c,
+                h,
+                w,
+                v,
+                data,
+                charge,
+            };
         }
+        let data = alloc::vec![0.0; n];
+        let charge = crate::mem::Charge::of_vec(&data);
         Self {
             c,
             h,
             w,
             v,
-            data: alloc::vec![0.0; n],
+            data,
+            charge,
         }
     }
 
@@ -177,7 +210,15 @@ impl BTensor {
             .ok_or(Error::LimitExceeded("tensor size overflow"))?;
         #[cfg(feature = "std")]
         if let Some(data) = pool::take(n) {
-            return Ok(Self { c, h, w, v, data });
+            let charge = crate::mem::Charge::of_vec(&data);
+            return Ok(Self {
+                c,
+                h,
+                w,
+                v,
+                data,
+                charge,
+            });
         }
         Self::zeros(c, h, w, v)
     }
@@ -196,7 +237,15 @@ impl BTensor {
         // `vec![0.0; n]` is one `calloc`: fresh pages arrive zeroed from the kernel and are only
         // touched by whoever writes them first. Reserve-then-fill would write everything twice.
         let data = alloc::vec![0.0f32; n];
-        Ok(Self { c, h, w, v, data })
+        let charge = crate::mem::Charge::of_vec(&data);
+        Ok(Self {
+            c,
+            h,
+            w,
+            v,
+            data,
+            charge,
+        })
     }
 
     pub fn from_planar(x: &Tensor<f32>, v: usize) -> Result<Self> {
@@ -370,12 +419,14 @@ impl BTensor {
         for p in parts {
             data.extend_from_slice(&p.data);
         }
+        let charge = crate::mem::Charge::of_vec(&data);
         Ok(Self {
             c: parts.iter().map(|p| p.c).sum(),
             h,
             w,
             v,
             data,
+            charge,
         })
     }
 
@@ -393,12 +444,15 @@ impl BTensor {
         }
         let per_block = self.h * self.w * self.v;
         let (b0, b1) = (c0 / self.v, c1.div_ceil(self.v));
+        let data = self.data[b0 * per_block..b1 * per_block].to_vec();
+        let charge = crate::mem::Charge::of_vec(&data);
         Ok(Self {
             c: c1 - c0,
             h: self.h,
             w: self.w,
             v: self.v,
-            data: self.data[b0 * per_block..b1 * per_block].to_vec(),
+            data,
+            charge,
         })
     }
 }

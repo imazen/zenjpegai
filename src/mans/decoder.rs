@@ -118,6 +118,8 @@ pub struct AnsDecoder<'t> {
     buf: Vec<u8>,
     streams: Vec<Stream>,
     z_preprocess: [u16; 512],
+    /// `buf`'s bytes in the tracked ledger (see [`crate::mem`]).
+    _charge: crate::mem::Charge,
     /// Multi-threaded calls run their ANS threads on the rayon pool.
     parallel: bool,
 }
@@ -142,11 +144,13 @@ impl<'t> AnsDecoder<'t> {
             .iter()
             .map(|&end| Stream::open(&buf, end, two_states))
             .collect::<Result<Vec<_>>>()?;
+        let charge = crate::mem::Charge::of_vec(&buf);
         Ok(Self {
             tables,
             buf,
             streams,
             z_preprocess: z_decode_preprocess(),
+            _charge: charge,
             parallel: false,
         })
     }
@@ -220,6 +224,7 @@ impl<'t> AnsDecoder<'t> {
         // Thread `i` owns `(len - 1 - i) / n + 1` positions (for `i < len`), all `<= per`.
         let per = len.div_ceil(n);
         let mut scratch = alloc::vec![0i16; n * per];
+        let _scratch_charge = crate::mem::Charge::of_vec(&scratch);
         let tables = self.tables;
         let buf = &self.buf;
         self.streams

@@ -5,6 +5,7 @@
 use alloc::vec::Vec;
 
 use crate::error::{Error, Result};
+use crate::mem::Charge;
 
 /// `[c, h, w]` tensor with contiguous row-major storage.
 #[derive(Clone, Debug, PartialEq)]
@@ -13,6 +14,8 @@ pub struct Tensor<T> {
     pub h: usize,
     pub w: usize,
     pub data: Vec<T>,
+    /// `data`'s bytes in the tracked ledger (see [`crate::mem`]); not part of the value.
+    charge: Charge,
 }
 
 impl<T: Copy + Default> Tensor<T> {
@@ -26,7 +29,14 @@ impl<T: Copy + Default> Tensor<T> {
         data.try_reserve_exact(n)
             .map_err(|_| Error::LimitExceeded("out of memory"))?;
         data.resize(n, T::default());
-        Ok(Self { c, h, w, data })
+        let charge = Charge::of_vec(&data);
+        Ok(Self {
+            c,
+            h,
+            w,
+            data,
+            charge,
+        })
     }
 
     pub fn from_vec(c: usize, h: usize, w: usize, data: Vec<T>) -> Result<Self> {
@@ -35,7 +45,23 @@ impl<T: Copy + Default> Tensor<T> {
                 "tensor data length does not match its shape",
             ));
         }
-        Ok(Self { c, h, w, data })
+        let charge = Charge::of_vec(&data);
+        Ok(Self {
+            c,
+            h,
+            w,
+            data,
+            charge,
+        })
+    }
+
+    /// Split into the buffer and its tracked-bytes token: callers that need the bare `Vec`
+    /// keep it tracked by holding the [`Charge`] for the `Vec`'s lifetime.
+    pub(crate) fn into_parts(mut self) -> (Vec<T>, Charge) {
+        (
+            core::mem::take(&mut self.data),
+            core::mem::take(&mut self.charge),
+        )
     }
 
     #[inline]

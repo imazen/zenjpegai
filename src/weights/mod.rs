@@ -62,6 +62,8 @@ pub struct Checkpoint<'a> {
 pub struct Tensor<T> {
     pub shape: Vec<usize>,
     pub data: Vec<T>,
+    /// `data`'s bytes in the tracked ledger (see [`crate::mem`]); not part of the value.
+    pub(crate) charge: crate::mem::Charge,
 }
 
 impl<T> Tensor<T> {
@@ -277,59 +279,91 @@ impl<'a> Checkpoint<'a> {
             == DType::F16
         {
             let (shape, b) = self.bytes(name, DType::F16)?;
+            let _b_charge = crate::mem::Charge::of_vec(&b);
             let data = b
                 .as_chunks::<2>()
                 .0
                 .iter()
                 .map(|c| f16::f16_to_f32(u16::from_le_bytes(*c)))
                 .collect();
-            return Ok(Tensor { shape, data });
+            let charge = crate::mem::Charge::of_vec(&data);
+            return Ok(Tensor {
+                shape,
+                data,
+                charge,
+            });
         }
         let (shape, b) = self.bytes(name, DType::F32)?;
-        let data = b
+        let _b_charge = crate::mem::Charge::of_vec(&b);
+        let data: Vec<f32> = b
             .as_chunks::<4>()
             .0
             .iter()
             .map(|c| f32::from_le_bytes(*c))
             .collect();
-        Ok(Tensor { shape, data })
+        let charge = crate::mem::Charge::of_vec(&data);
+        Ok(Tensor {
+            shape,
+            data,
+            charge,
+        })
     }
 
     pub fn i32(&self, name: &str) -> Result<Tensor<i32>> {
         let (shape, b) = self.bytes(name, DType::I32)?;
-        let data = b
+        let _b_charge = crate::mem::Charge::of_vec(&b);
+        let data: Vec<i32> = b
             .as_chunks::<4>()
             .0
             .iter()
             .map(|c| i32::from_le_bytes(*c))
             .collect();
-        Ok(Tensor { shape, data })
+        let charge = crate::mem::Charge::of_vec(&data);
+        Ok(Tensor {
+            shape,
+            data,
+            charge,
+        })
     }
 
     pub fn i64(&self, name: &str) -> Result<Tensor<i64>> {
         let (shape, b) = self.bytes(name, DType::I64)?;
-        let data = b
+        let _b_charge = crate::mem::Charge::of_vec(&b);
+        let data: Vec<i64> = b
             .as_chunks::<8>()
             .0
             .iter()
             .map(|c| i64::from_le_bytes(*c))
             .collect();
-        Ok(Tensor { shape, data })
+        let charge = crate::mem::Charge::of_vec(&data);
+        Ok(Tensor {
+            shape,
+            data,
+            charge,
+        })
     }
 
     pub fn i8(&self, name: &str) -> Result<Tensor<i8>> {
         let (shape, b) = self.bytes(name, DType::I8)?;
+        let _b_charge = crate::mem::Charge::of_vec(&b);
+        let data: Vec<i8> = b.into_iter().map(|v| v as i8).collect();
+        let charge = crate::mem::Charge::of_vec(&data);
         Ok(Tensor {
             shape,
-            data: b.into_iter().map(|v| v as i8).collect(),
+            data,
+            charge,
         })
     }
 
     pub fn bool(&self, name: &str) -> Result<Tensor<bool>> {
         let (shape, b) = self.bytes(name, DType::Bool)?;
+        let _b_charge = crate::mem::Charge::of_vec(&b);
+        let data: Vec<bool> = b.into_iter().map(|v| v != 0).collect();
+        let charge = crate::mem::Charge::of_vec(&data);
         Ok(Tensor {
             shape,
-            data: b.into_iter().map(|v| v != 0).collect(),
+            data,
+            charge,
         })
     }
 }

@@ -215,7 +215,11 @@ pub(crate) fn to_rgb_planes_owned_par(
     let kby = KBY as f32;
     let gu = (KB * KBY / KG) as f32;
     let gv = (KR * KRY / KG) as f32;
-    let (mut r, mut g, mut b) = (planes.y.data, planes.u.data, planes.v.data);
+    // `into_parts` keeps the three plane buffers' charges alive until the `RgbPlanes` is
+    // built below (the charges die at the end of the function, after the move).
+    let (mut r, _r_charge) = planes.y.into_parts();
+    let (mut g, _g_charge) = planes.u.into_parts();
+    let (mut b, _b_charge) = planes.v.into_parts();
     convert_pixels(parallel, &mut r, &mut g, &mut b, |(y, u, v)| {
         // to_RGB_: [0, 255] -> [0, 1], convert, back to [0, 255]; then clip_data_.
         let y = convert_range(y, 255.0, 1.0);
@@ -308,6 +312,7 @@ pub fn quantize_plane(data: &[f32], bit_depth: u8) -> Vec<u16> {
 pub(crate) fn quantize_plane_par(parallel: bool, data: &[f32], bit_depth: u8) -> Vec<u16> {
     let max = ((1u32 << bit_depth) - 1) as f32;
     let mut out = alloc::vec![0u16; data.len()];
+    let _out_charge = crate::mem::Charge::of_vec(&out);
     crate::decoder::stats::for_each_chunk(parallel, &mut out, 16384, |i, chunk| {
         let base = i * 16384;
         for (j, d) in chunk.iter_mut().enumerate() {
@@ -354,6 +359,11 @@ pub(crate) fn finish_par(parallel: bool, hdr: &PictureHeader, planes: &Planes) -
                     )
                 },
             );
+            let _planes_charge = crate::mem::Charge::new(
+                crate::mem::vec_bytes(&y)
+                    + crate::mem::vec_bytes(&uv.0)
+                    + crate::mem::vec_bytes(&uv.1),
+            );
             Ok(Picture::Yuv(YuvImage {
                 width: planes.y.w,
                 height: planes.y.h,
@@ -386,7 +396,14 @@ pub(crate) fn quantize_par(parallel: bool, rgb: &RgbPlanes, bit_depth: u8) -> Re
             .round_ties_even()
             .clamp(0.0, max) as u16
     };
+    // The input planes and the output image coexist for the quantise — charge both.
+    let _rgb_charge = crate::mem::Charge::new(
+        crate::mem::vec_bytes(&rgb.r)
+            + crate::mem::vec_bytes(&rgb.g)
+            + crate::mem::vec_bytes(&rgb.b),
+    );
     let mut data = alloc::vec![0u16; rgb.r.len() * 3];
+    let _data_charge = crate::mem::Charge::of_vec(&data);
     crate::decoder::stats::for_each_chunk(parallel, &mut data, 16384 * 3, |i, chunk| {
         let base = i * 16384;
         for (j, d) in chunk.as_chunks_mut::<3>().0.iter_mut().enumerate() {

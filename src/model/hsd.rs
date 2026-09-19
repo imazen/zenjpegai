@@ -32,6 +32,8 @@ struct QuantConv {
     bias: Vec<i32>,
     shift: Vec<u8>,
     packed: PackedIntConv,
+    /// `weight` + `bias` + `shift` bytes in the tracked ledger (see [`crate::mem`]).
+    _charge: crate::mem::Charge,
 }
 
 impl QuantConv {
@@ -78,14 +80,21 @@ impl QuantConv {
             &shift,
             eng.tier.block(),
         )?;
+        let (weight, bias) = (weight.data, bias.data);
+        let charge = crate::mem::Charge::new(
+            crate::mem::vec_bytes(&weight)
+                + crate::mem::vec_bytes(&bias)
+                + crate::mem::vec_bytes(&shift),
+        );
         Ok(Self {
             out_ch,
             in_ch,
             k,
-            weight: weight.data,
-            bias: bias.data,
+            weight,
+            bias,
             shift,
             packed,
+            _charge: charge,
         })
     }
 

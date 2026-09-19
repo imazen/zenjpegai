@@ -234,7 +234,10 @@ pub fn decode_z(
     wz: usize,
 ) -> Result<Tensor<i8>> {
     let mut symbols = alloc::vec![0u8; model.chs * hz * wz];
-    dec.decode_z(&model.z_cdfs, hz * wz, &mut symbols)?;
+    {
+        let _symbols_charge = crate::mem::Charge::of_vec(&symbols);
+        dec.decode_z(&model.z_cdfs, hz * wz, &mut symbols)?;
+    }
     let data = symbols
         .into_iter()
         .map(|s| (s as i32 - Z_OFFSET) as i8)
@@ -388,6 +391,7 @@ pub(crate) fn decode_component_body(
                 return Ok(None);
             }
             let mut tile = alloc::vec![0i16; chs * rh * rw];
+            let _tile_charge = crate::mem::Charge::of_vec(&tile);
             decode_region_into(
                 &ctx,
                 &mut tile,
@@ -483,6 +487,8 @@ fn decode_region_into(
     // `sigma`/`coded` for every coded channel of the region, region-local `[ch][y][x]`.
     let mut sigma = alloc::vec![0u8; ctx.num_chs * rh * rw];
     let mut coded = alloc::vec![false; ctx.num_chs * rh * rw];
+    let _gather_charge =
+        crate::mem::Charge::new(crate::mem::vec_bytes(&sigma) + crate::mem::vec_bytes(&coded));
     for_each_chunk(inner_par, &mut sigma, rh * rw, |ch, block| {
         for (y, drow) in block.chunks_exact_mut(rw).enumerate() {
             let src = (ch * lh + gy + y) * lw + gx;
@@ -502,12 +508,14 @@ fn decode_region_into(
     let t = Tick::now();
     let (sy, sx) = (scatter.y, scatter.x);
     let mut symbols: Vec<i16> = Vec::new();
+    let mut symbols_charge = crate::mem::Charge::EMPTY;
     for c0 in (0..ctx.num_decode).step_by(step) {
         stop.check()?;
         let c1 = (c0 + step).min(ctx.num_chs);
         let n = (c1 - c0) * rh * rw;
         symbols.clear();
         symbols.resize(n, 0);
+        symbols_charge.resize(crate::mem::vec_bytes(&symbols));
         dec.decode_residual(
             &sigma[c0 * rh * rw..][..n],
             &coded[c0 * rh * rw..][..n],

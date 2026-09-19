@@ -21,6 +21,8 @@ struct Stream {
     bit_pos: u32,
     state1: u8,
     state2: u8,
+    /// `out`'s bytes in the tracked ledger (see [`crate::mem`]).
+    charge: crate::mem::Charge,
 }
 
 impl Stream {
@@ -37,6 +39,7 @@ impl Stream {
         let nbytes = (self.bit_pos >> 3) as usize;
         self.out
             .extend_from_slice(&self.head.to_le_bytes()[..nbytes]);
+        self.charge.resize(crate::mem::vec_bytes(&self.out));
         self.head = if nbytes == 8 {
             0
         } else {
@@ -55,6 +58,7 @@ impl Stream {
         let nbytes = self.bit_pos.div_ceil(8) as usize;
         self.out
             .extend_from_slice(&self.head.to_le_bytes()[..nbytes]);
+        self.charge.resize(crate::mem::vec_bytes(&self.out));
         self.out
     }
 }
