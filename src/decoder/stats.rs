@@ -331,3 +331,80 @@ pub struct DecodeStats {
     /// Whole call.
     pub total: Duration,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::sync::atomic::AtomicUsize;
+    use enough::Stop;
+
+    /// The counting `Stop` the api_ref cancellation tests use: `Ok` for the first
+    /// `after` checks, `Err(Cancelled)` from then on, counting every call.
+    struct Counting {
+        after: usize,
+        checks: AtomicUsize,
+    }
+
+    impl Counting {
+        fn new(after: usize) -> Self {
+            Self {
+                after,
+                checks: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl Stop for Counting {
+        fn check(&self) -> core::result::Result<(), enough::StopReason> {
+            if self.checks.fetch_add(1, Ordering::Relaxed) >= self.after {
+                Err(enough::StopReason::Cancelled)
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[test]
+    fn gate_sticks_after_the_first_trip() {
+        let inner = Counting::new(3);
+        let gate = Gate::new(&inner);
+        for _ in 0..3 {
+            assert!(gate.check().is_ok());
+        }
+        assert_eq!(gate.check(), Err(enough::StopReason::Cancelled));
+        // Sticky: every later check gets the stored reason without touching `inner`.
+        for _ in 0..10 {
+            assert_eq!(gate.check(), Err(enough::StopReason::Cancelled));
+        }
+        assert_eq!(inner.checks.load(Ordering::Relaxed), 4);
+    }
+
+    #[test]
+    fn gate_delegates_may_stop() {
+        assert!(!Gate::new(&enough::Unstoppable).may_stop());
+        assert!(Gate::new(&Counting::new(0)).may_stop());
+    }
+
+    /// Pooled tasks race on the gate: `inner` must still see exactly `after + 1` checks —
+    /// the same count a serial decode produces — no matter how the tasks interleave.
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn gate_check_count_is_deterministic_under_rayon() {
+        for _ in 0..32 {
+            let inner = Counting::new(7);
+            let gate = Gate::new(&inner);
+            let results = AtomicUsize::new(0);
+            let hammer = || {
+                for _ in 0..200 {
+                    if gate.check().is_err() {
+                        results.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            };
+            rayon::join(hammer, hammer);
+            // `inner` saw 7 Ok + 1 Err; every later check gets the stored Err.
+            assert_eq!(inner.checks.load(Ordering::Relaxed), 8);
+            assert_eq!(results.load(Ordering::Relaxed), 400 - 7);
+        }
+    }
+}

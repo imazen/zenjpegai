@@ -338,6 +338,36 @@ vectors! {
     img30_base_on_bpp100 => "img30_base_on_bpp100",
 }
 
+/// A single-thread `Decoder` and a pooled one must produce identical samples. The serial
+/// arms of the pooled helpers (component chains, per-region residual tiles, synthesis
+/// tiles) are a different code path, not just a slower one — and region streams are where
+/// the parallel gather/scatter split (`decode_region_into`'s separate global `gather` and
+/// tile-local `scatter` origins) matters most.
+#[test]
+fn serial_and_pooled_decoders_agree_bit_for_bit() {
+    for name in [
+        "img01_base_off_depregions_m1",
+        "img01_base_off_indregions_m1",
+        "img01_base_off_indregions_threads8_m2",
+        "img30_base_qmap_threads8_bpp100",
+        "img30_base_off_bpp050",
+        "img01_base_off_bpp050",
+    ] {
+        let stream = std::fs::read(vector_dir(name).join("stream.bits")).unwrap();
+        let samples = |parallel: bool| {
+            let dec = zenjpegai::Decoder::with_engine(
+                ref_root().join("models"),
+                Engine::with(Tier::detect(), parallel),
+            );
+            match dec.decode_picture(&stream).unwrap() {
+                Picture::Rgb(img) => img.data,
+                Picture::Yuv(img) => [img.y, img.u, img.v].concat(),
+            }
+        };
+        assert_eq!(samples(false), samples(true), "{name}");
+    }
+}
+
 /// Every SIMD tier, threaded or not, must decode a real stream to identical bits.
 #[test]
 fn tiers_and_threads_agree_bit_for_bit() {
