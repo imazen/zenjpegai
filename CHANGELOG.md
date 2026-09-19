@@ -279,6 +279,14 @@
 - Repository skeleton.
 
 ### Fixed
+- Fuzz infrastructure (review pass): `tests/fuzz_regression.rs` panics on an
+  unreadable `fuzz/regression/` (it previously replayed as an empty success) and
+  now also replays the committed `fuzz/seeds/` streams through every entry
+  point; the CI fuzz job and `just fuzz` pin `--target x86_64-unknown-linux-gnu`
+  (cargo-fuzz 0.13 otherwise defaults to musl, installed on neither). Review
+  coverage added for the d4serial helpers: `Gate` determinism/stickiness
+  tests under rayon, and a serial-vs-pooled full-decode bit-equality test over
+  the region/qmap/thread vectors (`serial_and_pooled_decoders_agree_bit_for_bit`).
 - GPU plan cache invalidated mid-run on heterogenous tiles (`gpu/`): `Pool::fit` bumped
   `generation` on every slot replacement, and the plan cache drops everything when the
   workspace stamp moves — so a multi-tile run like 2048x2048 (tiny edge tiles alternating with

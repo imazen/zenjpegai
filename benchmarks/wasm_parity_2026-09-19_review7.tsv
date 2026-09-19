@@ -1,0 +1,92 @@
+# commit 93b4f2d8c472 host dev node v26.7.0
+# columns: differing samples / total / max abs diff; wasm = Wasm128 tier, unfused multiply-add
+stream	total_samples	wasm_vs_ref	wasm_vs_ref_max	native_vs_ref	native_vs_ref_max	wasm_vs_native	wasm_vs_native_max	wasm_scalar_identical
+crop277_c420_efe_f4c6_f3c3_nl	167031	4	1	3	1	1	1	yes
+crop277_efe_f4c5_f3c6_nl	167031	4	1	5	1	1	1	yes
+crop277_s420_efe_f3c5_f4c7_nl	unsupported: error: /mnt/v/output/zenjpegai/reference/vectors/crop277_s420_efe_f3c5_f4c7_nl//stream.bits decodes to YUV 277x201 (chro
+crop277_s422_efe_f3c6_f4c2_nl	unsupported: error: /mnt/v/output/zenjpegai/reference/vectors/crop277_s422_efe_f3c6_f4c2_nl//stream.bits decodes to YUV 277x201 (chro
+enc_img01_bop_m1_b0	no reference decode (encoder vector)
+enc_img01_bop_m1_b0_depregions	8803200	502	1	498	1	176	1	yes
+enc_img01_bop_m1_b0_indregions	no reference decode (encoder vector)
+enc_img01_bop_m1_b0_y80u40	no reference decode (encoder vector)
+enc_img30_bop_m0_bm1069	1491840	56	1	59	1	23	1	yes
+enc_img30_bop_m1_b0	no reference decode (encoder vector)
+enc_img30_bop_m1_b0_grfsonly	no reference decode (encoder vector)
+enc_img30_bop_m1_b0_lef	no reference decode (encoder vector)
+enc_img30_bop_m1_b0_lsbs	no reference decode (encoder vector)
+enc_img30_bop_m1_b0_qmap	no reference decode (encoder vector)
+enc_img30_bop_m1_b0_qmap_rvs	no reference decode (encoder vector)
+enc_img30_bop_m1_b0_rvs	no reference decode (encoder vector)
+enc_img30_bop_m1_b0_rvsonly	no reference decode (encoder vector)
+enc_img30_bop_m1_b0_threads8	no reference decode (encoder vector)
+enc_img30_bop_m1_b0_uv0	no reference decode (encoder vector)
+enc_img30_bop_m1_b0_y64u32	no reference decode (encoder vector)
+enc_img30_bop_m1_b0_y96u48_rvs	no reference decode (encoder vector)
+enc_img30_bop_m1_bm300	no reference decode (encoder vector)
+enc_img30_bop_m1_bm300_y96u48	no reference decode (encoder vector)
+enc_img30_bop_m3_b400	no reference decode (encoder vector)
+enc_img30_hop_m2_b0	no reference decode (encoder vector)
+enc_img30_hop_m3_bm1069	1491840	54	1	51	1	25	1	yes
+enc_img30_sop_m0_bm300	no reference decode (encoder vector)
+img01_base_eiccitiles_lef_bpp050	8803200	456	1	427	1	191	1	yes
+img01_base_off_bpp012	8803200	410	1	393	1	173	1	yes
+img01_base_off_bpp025	8803200	410	1	434	1	162	1	yes
+img01_base_off_bpp050	8803200	419	1	398	1	153	1	yes
+img01_base_off_bpp075	8803200	401	1	388	1	169	1	yes
+img01_base_off_bpp100	8803200	422	1	439	1	185	1	yes
+img01_base_off_depregions_m1	8803200	443	1	404	1	183	1	yes
+img01_base_off_indregions_m1	8803200	412	1	404	1	176	1	yes
+img01_base_off_indregions_threads8_m2	8803200	376	1	396	1	170	1	yes
+img01_base_off_threads8_bpp050	8803200	419	1	398	1	153	1	yes
+img01_base_on_bpp012	8803200	350	1	359	1	195	1	yes
+img01_base_on_bpp025	8803200	434	1	423	1	193	1	yes
+img01_base_on_bpp050	8803200	441	1	441	1	214	1	yes
+img01_base_on_bpp075	8803200	429	1	430	1	193	1	yes
+img01_base_on_bpp100	8803200	374	1	383	1	191	1	yes
+img01_efe_f2c0_f3c0_nl	8803200	419	1	384	1	157	1	yes
+img30_base_efelin_bpp050	1491840	62	1	66	1	16	1	yes
+img30_base_efenl_bpp050	1491840	73	1	73	1	30	1	yes
+img30_base_eicci_bpp050	1491840	57	1	53	1	28	1	yes
+img30_base_grfsonly_bpp075	1491840	51	1	51	1	24	1	yes
+img30_base_lef_bpp050	1491840	63	1	58	1	27	1	yes
+img30_base_lsbs_bpp050	1491840	45	1	47	1	24	1	yes
+img30_base_lsbs_rvs_bpp025	1491840	50	1	54	1	24	1	yes
+img30_base_off_bpp012	1491840	54	1	51	1	19	1	yes
+img30_base_off_bpp025	1491840	59	1	64	1	29	1	yes
+img30_base_off_bpp050	1491840	73	1	73	1	30	1	yes
+img30_base_off_bpp075	1491840	58	1	53	1	37	1	yes
+img30_base_off_bpp100	1491840	55	1	67	1	22	1	yes
+img30_base_off_c420_bpp050	1491840	55	1	51	1	18	1	yes
+img30_base_off_c422_bpp050	1491840	46	1	50	1	14	1	yes
+img30_base_off_display_m1	1385427	63	1	64	1	31	1	yes
+img30_base_off_udi_m1	1491840	64	1	67	1	33	1	yes
+img30_base_on_bpp012	1491840	62	1	54	1	34	1	yes
+img30_base_on_bpp025	1491840	71	1	65	1	36	1	yes
+img30_base_on_bpp050	1491840	67	1	62	1	17	1	yes
+img30_base_on_bpp075	1491840	52	1	44	1	22	1	yes
+img30_base_on_bpp100	1491840	55	1	56	1	35	1	yes
+img30_base_qmap_bpp050	1491840	65	1	58	1	23	1	yes
+img30_base_qmap_rvs_bpp025	1491840	56	1	52	1	26	1	yes
+img30_base_qmap_threads8_bpp100	1491840	41	1	46	1	21	1	yes
+img30_base_rvs_bpp050	1491840	43	1	51	1	18	1	yes
+img30_base_rvsonly_bpp050	1491840	48	1	54	1	20	1	yes
+img30_c420_efe_dctif	1491840	64	1	67	1	21	1	yes
+img30_c420_efe_f1c0_f2c1	1491840	50	1	45	1	17	1	yes
+img30_c420_efe_f3c5_f4c7_nl	1491840	59	1	63	1	24	1	yes
+img30_c422_efe_f3c2_f2c4	1491840	71	1	66	1	33	1	yes
+img30cropyuv420_base_off_bpp075	unsupported: error: /mnt/v/output/zenjpegai/reference/vectors/img30cropyuv420_base_off_bpp075//stream.bits decodes to YUV 203x301 (ch
+img30_efe_f2c1_f2c2_nl	1491840	55	1	60	1	21	1	yes
+img30_efe_f3c3_f3c4_nl	1491840	61	1	55	1	28	1	yes
+img30_efe_f3c5_f4c7_nl	1491840	53	1	47	1	28	1	yes
+img30_efe_f4c6_f1c5	1491840	41	1	50	1	23	1	yes
+img30_high_off_bpp050	1491840	50	1	41	1	21	1	yes
+img30_s420_efe_f1c0_f2c1_nl	unsupported: error: /mnt/v/output/zenjpegai/reference/vectors/img30_s420_efe_f1c0_f2c1_nl//stream.bits decodes to YUV 560x888 (chroma
+img30_simple_lsbs_rvs_bpp100	1491840	58	1	57	1	31	1	yes
+img30_simple_off_bpp050	1491840	49	1	49	1	24	1	yes
+img30yuv420b10_base_off_bpp050	unsupported: error: /mnt/v/output/zenjpegai/reference/vectors/img30yuv420b10_base_off_bpp050//stream.bits decodes to YUV 560x888 (chr
+img30yuv420_base_eicci	unsupported: error: Error: UnexpectedEof      at src/decoder/api.rs:245  
+img30yuv420_base_off_bpp050	unsupported: error: /mnt/v/output/zenjpegai/reference/vectors/img30yuv420_base_off_bpp050//stream.bits decodes to YUV 560x888 (chroma
+img30yuv422_base_eicci	unsupported: error: /mnt/v/output/zenjpegai/reference/vectors/img30yuv422_base_eicci//stream.bits decodes to YUV 560x888 (chroma 280x
+img30yuv422_base_off_bpp050	unsupported: error: /mnt/v/output/zenjpegai/reference/vectors/img30yuv422_base_off_bpp050//stream.bits decodes to YUV 560x888 (chroma
+img30yuv444b10_base_off_bpp050	unsupported: error: /mnt/v/output/zenjpegai/reference/vectors/img30yuv444b10_base_off_bpp050//stream.bits decodes to YUV 560x888 (chr
+img30yuv444_base_off_bpp050	unsupported: error: /mnt/v/output/zenjpegai/reference/vectors/img30yuv444_base_off_bpp050//stream.bits decodes to YUV 560x888 (chroma

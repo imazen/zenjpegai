@@ -1,0 +1,31 @@
+# commit 93b4f2d8c472 host-cpu AMD Ryzen 9 9950X3D 16-Core Processor threads 32 date 2026-09-19T05:27:02Z
+# ref = stock reference decoder, its own TOTAL (excludes model load); wall = whole process
+# zen = zenjpegai decode, steady state (models loaded) = min of runs 1..; first = run 0 incl. model load
+stream	decoder	threads	run	decode_ms	process_wall_ms
+img30_base_off_bpp050	reference	1	1	220.7	1256
+img30_base_off_bpp050	reference	1	2	212.3	1187
+img30_base_off_bpp050	reference	1	3	213.9	1192
+img30_base_off_bpp050	reference	1	4	211.8	1193
+img30_base_off_bpp050	reference	8	1	118.7	1103
+img30_base_off_bpp050	reference	8	2	135	1126
+img30_base_off_bpp050	reference	8	3	115.8	1092
+img30_base_off_bpp050	reference	8	4	111.8	1084
+img30_base_off_bpp050	reference	16	1	115.2	1094
+img30_base_off_bpp050	reference	16	2	137.4	1111
+img30_base_off_bpp050	reference	16	3	138	1117
+img30_base_off_bpp050	reference	16	4	124.6	1103
+img30_base_off_bpp050	zenjpegai	1	0	105.2	186
+img30_base_off_bpp050	zenjpegai	1	1	83.5	-
+img30_base_off_bpp050	zenjpegai	1	2	81.4	-
+img30_base_off_bpp050	zenjpegai	1	3	81.5	-
+img30_base_off_bpp050	zenjpegai	1	4	82.1	-
+img30_base_off_bpp050	zenjpegai	8	0	39.2	114
+img30_base_off_bpp050	zenjpegai	8	1	20.8	-
+img30_base_off_bpp050	zenjpegai	8	2	22.4	-
+img30_base_off_bpp050	zenjpegai	8	3	23.0	-
+img30_base_off_bpp050	zenjpegai	8	4	22.3	-
+img30_base_off_bpp050	zenjpegai	16	0	35.4	115
+img30_base_off_bpp050	zenjpegai	16	1	19.1	-
+img30_base_off_bpp050	zenjpegai	16	2	19.4	-
+img30_base_off_bpp050	zenjpegai	16	3	19.7	-
+img30_base_off_bpp050	zenjpegai	16	4	18.3	-

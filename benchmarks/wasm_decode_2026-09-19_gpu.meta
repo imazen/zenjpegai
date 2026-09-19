@@ -1,0 +1,7 @@
+commit	e75939347bae
+host	dev
+command	WEBGPU_ADAPTER=hardware npx playwright test tests/benchmark-gpu.spec.ts --project chromium-webgpu
+launch_args	--enable-unsafe-webgpu --enable-features=Vulkan --ignore-gpu-blocklist --use-angle=vulkan
+adapter	nvidia/turing
+adapter_fallback	false
+date	2026-09-19
