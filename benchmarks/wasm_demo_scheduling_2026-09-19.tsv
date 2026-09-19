@@ -46,3 +46,10 @@ date	metric	ms
 2026-09-19	total_ms_simd	1700.0
 2026-09-19	solo_ms	695.6
 2026-09-19	solo_ms	702.3
+
+2026-09-19	first_ms	1000.0
+2026-09-19	total_ms	1767.0
+2026-09-19	first_ms_simd	953.0
+2026-09-19	total_ms_simd	1719.0
+2026-09-19	solo_ms	721.9
+2026-09-19	solo_ms	705.5
