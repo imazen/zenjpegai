@@ -260,6 +260,16 @@
 - GPU work queue B3 (b3gpu2, 2026-09-18): bounded buffer retention (the activation `Pool` and the workspace's latent / picture / staging buffers release the excess of a large picture on the next small run — 568 -> ~195 MiB for 4096x4096 then 560x888 — and `GpuDecoder::release_buffers` / `Workspace::release_buffers` drop them explicitly); GPU-side output conversion (`GpuOut::Quantized` runs the output stage — BT.709 or coded-subsampling YUV, 8/10 bit, round-half-to-even — in an `emit_output` kernel and reads back packed u16 pairs, halving readback; decode wall −20 to −29%); cancellation and `max_channels` on the GPU path (`decode_with` / `decode_to_gpu_with` / `decode_picture_async_with` take the same `enough::Stop` token, checked between submits); and a second kernel-efficiency pass driven by `gpu_bench --profile` + `scripts/bench/gpu_roofline.py` roofline classification: workgroup-staged input halos and weight chunks for stride-1/2 convolutions (selected per layer where the tile fits 16 KiB of workgroup storage; its `ic0`-chunk-outer accumulation reorders `KH > 1` sums, so the measured parity counts moved slightly within their bounds — 8-bit vs reference now 47 / 59 / 33 of 1,491,840 and 345 / 368 of 8,803,200 samples, all one step), channel-contiguous depthwise workgroups (`depthwise3x3` 27.0 -> 7.8 ms), a flattened `elu_gate` (11.4 -> 1.4 ms, ~88% of bandwidth peak), and channel-group constants baked into the conv / conv-transpose pipelines. HOP 560x888 device 224 -> 103 ms, HOP 1024x1024 498 -> 208 ms, HOP 4096x4096 8919 -> 4045 ms, BOP 1024x1024 21.4 -> 14.5 ms, SOP ~−13%; whole-stream decode BOP 560x888 22.8 -> 17.4 ms, HOP 326 -> 109 ms, img01 2096x1400 164 -> 93 ms. Numbers: `benchmarks/gpu_decode_2026-09-18_rtx2080_kernels.tsv`, `benchmarks/gpu_profile_2026-09-18_rtx2080.tsv`; `gpu/README.md` "Status" has the analysis, the falsified approaches (pixel-tiled convolutions, still slower), and the remaining work (`shader-f16`, `convt` staging, attention kernels).
 
 #### Library & infrastructure
+- `ZJB2` bundle variant: `zenjpegai pack-models --f16` writes the `ZJB1` envelope with
+  `ZJM1` members whose f32 network weights are stored as IEEE-754 halfs
+  (`src/weights/f16.rs`, pure-integer round-to-nearest-even); integer tensors and
+  `vr_vec.c` are copied untouched so the entropy stage stays bit-exact, and
+  `Checkpoint::f32` upcasts at load so every SIMD tier/thread decodes bit-identically.
+  Measured end to end (`tests/f16_weights.rs`, `benchmarks/f16_weights_2026-09-19.md`):
+  the BOP page payload shrinks 14.57 → 7.31 MB brotli, but all 43 real reference vectors
+  miss the `≤1 LSB in <1/5000 samples` gate (1.1–8.0 % differ) and adversarial synthetic
+  sources deviate up to 20 LSB — **rejected for shipped bundles; `ZJB1`/f32 stays the
+  default**, the `--f16` option remains for consumers without the parity contract.
 - Investigated `colour_transform_idx = 2` (`scripts/ref_vectors/probe_colour_transform2.py`):
   dead, self-inconsistent code upstream — the decision is "not ported", such streams stay
   `Error::Unsupported` (PORTING.md "Reference dead code").

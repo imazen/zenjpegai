@@ -226,6 +226,13 @@ section — a 6.8% cut.)
   `wasm32-unknown-unknown` + `crate-type = ["cdylib", "rlib"]` combination ("only 'bin', 'dylib'
   and 'cdylib' crate types are supported") — a tool limitation, documented, not worked around;
   `twiggy top`/`dominators` covered the same ground (both tools' output is in the size-audit doc).
+- **Model bundles, measured and rejected** (`benchmarks/wasm_size_2026-09-19.md`,
+  `benchmarks/f16_weights_2026-09-19.md`): `pack-models --f16` writes `ZJB2`, which stores the
+  f32 network weights as f16 and would halve what a page downloads (BOP common+synthesis
+  14.57 -> 7.31 MB brotli). But f16-rounded weights decode outside the parity gate on every
+  one of the 43 real reference vectors (1.1-8.0 % of samples differ; the gate wants <0.02 %),
+  on both half-and-half variants, and on adversarial inputs by up to 20 LSB. The site keeps
+  shipping `ZJB1`/f32 bundles; `ZJB2` exists only for consumers without the parity contract.
 
 ### 6. Colour
 
