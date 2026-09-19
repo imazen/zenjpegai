@@ -207,6 +207,24 @@
 - `mans`: me-tANS entropy coder (tables, decoder, encoder), bit-exact against the reference C++ extension.
 
 #### Browser & WebAssembly
+- Browser startup fast path + Cloudflare Pages (`cfpages`, 2026-09-19): the demo now also
+  deploys to `zenjpegai.pages.dev` — a `deploy-cloudflare` job in `pages.yml` runs
+  `wrangler pages deploy` on the same `dist/site` artifact (classic Pages project, secrets
+  `CLOUDFLARE_API_TOKEN` / var `CLOUDFLARE_ACCOUNT_ID`). `web/demo/_headers` sends
+  COOP/COEP/CORP + immutable caching for the content-addressed paths, so the page is
+  cross-origin isolated on the FIRST load and `coi-loader.js` never registers `sw-coi.js`
+  there (GitHub Pages still needs its one reload). Model bundles are prefetched in
+  parallel into the worker's Cache API keys while wasm still downloads (`web/src/prefetch.js`:
+  first card's `common`+`op` pair first, every other needed model after, handed to the
+  worker by transfer via `DecoderPool`'s `modelBuffers`; `ensureModels` fetches its halves
+  concurrently), the polyfill prefetches the visible `<img>` set's models off a plain-JS
+  PIH probe (`web/src/stream-info.js`), and `build-site.mjs` stamps preload links for the
+  first pair from the manifest digests. `web/scripts/pack-rayon-child.mjs` collapses
+  wasm-bindgen-rayon's per-child snippet+glue requests into one self-contained
+  `rayon-child.js` cloned into every child through a shared blob URL. Measured
+  (`benchmarks/wasm_startup_2026-09-19.tsv`, headless Chromium, cold profile): github.io
+  pre 75 req / 58 JS / first-image 1464-2162 ms -> CF preview 29 req / 8 JS / 1351-1902 ms,
+  `webgpu-threads`, no reload, zero service workers. Detail: `web/README.md` §8.
 - WebGPU in the browser: `zenjpegai-wasm`'s optional `gpu` feature (`wasm/src/gpu.rs`: async `decode` with CPU fallback on any `GpuError`, `initGpu`/`gpuStatus`/`present`/`disableGpu`) builds a third package, `pkg-webgpu` (`web/scripts/build-wasm.sh webgpu`; `pkg-simd`/`pkg-threads` unchanged). `DecoderPool`'s `gpu` option (`auto|on|software|force-software|off`): `on` loads `pkg-webgpu` when `navigator.gpu` yields a non-software adapter; `auto` (the default) uses the GPU on a non-software adapter — measured faster than both CPU packages on an RTX 2080 after the b3gpu pass (web/README §7). `decodeToCanvas` transfers an `OffscreenCanvas` to the worker once and presents through `Blitter` with no CPU readback (`presented: 'gpu'`), falling back to worker-side `putImageData` (`'2d'`). The worker's `ready` message carries `adapterProbe` (JS-side `GPUAdapter.info`: vendor/architecture/`isFallbackAdapter`) because wgpu's web backend leaves the adapter name empty under Dawn. Verified on hardware (`WEBGPU_ADAPTER=hardware` → Chromium + `--use-angle=vulkan --ignore-gpu-blocklist`, adapter `nvidia/turing`, `isFallbackAdapter: false`; the specs fail loudly if no hardware adapter appears) and via SwiftShader (`chromium-webgpu` Playwright project, `webgpu-decode.spec.ts`: 203/3,000,000 samples differ, all by 1 — GPU parity reported separately); per-path timings in `benchmarks/wasm_decode_2026-09-18_gpu.{tsv,meta}`, size cost in `benchmarks/wasm_size_2026-09-18.md` §7. Worker-level trap recovery (`self.onerror` → `disableGpu` → one transparent CPU retry) remains as defence in depth.
 - Browser: worker pool + `<img>`/`<picture>` JPEG AI polyfill (`web/src/{worker,pool,polyfill}.js`), a ~90-test Playwright suite across chromium/firefox/webkit/chromium-webgpu and three CSP/isolation profiles, a demo (`web/demo/`) with 8 imazen-26 images published as the `demo-assets-v1` release, and `.github/workflows/pages.yml` (Pages enabled, site live — see `web/README.md`). Fixed the `threads` wasm package, which never actually linked/ran before this: missing `--shared-memory`/`--import-memory`/`--export=__wasm_init_tls` linker flags, plus a worker.js message-queue race and a reentrant-`decode()` deadlock. New additive `pth` cargo feature (default on) keeps the `.pth`/pickle reader out of the wasm build (`pkg-simd` 389,178 → 362,789 bytes after `wasm-opt`); full size audit in `benchmarks/wasm_size_2026-09-18.md`.
 - Browser decode speed pass (d3wasm): ~2x faster on the demo streams — median 204 → 104 ms

@@ -1,0 +1,9 @@
+commit	d927d34f1f97
+host	dev
+command	node /home/lilith/work/zen/zenjpegai--cfpages/web/scripts/measure-startup.mjs --url https://imazen.github.io/zenjpegai/ --label github.io-pre --runs 3 --out benchmarks/wasm_startup_2026-09-19.tsv
+date	2026-09-19T06:06:09.055Z
+harness	web/scripts/measure-startup.mjs (fresh Chromium context per run: cold HTTP cache, Cache API, SW registry; requests counted via context route interception — covers dedicated-worker module fetches)
+browser	Playwright 1.63.0 / Chromium 153.0.8010.12, headless, --enable-unsafe-webgpu (WEBGPU_ADAPTER=hardware for the cf-pages-preview rows -> nvidia/turing adapter; github.io-pre rows used the default software-less auto fallback to pkg-threads)
+network	fast link from this host to each CDN edge; no throttling; all three runs per label are cold-cache first loads
+urls	github.io-pre = the deployed site BEFORE this change (sw-coi.js install+reload; serial model fetch inside first decode; per-child glue+snippet imports). cf-pages-preview = preview-branch deploy of this change (direct COOP/COEP via _headers; staggered model prefetch; self-contained rayon-child.js).
+notes	github.io-post will keep the coi service-worker reload (GitHub Pages cannot send COOP/COEP); the production deploy to zenjpegai.pages.dev happens via the pages.yml deploy-cloudflare job on main.

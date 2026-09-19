@@ -28,8 +28,8 @@ user-defined colour transform (both are dead code in the pinned reference commit
 approximated. The entropy stage is bit-exact; the reconstructed 8-bit picture differs from the
 reference decoder's in about 0.005 % of samples, each by one step (convolution summation
 order). Also here: a WebAssembly build with a browser polyfill and demo (`web/`, live at
-https://imazen.github.io/zenjpegai/) and a wgpu compute backend (`gpu/`, verified in-browser on
-hardware WebGPU).
+https://imazen.github.io/zenjpegai/ and https://zenjpegai.pages.dev/) and a wgpu compute
+backend (`gpu/`, verified in-browser on hardware WebGPU).
 `PORTING.md` tracks every module, what is missing, and which test proves each piece.
 
 New here? Start with [`CONTRIBUTING.md`](CONTRIBUTING.md): setup, code map, how parity is proven, what to do next.

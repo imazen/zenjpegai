@@ -361,6 +361,50 @@ it needs SharedArrayBuffer). `pkg-simd` and `pkg-threads` are unchanged.
   is 845,647 bytes after `wasm-opt`, 250,782 brotli — only ever fetched on
   isolated pages when a hardware adapter exists.
 
+### 8. Cloudflare Pages fast path + startup (`cfpages`, 2026-09-19)
+
+The demo is deployed to **two** hosts: GitHub Pages (`imazen.github.io/zenjpegai/`) and
+Cloudflare Pages (`zenjpegai.pages.dev`, classic Pages project — the `deploy-cloudflare` job
+in `.github/workflows/pages.yml` runs `wrangler pages deploy` on the same `dist/site`
+artifact after every main push; `CLOUDFLARE_API_TOKEN` secret / `CLOUDFLARE_ACCOUNT_ID` var).
+CF is the fast path because it can send response headers GitHub Pages cannot:
+
+- **`web/demo/_headers`** (copied to the site root) puts `COOP: same-origin` +
+  `COEP: require-corp` + `CORP: same-origin` on `/*`, `Cache-Control: immutable` on
+  `/streams/*` `/models/*` `/dist/*`, `no-cache` on the manifest and HTML. The page is
+  cross-origin isolated on the FIRST load, so `coi-loader.js` returns before ever
+  registering `sw-coi.js` — verified live: 0 service-worker registrations, 1 navigation,
+  1 `demo.js` request (GitHub Pages still needs the SW + one reload).
+- **Model-bundle prefetch** (`web/src/prefetch.js`, shared by demo and polyfill): right
+  after the manifest read — while wasm is still downloading — `demo.js` fetches the first
+  card's `common`+`op` bundles in parallel, then every other needed model in visibility
+  order, into the same `zenjpegai-models-v2` keys `worker.js`'s `ensureModels` checks. The
+  first card's bundles are additionally handed to the worker by transfer
+  (`DecoderPool` `modelBuffers` option); `ensureModels` itself now fetches its two halves
+  concurrently. The polyfill does the same for the visible `<img>` set: it reads `model_id`
+  + operating point straight off the codestream PIH in plain JS (`web/src/stream-info.js`)
+  so the model download overlaps the worker's own startup. `build-site.mjs` stamps
+  `<link rel="preload" as="fetch" crossorigin="use-credentials">` for the first model pair
+  with the manifest's `?v=` digests — consumed, not double-fetched, because `prefetch.js`
+  fetches with `credentials: 'include'` (measured: anonymous `crossorigin` matches neither
+  `omit` nor `same-origin` fetches in Chromium).
+- **Rayon child collapse** (`web/scripts/pack-rayon-child.mjs`, run by `build-wasm.sh` for
+  the threads packages): wasm-bindgen-rayon used to fetch the `workerHelpers` snippet AND
+  the glue per spawned child (~50 JS requests for 16 threads). The build now inlines
+  `startWorkers` into `zenjpegai.js` and emits a self-contained `rayon-child.js`, fetched
+  once and cloned into every child through one shared `blob:` URL — 8 JS requests total.
+- **Measured** (`benchmarks/wasm_startup_2026-09-19.tsv`, headless Chromium 153, fresh
+  profile per run, fast link): GitHub Pages pre-change 75 requests / 58 JS / first image
+  1464-2162 ms (plus the sw install+reload); CF Pages preview 29 requests / 8 JS /
+  1351-1902 ms, `webgpu-threads` on a hardware adapter, `crossOriginIsolated` true on the
+  first load with no reload and zero service workers. GitHub Pages post-change keeps the
+  coi reload but gets the prefetch + request collapse.
+- **Caveat:** `/dist/*` is `immutable` although the package URLs are not content-addressed —
+  they change only on deploy, and a reload after a deploy can serve a stale-but-consistent
+  cached set for up to a year. Accepted deliberately (the alternative is a manifest-driven
+  `?v=` stamp on package URLs, not implemented); revisit if mixed-version breakage is ever
+  observed.
+
 ## Next steps, in order
 
 1. ~~Re-run §7's benchmark on a hardware adapter + fix the `create_buffer_init` trap~~ — done

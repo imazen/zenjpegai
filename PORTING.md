@@ -765,6 +765,21 @@ measured numbers in the status table above when you close an item.
   `cache: 'no-cache'`; `worker.js` keys Cache API entries on `?v=` digests
   (`zenjpegai-models-v2`; v1 purged). `web/tests/cache-swap.spec.ts` proves a same-name asset
   swap renders new content without clearing storage.
+  **B5 done 2026-09-19** (cfpages) — Cloudflare Pages deploy + browser startup fast path:
+  `deploy-cloudflare` job in `pages.yml` (wrangler-action v4, same `dist/site`, project
+  `zenjpegai`, main branch); `web/demo/_headers` sends COOP/COEP/CORP + cache policy so the
+  page is cross-origin isolated on first load and the coi service worker is never installed
+  (GitHub Pages still pays its install+reload). `web/src/prefetch.js` + `stream-info.js`:
+  the demo prefetches the needed `common`+`op` model bundles in parallel into the worker's
+  own Cache API keys while wasm still downloads (first card's pair first, the rest after),
+  hands them to the worker by transfer (`modelBuffers`), and the polyfill does the same for
+  the visible `<img>` set off a plain-JS PIH probe; `build-site.mjs` stamps preload links for
+  the first pair from the manifest digests. `web/scripts/pack-rayon-child.mjs` collapses
+  wasm-bindgen-rayon's per-child snippet+glue fetches into one self-contained
+  `rayon-child.js` cloned via a shared blob URL. Measured (`benchmarks/wasm_startup_2026-09-19.tsv`):
+  github.io pre 75 req/58 JS/first-image 1464-2162 ms -> CF preview 29 req/8 JS/1351-1902 ms,
+  `webgpu-threads`, no reload, 0 service workers. Detail and the `/dist/*` immutable caveat:
+  `web/README.md` §8.
   **B3** GPU kernels: mostly done (b3gpu + b3gpu2, 2026-09-18). **Still missing:** `shader-f16`
   (opt-in feature; the RTX 2080 exposes `shaderFloat16` + 16-bit storage access, so it is
   feasible — needs f16 weight copies, f16 kernel variants, and a separately measured parity
