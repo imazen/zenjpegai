@@ -91,6 +91,13 @@ required-features = ["unstable-internals"]
 name = "prof_filters_lef_icci"
 required-features = ["unstable-internals"]
 
+# Synthetic adversarial sources for the f16-weight study; the generator lives with the other
+# reference-vector scripts, not in examples/ (PNG write is zenpng only).
+[[example]]
+name = "gen_synthetic_inputs"
+path = "scripts/ref_vectors/gen_synthetic_inputs.rs"
+required-features = ["cli"]
+
 [[bin]]
 name = "zenjpegai"
 required-features = ["cli"]
@@ -151,6 +158,10 @@ required-features = ["unstable-internals"]
 
 [[test]]
 name = "weights_ref"
+required-features = ["unstable-internals"]
+
+[[test]]
+name = "f16_weights"
 required-features = ["unstable-internals"]
 
 # Replays fuzz/regression/* through the same entry points the libFuzzer bins

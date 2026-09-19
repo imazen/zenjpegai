@@ -172,6 +172,79 @@ impl RefTensor {
     }
 }
 
+/// The staged decode of `tests/decode_ref.rs`, parameterised on the checkpoint source so the
+/// f16-weight tests can run the same pipeline from a packed bundle (`ZJB2`) as from `.pth`
+/// files. Fields are exactly what `decode_ref`'s `Decoded` carries.
+pub struct StagedDecode {
+    pub psi: [zenjpegai::tensor::Tensor<f32>; 2],
+    pub y_hat: [zenjpegai::tensor::Tensor<f32>; 2],
+    pub planes: zenjpegai::decoder::reconstruct::Planes,
+    /// `planes` after the post-filters the stream enables.
+    pub filtered: zenjpegai::decoder::reconstruct::Planes,
+}
+
+/// Parse + read headers + staged decode.
+pub fn decode_staged(
+    src: &dyn zenjpegai::model::ModelSource,
+    stream: &[u8],
+    eng: &zenjpegai::nn::fast::Engine,
+) -> (zenjpegai::header::PictureHeader, StagedDecode) {
+    let cs = zenjpegai::container::Codestream::parse(stream).unwrap();
+    let headers = zenjpegai::decoder::read_headers(&cs).unwrap();
+    decode_staged_with(src, &cs, eng, &headers)
+}
+
+/// The staged decode with caller-supplied headers (the forced-4:2:0 eICCI vector's tool
+/// header is not readable by a conformant parser; its test rebuilds it from the dump).
+pub fn decode_staged_with(
+    src: &dyn zenjpegai::model::ModelSource,
+    cs: &zenjpegai::container::Codestream<'_>,
+    eng: &zenjpegai::nn::fast::Engine,
+    headers: &zenjpegai::decoder::Headers,
+) -> (zenjpegai::header::PictureHeader, StagedDecode) {
+    use zenjpegai::decoder::reconstruct::{post_process_latent, reconstruct_latent, synthesize};
+    use zenjpegai::decoder::{decode_entropy_stage, output::to_source_format};
+    let hdr = headers.picture.clone();
+    let id = hdr.model_id as usize;
+    let op = hdr.synthesis_transforms[0];
+    let (ym, uvm) = (
+        zenjpegai::model::load_common(src, id, 0, eng).unwrap(),
+        zenjpegai::model::load_common(src, id, 1, eng).unwrap(),
+    );
+    let syn_y = zenjpegai::model::load_synthesis_primary(src, id, op, eng).unwrap();
+    let syn_uv = zenjpegai::model::load_synthesis_secondary(src, id, op, eng).unwrap();
+    let ent =
+        decode_entropy_stage(&zenjpegai::mans::AnsTables::new(), cs, &hdr, [&ym, &uvm]).unwrap();
+    let mut ly = reconstruct_latent(eng, &hdr, 0, &ym, &ent[0]).unwrap();
+    let mut luv = reconstruct_latent(eng, &hdr, 1, &uvm, &ent[1]).unwrap();
+    post_process_latent(&hdr, &headers.tools, 0, &ent[0], &mut ly).unwrap();
+    post_process_latent(&hdr, &headers.tools, 1, &ent[1], &mut luv).unwrap();
+    let planes = synthesize(eng, &hdr, &syn_y, &syn_uv, [&ly.y_hat, &luv.y_hat]).unwrap();
+    // `model.decompress` hands the planes over in the source's chroma format.
+    let planes = to_source_format(&hdr, planes).unwrap();
+    let ctx = zenjpegai::filters::FilterContext {
+        eng,
+        hdr: &hdr,
+        tools: &headers.tools,
+        luma_scale_log: &ent[0].scale_log,
+        models: src,
+        op,
+        icci_nets: &Default::default(),
+        stop: &enough::Unstoppable,
+    };
+    let filtered = zenjpegai::filters::apply(&ctx, planes.clone()).unwrap();
+    let psi = [ly.psi, luv.psi];
+    (
+        hdr,
+        StagedDecode {
+            psi,
+            y_hat: [ly.y_hat, luv.y_hat],
+            planes,
+            filtered,
+        },
+    )
+}
+
 /// All tensors of the reference *decoder* dump, by name (`manifest.txt` + `tensors.bin`).
 pub fn load_dump(dir: &std::path::Path) -> std::collections::HashMap<String, RefTensor> {
     load_dump_files(dir, "manifest.txt", "tensors.bin")
