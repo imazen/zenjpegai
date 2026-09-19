@@ -87,6 +87,13 @@ for v in "${variants[@]}"; do
       's/pkg\.default(data\.module, data\.memory)/pkg.default({ module_or_path: data.module, memory: data.memory })/' \
       "$helper"
   done
+  # Collapse the per-child JS requests: upstream, every rayon child fetches the workerHelpers
+  # snippet AND the main glue (~50 requests for a 16-thread pool). pack-rayon-child.mjs
+  # inlines startWorkers into the glue and emits a self-contained rayon-child.js, cloned into
+  # every child through one shared blob: URL — 2 requests for the whole pool.
+  if [ -d "$out/snippets" ]; then
+    node "$ROOT/web/scripts/pack-rayon-child.mjs" "$out"
+  fi
   raw=$(stat -c %s "$out/zenjpegai_bg.wasm")
   "$wasm_opt" -O3 "$out/zenjpegai_bg.wasm" -o "$out/zenjpegai_bg.wasm"
   opt=$(stat -c %s "$out/zenjpegai_bg.wasm")

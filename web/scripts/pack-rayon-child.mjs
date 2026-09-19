@@ -1,0 +1,119 @@
+#!/usr/bin/env node
+// Collapses wasm-bindgen-rayon's per-child module requests in a `pkg-*-threads` package.
+//
+// Upstream shape: the glue statically imports `workerHelpers.no-bundler.js` for
+// `startWorkers`, which then spawns one Worker per rayon thread — each child fetches the
+// helper again (`fetch(import.meta.url)`) and dynamically imports the main glue
+// (`import(data.mainJS)`). Measured on the live demo: a 16-thread pool cost 33 snippet
+// requests + 17 glue requests (~50 of the page's 94). Patched shape:
+//
+//   zenjpegai.js     — `startWorkers`/`waitForMsgType` inlined below, snippet import removed
+//   rayon-child.js   — the same file PLUS the child-side init handler, fully self-contained
+//                      (no imports at all): `startWorkers` fetches it ONCE and clones it into
+//                      every child through a single shared blob: URL
+//
+// So the whole thread pool costs 2 module requests total (the glue + this file) instead of
+// ~50. The child's `wasm_bindgen_worker_init` message still carries `module`/`memory` via
+// postMessage — no per-child wasm fetch either. `worker-src ... blob:` in CSP is required,
+// exactly as before (the upstream spawner already used blob: URLs).
+//
+// usage: node pack-rayon-child.mjs web/dist/pkg-threads
+import { readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+
+const pkg = process.argv[2];
+if (!pkg) {
+  console.error('usage: pack-rayon-child.mjs <pkg-dir>');
+  process.exit(2);
+}
+
+// `waitForMsgType` + the Firefox GC workaround (`_workers`) come verbatim from
+// workerHelpers.no-bundler.js (Apache-2.0, Google); `startWorkers` is the patched part.
+const MAIN_HELPERS = `// --- rayon pool spawn, inlined from wasm-bindgen-rayon's workerHelpers.no-bundler.js ----
+// Upstream spawned each child as a fresh fetch of that snippet plus a dynamic
+// import(data.mainJS) of this glue (~3 module requests per rayon thread). Here the child is
+// the self-contained rayon-child.js — the same code, fetched ONCE below and handed to every
+// child through one shared blob: URL — so a whole pool adds a single request.
+function waitForMsgType(target, type) {
+  return new Promise(resolve => {
+    target.addEventListener('message', function onMsg({ data }) {
+      if (data == null || data.type !== type) return;
+      target.removeEventListener('message', onMsg);
+      resolve(data);
+    });
+  });
+}
+
+// Firefox GC workaround (https://bugzilla.mozilla.org/show_bug.cgi?id=1702191): keep the
+// Worker objects rooted — children holding a shared-memory module can otherwise be collected.
+let _workers;
+
+async function startWorkers(module, memory, builder) {
+  if (builder.numThreads() === 0) {
+    throw new Error(\`num_threads must be > 0.\`);
+  }
+  const workerInit = {
+    type: 'wasm_bindgen_worker_init',
+    module,
+    memory,
+    receiver: builder.receiver(),
+    // The self-contained child never imports mainJS; kept in the message for shape parity.
+    mainJS: builder.mainJS()
+  };
+  const scriptBlob = await fetch(new URL('rayon-child.js', import.meta.url)).then(r => r.blob());
+  const url = URL.createObjectURL(scriptBlob);
+  try {
+    _workers = await Promise.all(
+      Array.from({ length: builder.numThreads() }, async () => {
+        const worker = new Worker(url, { type: 'module' });
+        worker.postMessage(workerInit);
+        await waitForMsgType(worker, 'wasm_bindgen_worker_ready');
+        return worker;
+      })
+    );
+  } finally {
+    // Every child has already loaded its script by now (ready messages above); the URL only
+    // existed to carry the blob.
+    URL.revokeObjectURL(url);
+  }
+  builder.build();
+}
+`;
+
+const CHILD_INIT = `
+// --- rayon child entry (the init half of workerHelpers.no-bundler.js, inlined) ------------
+// The glue above is already here — no \`import(data.mainJS)\`, no second fetch. The init
+// message arrives by postMessage and carries the shared module + memory.
+waitForMsgType(self, 'wasm_bindgen_worker_init').then(async data => {
+  await __wbg_init({ module_or_path: data.module, memory: data.memory });
+  postMessage({ type: 'wasm_bindgen_worker_ready' });
+  wbg_rayon_start_worker(data.receiver);
+});
+`;
+
+const gluePath = join(pkg, 'zenjpegai.js');
+const glue = readFileSync(gluePath, 'utf8');
+const importRe = /^import \{ startWorkers \} from '[^']*workerHelpers\.no-bundler\.js';\r?\n/m;
+if (!importRe.test(glue)) {
+  console.error(`${gluePath}: no 'import { startWorkers }' line found — package is not a rayon build or wasm-bindgen's output shape changed`);
+  process.exit(1);
+}
+const patched = glue.replace(importRe, `${MAIN_HELPERS}\n`);
+if (!/async function __wbg_init\(/.test(patched) || !/function wbg_rayon_start_worker\(/.test(patched)) {
+  console.error(`${gluePath}: expected __wbg_init/wbg_rayon_start_worker in glue — wasm-bindgen's output shape changed`);
+  process.exit(1);
+}
+writeFileSync(gluePath, patched);
+writeFileSync(
+  join(pkg, 'rayon-child.js'),
+  `// GENERATED by web/scripts/pack-rayon-child.mjs — do not edit; regenerated on every\n` +
+  `// build-wasm.sh run. Self-contained rayon child worker: the zenjpegai.js glue plus the\n` +
+  `// child init handler, so the whole pool costs one fetch (startWorkers clones this text\n` +
+  `// into every child through one shared blob: URL).\n` +
+  patched +
+  CHILD_INIT,
+);
+// The glue no longer imports the snippet; drop the directory so it is neither shipped nor
+// counted in site requests.
+rmSync(join(pkg, 'snippets'), { recursive: true, force: true });
+console.log(`${pkg}: startWorkers inlined; rayon-child.js written`);
