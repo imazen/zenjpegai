@@ -29,7 +29,7 @@ USAGE:
     zenjpegai decode <in.bits> <out.png | out.yuv> [options]
     zenjpegai info <in.bits>
     zenjpegai pack-models --models <dir> --out <file.zjb> [--model <0..3>]... [--op <sop|bop|hop>]...
-                          [--only <common|synthesis>]
+                          [--only <common|synthesis>] [--f16]
     zenjpegai preload <in.bits>      load the networks the stream needs, decode nothing
 
 OPTIONS:
@@ -83,7 +83,10 @@ pack-models writes a ZJB1 bundle holding only the tensors the decoder reads for 
 from a bundle are identical to pixels decoded from the .pth files. `--only common` keeps the
 per-model entropy / latent networks, `--only synthesis` the per-(model, operating point) synthesis
 transforms: a client that has the common part of a model fetches only the other for a new
-operating point (`PackedBundle::add` merges them).
+operating point (`PackedBundle::add` merges them). `--f16` writes a ZJB2 bundle instead: the
+float network weights are stored as f16 (round to nearest even), halving their bytes; integer
+tensors and the `vr_vec.c` gain table stay exact, and the loader upcasts to f32 on read, so
+decode output differs from f32 bundles only by the f16 rounding of the float weights.
 ";
 
 struct Args {
@@ -116,6 +119,7 @@ struct Args {
     quality_map: Option<PathBuf>,
     single_thread: bool,
     scalar: bool,
+    f16: bool,
     repeat: usize,
     time: bool,
     stats: bool,
@@ -154,6 +158,7 @@ fn parse_args() -> Result<Args, String> {
         quality_map: None,
         single_thread: false,
         scalar: false,
+        f16: false,
         repeat: 1,
         time: false,
         stats: false,
@@ -291,6 +296,7 @@ fn parse_args() -> Result<Args, String> {
             }
             "--single-thread" => a.single_thread = true,
             "--scalar" => a.scalar = true,
+            "--f16" => a.f16 = true,
             "--repeat" => {
                 a.repeat = value("--repeat")?
                     .parse()
@@ -368,7 +374,12 @@ fn run() -> Result<(), String> {
                         .map_err(|e| format!("{e:?}"))?;
                 }
             }
-            let bundle = rec.pack(UPSTREAM_NOTICE).map_err(|e| format!("{e:?}"))?;
+            let bundle = if args.f16 {
+                rec.pack_f16(UPSTREAM_NOTICE)
+                    .map_err(|e| format!("{e:?}"))?
+            } else {
+                rec.pack(UPSTREAM_NOTICE).map_err(|e| format!("{e:?}"))?
+            };
             let packed = PackedBundle::parse(bundle.clone()).map_err(|e| format!("{e:?}"))?;
             let mut source_bytes = 0u64;
             for rel in packed.paths() {

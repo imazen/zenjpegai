@@ -33,6 +33,13 @@
 //!     per file: u16 path length, path, u64 byte offset (multiple of 64), u64 byte length
 //!     zero padding to a multiple of 64, then the files, each padded to a multiple of 64
 //! ```
+//!
+//! **`ZJB2`** (`pack-models --f16`): the same bundle layout, but the `ZJM1` members store every
+//! f32 network weight as `f16` ([`write_zjm_f16`], round to nearest even) — half the weight
+//! bytes, lossy by that rounding only. Integer tensors (the int8 hyper-scale weights,
+//! `hyper_entropy.freqs_int`, the `is_quantized` flags) are copied untouched, and so is
+//! `vr_vec.c`, the one f32 tensor that feeds an integer table (`gain_vector_log`), so the
+//! whole entropy stage stays bit-exact. [`Checkpoint::f32`] upcasts on read.
 
 use alloc::borrow::Cow;
 use alloc::string::{String, ToString};
@@ -44,6 +51,8 @@ use crate::error::{Error, Result};
 
 pub const ZJM_MAGIC: &[u8; 4] = b"ZJM1";
 pub const ZJB_MAGIC: &[u8; 4] = b"ZJB1";
+/// Bundle magic of the f16-weight variant ([`write_zjm_f16`], `pack-models --f16`).
+pub const ZJB_F16_MAGIC: &[u8; 4] = b"ZJB2";
 const VERSION: u32 = 1;
 const ALIGN: usize = 64;
 /// Bounds on table sizes, against hostile inputs.
@@ -204,12 +213,40 @@ fn put_str(out: &mut Vec<u8>, s: &str) -> Result<()> {
     Ok(())
 }
 
+/// f32 tensors that keep f32 storage inside an f16 bundle. `vr_vec.c` is not a network weight
+/// but the source of `gain_vector_log`: the common model rounds it to a Q7 integer per channel,
+/// and an f16 rounding could move a value across one of those quantisation boundaries and shift
+/// a channel's gain step. Keeping it f32 keeps the entropy stage bit-identical; it is a few
+/// hundred bytes per common checkpoint.
+const F16_KEEP_F32: &[&str] = &["vr_vec.c"];
+
 /// Write the tensors `names` of `ck` (plus all of its integer entries) as a `ZJM1` file.
 /// Tensor bytes are copied unchanged (strided views are made contiguous).
 pub fn write_zjm(ck: &Checkpoint<'_>, names: &[String]) -> Result<Vec<u8>> {
+    write_zjm_impl(ck, names, false)
+}
+
+/// `f16` variant of [`write_zjm`]: f32 tensors are stored as f16 ([`super::f16`], round to
+/// nearest even), halving their bytes; integer tensors and [`F16_KEEP_F32`] are copied
+/// unchanged.
+pub fn write_zjm_f16(ck: &Checkpoint<'_>, names: &[String]) -> Result<Vec<u8>> {
+    write_zjm_impl(ck, names, true)
+}
+
+fn write_zjm_impl(ck: &Checkpoint<'_>, names: &[String], f16: bool) -> Result<Vec<u8>> {
     let mut payloads = Vec::with_capacity(names.len());
     for name in names {
-        payloads.push(ck.raw(name)?);
+        let (dtype, shape, bytes) = ck.raw(name)?;
+        if f16 && dtype == DType::F32 && !F16_KEEP_F32.contains(&name.as_str()) {
+            let mut half = Vec::with_capacity(bytes.len() / 2);
+            for c in bytes.as_chunks::<4>().0 {
+                let h = super::f16::f32_to_f16(f32::from_le_bytes(*c));
+                half.extend_from_slice(&h.to_le_bytes());
+            }
+            payloads.push((DType::F16, shape, half));
+        } else {
+            payloads.push((dtype, shape, bytes));
+        }
     }
     // Table size first: offsets are absolute.
     let mut table = 16usize;
@@ -255,13 +292,28 @@ pub fn write_zjm(ck: &Checkpoint<'_>, names: &[String]) -> Result<Vec<u8>> {
 /// Write a `ZJB1` bundle of `(relative path, file bytes)` pairs. Files are usually `ZJM1`
 /// checkpoints but any bytes work.
 pub fn write_bundle(files: &[(String, Vec<u8>)], notice: &str) -> Result<Vec<u8>> {
+    write_bundle_with(files, notice, ZJB_MAGIC)
+}
+
+/// `ZJB2` variant of [`write_bundle`]: same layout, different magic. The marker matters
+/// because a bundle built of [`write_zjm_f16`] files is lossy (the f16 rounding) where `ZJB1`
+/// is lossless — the magic is the only place that difference is signalled.
+pub fn write_bundle_f16(files: &[(String, Vec<u8>)], notice: &str) -> Result<Vec<u8>> {
+    write_bundle_with(files, notice, ZJB_F16_MAGIC)
+}
+
+fn write_bundle_with(
+    files: &[(String, Vec<u8>)],
+    notice: &str,
+    magic: &[u8; 4],
+) -> Result<Vec<u8>> {
     let mut table = 16 + notice.len();
     for (rel, _) in files {
         table += 2 + rel.len() + 16;
     }
     let mut offset = table.next_multiple_of(ALIGN);
     let mut out = Vec::new();
-    out.extend_from_slice(ZJB_MAGIC);
+    out.extend_from_slice(magic);
     out.extend_from_slice(&VERSION.to_le_bytes());
     out.extend_from_slice(&(files.len() as u32).to_le_bytes());
     let n = u32::try_from(notice.len()).map_err(|_| model_err("bundle: notice too long"))?;
@@ -302,17 +354,24 @@ impl PackedBundle {
         Self::default()
     }
 
-    /// Parse a `ZJB1` file.
+    /// Parse a `ZJB1` / `ZJB2` file.
     pub fn parse(data: Vec<u8>) -> Result<Self> {
         let mut b = Self::new();
         b.add(data)?;
         Ok(b)
     }
 
-    /// Add the files of another `ZJB1` bundle. A path already present keeps its first copy
-    /// (bundles of the same model share the common checkpoints, byte for byte).
+    /// Add the files of another bundle (`ZJB1` or `ZJB2`). A path already present keeps its
+    /// first copy (bundles of the same model share the common checkpoints, byte for byte).
     pub fn add(&mut self, data: Vec<u8>) -> Result<()> {
-        let mut r = header(&data, ZJB_MAGIC)?;
+        let magic = if data.starts_with(ZJB_MAGIC) {
+            ZJB_MAGIC
+        } else if data.starts_with(ZJB_F16_MAGIC) {
+            ZJB_F16_MAGIC
+        } else {
+            return Err(model_err("packed model: bad magic"));
+        };
+        let mut r = header(&data, magic)?;
         let count = r.u32()?;
         if count > MAX_ENTRIES {
             return Err(Error::LimitExceeded("bundle: too many files"));
@@ -403,6 +462,16 @@ impl<S: crate::model::ModelSource> Recorder<S> {
     /// Pack every file read so far, reduced to the tensors looked up in it. Tensors keep their
     /// file order.
     pub fn pack(&self, notice: &str) -> Result<Vec<u8>> {
+        self.pack_impl(notice, false)
+    }
+
+    /// The `ZJB2` variant of [`Recorder::pack`]: float weights are stored as f16
+    /// ([`write_zjm_f16`]) — half the bytes, lossy by the f16 rounding only.
+    pub fn pack_f16(&self, notice: &str) -> Result<Vec<u8>> {
+        self.pack_impl(notice, true)
+    }
+
+    fn pack_impl(&self, notice: &str, f16: bool) -> Result<Vec<u8>> {
         let seen = self
             .seen
             .lock()
@@ -416,9 +485,18 @@ impl<S: crate::model::ModelSource> Recorder<S> {
                 .filter(|n| names.contains(*n))
                 .map(ToString::to_string)
                 .collect();
-            files.push((rel.clone(), write_zjm(&ck, &ordered)?));
+            let zjm = if f16 {
+                write_zjm_f16(&ck, &ordered)?
+            } else {
+                write_zjm(&ck, &ordered)?
+            };
+            files.push((rel.clone(), zjm));
         }
-        write_bundle(&files, notice)
+        if f16 {
+            write_bundle_f16(&files, notice)
+        } else {
+            write_bundle(&files, notice)
+        }
     }
 }
 

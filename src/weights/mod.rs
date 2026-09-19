@@ -11,6 +11,7 @@
 //! `benchmarks/wasm_size_*.md`). With `pth` off, [`Checkpoint::parse`] accepts packed files only.
 
 pub mod dtype;
+pub mod f16;
 pub mod packed;
 #[cfg(feature = "pth")]
 mod pickle;
@@ -265,7 +266,25 @@ impl<'a> Checkpoint<'a> {
         Ok((dtype, shape, bytes))
     }
 
+    /// f32 tensor, by name. A tensor stored as `f16` (packed `ZJB2` bundles) is upcast to f32
+    /// here — the upcast is exact and deterministic, so the rest of the pipeline sees plain
+    /// f32 weights whichever container they came from.
     pub fn f32(&self, name: &str) -> Result<Tensor<f32>> {
+        if self
+            .info(name)
+            .ok_or_else(|| model_err(alloc::format!("tensor `{name}` not found")))?
+            .dtype
+            == DType::F16
+        {
+            let (shape, b) = self.bytes(name, DType::F16)?;
+            let data = b
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|c| f16::f16_to_f32(u16::from_le_bytes(*c)))
+                .collect();
+            return Ok(Tensor { shape, data });
+        }
         let (shape, b) = self.bytes(name, DType::F32)?;
         let data = b
             .as_chunks::<4>()
