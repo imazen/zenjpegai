@@ -22,3 +22,21 @@ h1 { font-size: 1.4rem; }
 .card .timing { font-size: 0.75rem; font-family: ui-monospace, monospace; opacity: 0.8; min-height: 2.4em; }
 footer { margin-top: 40px; font-size: 0.8rem; opacity: 0.7; }
 a { color: var(--accent); }
+
+/* ---- full-window viewer (viewer.js) ---- */
+.jai-card-clickable { cursor: zoom-in; }
+html.jai-viewer-open, html.jai-viewer-open body { overflow: hidden; }
+.jai-viewer { position: fixed; inset: 0; z-index: 100; display: flex; flex-direction: column; background: #101010f2; color: #eee; }
+.jai-viewer[hidden] { display: none; }
+.jai-viewer-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; padding: 8px 12px; font: 13px ui-monospace, monospace; }
+.jai-viewer-title { font-weight: 600; }
+.jai-viewer-readout { background: #ffffff22; padding: 3px 8px; border-radius: 6px; }
+.jai-viewer-zoom, .jai-viewer-compare { display: flex; gap: 4px; }
+.jai-viewer button { font: 12px ui-monospace, monospace; padding: 3px 10px; border-radius: 999px; border: 1px solid #888; background: transparent; color: inherit; cursor: pointer; }
+.jai-viewer button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #fff; }
+.jai-viewer-close { font-size: 16px; margin-left: auto; }
+.jai-viewer-pane { position: relative; flex: 1; overflow: hidden; touch-action: none; cursor: grab; }
+.jai-viewer-pane:active { cursor: grabbing; }
+.jai-viewer-canvas { position: absolute; left: 0; top: 0; }
+.jai-viewer-status { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); font: 14px ui-monospace, monospace; }
+.jai-viewer-hint { position: absolute; left: 0; right: 0; bottom: 6px; text-align: center; font: 11px ui-monospace, monospace; opacity: 0.55; pointer-events: none; }

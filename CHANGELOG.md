@@ -207,6 +207,18 @@
 - `mans`: me-tANS entropy coder (tables, decoder, encoder), bit-exact against the reference C++ extension.
 
 #### Browser & WebAssembly
+- Demo: fill-window decoded-image viewer (`viewer`, 2026-09-19) — click a card for a
+  full-window overlay with a prominent device-pixel-ratio readout
+  (`1 image px = <r> device px · dppx <n> · zoom <z>% · <W>×<H> image · <cw>×<ch> CSS px ·
+  <dw>×<dh> device px`), fit / 1:1-device / fill zoom modes plus wheel/pinch free zoom and
+  drag pan, device-pixel-sized backing store (`image-rendering: pixelated` only at ≥2:1),
+  and a compare toggle across the 0.25/0.75 bpp decodes plus the shipped `_native/`
+  reference PNGs at identical zoom/pan. Reuses the card's presented canvas instead of
+  re-decoding where the browser can sample it (incl. the GPU path); at most one
+  full-resolution RGBA copy, released on close. `role=dialog`/`aria-modal`, focus trap,
+  Esc/click-outside/browser-Back close, arrow-key navigation. `web/demo/viewer.js`,
+  covered by `web/tests/viewer.spec.ts` in every project (deviceScaleFactor 1 and 2 on
+  chromium; the dppx-2 case is chromium-only since the option is).
 - Browser startup fast path + Cloudflare Pages (`cfpages`, 2026-09-19): the demo now also
   deploys to `zenjpegai.pages.dev` — a `deploy-cloudflare` job in `pages.yml` runs
   `wrangler pages deploy` on the same `dist/site` artifact (classic Pages project, secrets

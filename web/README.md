@@ -164,7 +164,26 @@ first observer callback), and clicking the other rate decodes it with queue-jump
 Each card's canvas is pre-sized from the manifest so the layout never shifts while a decode is
 queued (`data-state`: pending/queued/decoding/done/error). Timing shows fetch, queue wait,
 model-load, and decode ms, plus build variant (`simd`/`threads`), SIMD tier, and a WebGPU
-feature-detection note (see the "Not done" table). `web/demo/sw-coi.js` +
+feature-detection note (see the "Not done" table).
+
+Clicking a decoded card opens a fill-window viewer (`web/demo/viewer.js`, overlay
+`role=dialog`/`aria-modal`, focus trap; Esc, click/tap outside, or browser Back — via a
+history state — closes it; arrow keys move between cards). Its headline readout states the
+sampling honestly and live (resize / zoom / `matchMedia('(resolution)')` dpr changes):
+`1 image px = <r> device px · dppx <window.devicePixelRatio> · zoom <z>% · <W>×<H> image ·
+<cw>×<ch> CSS px · <dw>×<dh> device px`, where `zoom` is image pixels per CSS pixel — at
+"1:1 device" zoom every image pixel lands on exactly one device pixel (r = 1), the honest
+way to inspect codec artefacts (default when the picture fits, else fit; `fill` and
+wheel/pinch free zoom with drag pan are the others). The backing store is sized in device
+pixels (`canvas.width = cssW * dpr`) so nothing is resampled away, with
+`image-rendering: pixelated` only at ≥2:1 magnification. Pixels come from `drawImage`
+capture of the card's presented canvas — including the GPU-blit path — so opening costs no
+re-decode (browsers that can't sample a transferred canvas fall back to one `pool.decode`),
+and the single full-resolution staging canvas is released on close. A compare row flips
+between the 0.25 and 0.75 bpp decodes (the other rate decodes on demand through the card's
+queue-jump path, timings landing on the card) and, where the demo ships the reference
+decoder PNGs, a third `ref` state — all at identical zoom and pan for pixel-for-pixel
+artefact comparison. `web/demo/sw-coi.js` +
 `coi-loader.js`: an own-written (not vendored) from-scratch implementation of the
 `coi-serviceworker` technique — a service worker that adds COOP/COEP to every same-origin
 response so a static host that can't send those headers (GitHub Pages) still gets

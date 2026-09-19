@@ -781,6 +781,19 @@ measured numbers in the status table above when you close an item.
   github.io pre 75 req/58 JS/first-image 1464-2162 ms -> CF preview 29 req/8 JS/1351-1902 ms,
   `webgpu-threads`, no reload, 0 service workers. Detail and the `/dist/*` immutable caveat:
   `web/README.md` §8.
+  **B6 done 2026-09-19** (viewer) — fill-window demo viewer: `web/demo/viewer.js` +
+  `web/tests/viewer.spec.ts`. Click a decoded card for a `role=dialog`/`aria-modal` overlay
+  (focus trap, Esc / click-outside / browser-Back via history state, arrows move between
+  cards) with a live readout — `1 image px = <r> device px · dppx <devicePixelRatio> · zoom
+  <z>% · <W>×<H> image · <cw>×<ch> CSS px · <dw>×<dh> device px` — updated on resize/zoom/
+  `matchMedia('(resolution)')` dpr changes. Zoom modes fit / 1:1-device / fill plus
+  wheel/pinch `free`, drag pan; the backing store is sized in device pixels
+  (`canvas.width = cssW*dpr`, `image-rendering: pixelated` only at ≥2:1). Pixels come from
+  `drawImage` capture of the card's presented canvas (GPU blit included — zero re-decodes on
+  open; engines that can't sample a transferred canvas fall back to one `pool.decode`), one
+  staging canvas at natural size, dropped on close. Compare chips flip 0.25/0.75 bpp through
+  the card's queue-jump decode (timings land on the card, exactly-once proven by pool stats)
+  plus an optional `_native/` reference-PNG state, all at identical zoom/pan.
   **B3** GPU kernels: mostly done (b3gpu + b3gpu2, 2026-09-18). **Still missing:** `shader-f16`
   (opt-in feature; the RTX 2080 exposes `shaderFloat16` + 16-bit storage access, so it is
   feasible — needs f16 weight copies, f16 kernel variants, and a separately measured parity

@@ -2,7 +2,7 @@
 // Assembles the servable site tree at `web/dist/site/` (gitignored) from:
 //   web/src/*.js              -> site/src/            (worker.js, pool.js, polyfill.js)
 //   web/dist/pkg-{simd,threads} -> site/dist/pkg-*     (run scripts/build-wasm.sh first)
-//   web/demo/{index.html,demo.js,demo.css,IMAGES.md,sw-coi.js,coi-loader.js,_headers} -> site/
+//   web/demo/{index.html,demo.js,demo.css,viewer.js,IMAGES.md,sw-coi.js,coi-loader.js,_headers} -> site/
 //   web/.demo-assets/*.jai    -> site/streams/         (run scripts/fetch-demo-assets.mjs first)
 //   web/.demo-assets/m*.zjb   -> site/models/
 //   web/.demo-assets/manifest.json -> site/manifest.json
@@ -42,7 +42,7 @@ if (haveThreads) cpSync(join(web, 'dist', 'pkg-threads'), join(site, 'dist', 'pk
 if (haveWebgpu) cpSync(join(web, 'dist', 'pkg-webgpu'), join(site, 'dist', 'pkg-webgpu'), { recursive: true });
 if (haveWebgpuThreads) cpSync(join(web, 'dist', 'pkg-webgpu-threads'), join(site, 'dist', 'pkg-webgpu-threads'), { recursive: true });
 
-for (const f of ['index.html', 'demo.js', 'demo.css', 'IMAGES.md', 'sw-coi.js', 'coi-loader.js', '_headers']) {
+for (const f of ['index.html', 'demo.js', 'demo.css', 'viewer.js', 'IMAGES.md', 'sw-coi.js', 'coi-loader.js', '_headers']) {
   cpSync(join(web, 'demo', f), join(site, f));
 }
 

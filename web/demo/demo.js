@@ -1,6 +1,7 @@
 import { DecoderPool } from './src/pool.js';
 import { ensureCrossOriginIsolated } from './coi-loader.js';
 import { prefetchModelPairs, takeModelBuffers, modelPairNames } from './src/prefetch.js';
+import { installDemoViewer } from './viewer.js';
 
 // Best-effort: on a host that can't send COOP/COEP (GitHub Pages), this registers a service
 // worker that adds them and reloads once. If it can't (or the reload is already in flight),
@@ -126,6 +127,16 @@ const nearViewport = 'IntersectionObserver' in globalThis
     }, { rootMargin: '100% 0px' })
   : null;
 
+// Content-addressed stream URL: a stream file keeps its name across asset swaps, so the
+// digest from the manifest goes in the query — swapped content is a different URL and can
+// never be served from a stale HTTP-cache/Cache-API entry. The `variant.file`/`sha256`
+// fields are absent in manifests from before this scheme; fall back to the name convention.
+function streamUrl(slug, variant) {
+  const file = variant.file || `${slug}_bpp${String(Math.round(variant.bpp * 100)).padStart(2, '0')}.jai`;
+  return `streams/${file}${variant.sha256 ? `?v=${variant.sha256}` : ''}`;
+}
+
+const viewerCards = [];
 for (const img of manifest.images) {
   const card = document.createElement('div');
   card.className = 'card';
@@ -156,6 +167,19 @@ for (const img of manifest.images) {
   card.append(canvas, h3, meta, rates, timing);
   $gallery.append(card);
 
+  // Click-to-open viewer wiring (see viewer.js): `activeVariant` reports the variant the
+  // card canvas currently shows (set inside decodeVariant once the present lands) so the
+  // viewer can capture it instead of re-decoding; `presentVariant` runs the same queue-jump
+  // decode a rate-button click would, so its timings land on the card as usual.
+  viewerCards.push({
+    el: card,
+    canvas,
+    img,
+    title: img.slug,
+    activeVariant: () => canvas.__variantIdx ?? -1,
+    presentVariant: (idx) => decodeVariant(img.slug, img.variants[idx], canvas, timing, buttons, buttons[idx], URGENT),
+  });
+
   // Decode the first (lowest-bpp) variant automatically once the card is near the viewport.
   let started = false;
   card.__start = () => {
@@ -183,12 +207,7 @@ async function decodeVariant(slug, variant, canvas, timing, buttons, active, pri
   for (const b of buttons) b.setAttribute('aria-pressed', String(b === active));
   timing.textContent = 'queued…';
   if (card) card.dataset.state = 'queued';
-  // Content-addressed URL: a stream file keeps its name across asset swaps, so the digest
-  // from the manifest goes in the query — swapped content is a different URL and can never
-  // be served from a stale HTTP-cache/Cache-API entry. The `variant.file`/`sha256` fields
-  // are absent in manifests from before this scheme; fall back to the name convention.
-  const file = variant.file || `${slug}_bpp${String(Math.round(variant.bpp * 100)).padStart(2, '0')}.jai`;
-  const url = `streams/${file}${variant.sha256 ? `?v=${variant.sha256}` : ''}`;
+  const url = streamUrl(slug, variant);
   const t0 = performance.now();
   const bytes = await fetch(url).then((r) => r.arrayBuffer());
   const t1 = performance.now();
@@ -214,14 +233,37 @@ async function decodeVariant(slug, variant, canvas, timing, buttons, active, pri
     canvas.setAttribute('width', String(r.width));
     canvas.setAttribute('height', String(r.height));
     if (card) card.dataset.state = 'done';
+    // The canvas now shows this variant — the viewer's `activeVariant` reads it.
+    canvas.__variantIdx = buttons.indexOf(active);
     const total = performance.now() - t0;
     const t = r.timings;
     const gpuNs = t.gpu && t.gpu.gpuNs != null ? ` · gpu ${(t.gpu.gpuNs / 1e6).toFixed(0)}ms` : '';
     const fell = t.gpuError ? ` · fallback: ${t.gpuError}` : '';
     timing.textContent = `fetch ${(t1 - t0).toFixed(0)}ms · queued ${(t.queued || 0).toFixed(0)}ms · models ${t.models.toFixed(0)}ms · decode ${t.decode.toFixed(0)}ms · total ${total.toFixed(0)}ms · ${t.variant}/${t.tier} · ${t.path}+${r.presented}${gpuNs}${fell}`;
+    return r;
   } catch (err) {
     if (card) card.dataset.state = 'error';
     timing.textContent = `error: ${err.message}`;
     console.error(err);
+    return null;
   }
 }
+
+installDemoViewer({
+  cards: viewerCards,
+  // Fallback for browsers that can't sample a canvas whose control was transferred
+  // offscreen: one re-decode through the pool, feeding it this variant's prefetched model
+  // buffers exactly like the card's decode path does.
+  decode: async (img, variant, bytes, opts) =>
+    pool.decode(bytes, {
+      ...opts,
+      modelBuffers:
+        variant.modelId != null && variant.operatingPoint
+          ? await takeModelBuffers(prefetched, modelPairNames(variant.modelId, variant.operatingPoint))
+          : null,
+    }),
+  fetchStream: (img, variant) => fetch(streamUrl(img.slug, variant)).then((r) => r.arrayBuffer()),
+  // Reference-decoder PNGs ship as _native/<stem>.native.png (see build-site.mjs).
+  nativeUrl: (img, variant) =>
+    `_native/${(variant.file || `${img.slug}_bpp${String(Math.round(variant.bpp * 100)).padStart(2, '0')}.jai`).replace(/\.jai$/, '.native.png')}`,
+});
