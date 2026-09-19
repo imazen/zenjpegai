@@ -46,6 +46,29 @@ cargo build --release --features cli
 ZENJPEGAI_MODELS=path/to/models target/release/zenjpegai decode picture.bits picture.png --time
 ```
 
+## Embedding / resource control
+
+Everything below is safe Rust and works the same in the browser build (wasm exports named in
+the last rows).
+
+| What | API |
+| --- | --- |
+| Pre-flight limits (dimensions, codestream size, estimated heap) checked before any picture-sized allocation | `Limits` / `EncodeLimits` (`Decoder::limits`, `Encoder::limits`; `max_memory_bytes` rejects by estimate) |
+| Heap estimate of one job, from headers alone | `estimate_memory` / `estimate_encode_memory`, `Decoder::estimate_memory`, `Encoder::estimate_memory` → `MemoryEstimate { live_bytes, peak_bytes() }` |
+| Admission control: a shared byte budget several decoders/encoders draw `live_bytes` grants from — FIFO wait, fail-fast (`Error::ResourceBusy`), `allow_oversize` runs one too-big job alone | `MemoryBudget` (`new`, `with_policy(BudgetPolicy::Wait|FailFast)`, `with_max_jobs`, `allow_oversize`, `acquire`, `held`, `jobs`, `waiting`) wired with `Decoder::budget` / `Encoder::budget`; grants release on drop, error or cancel |
+| Cancellation of waits and decodes | `enough::Stop` (`decode_with`, `decode_picture_with`, `BudgetGuard` waiters → `Error::Cancelled`) |
+| Measured heap of one call and of the process | `MemoryReport { tracked_peak_bytes, tracked_live_bytes, pool_bytes }` via `Decoder::memory_report` / `Encoder::memory_report` (cumulative), `decode_picture_report`, `decode_with_report`, `encode_report` (per call), `MemoryWatch` (arbitrary spans) |
+| Recycle pool bound and drain | `nn::fast::set_pool_limit` / `pool_limit` (default 24 buffers / 1 GiB), `Decoder::release_buffers` / `Encoder::release_buffers` |
+| GPU working set | `gpu` pool slots are bounded and evict by plan fit (`gpu::plan::Pool`) — no external knob |
+| CLI | `zenjpegai decode|encode --memory-budget <bytes> --memory-report` |
+| Browser | wasm `estimateMemory`, `memoryReport`, `releaseBuffers`; per-decode `timings.memory`/`wasmBytes`; `DecoderPool({ maxBytesInFlight })` byte-based admission on the shared queue |
+
+The estimate's calibration lives in `src/decoder/limits.rs` / `src/encoder/limits.rs`
+(picture + synthesis-tile terms per operating point, plus the cold model-load peak per
+`model_id`); `tests/memory_ref.rs` asserts it covers the tracked peak of every reference
+stream, and `scripts/bench/memory_tracked.sh` reconciles the tracked numbers with
+heaptrack (`benchmarks/memory_tracked_*.tsv`).
+
 ## Speed
 
 Decode time on a Ryzen 9 9950X3D, same streams, same machine, no `-C target-cpu=native`

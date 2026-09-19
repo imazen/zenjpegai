@@ -92,6 +92,10 @@ if [ "$SET" = rate ] || [ "$SET" = all ]; then
   for bpp in 012 025 075 100; do
     one "img01_base_off_bpp$bpp" $IMG01 "$((10#$bpp))" cfg/tools_off.json cfg/profiles/base.json
   done
+  # The 2 MP picture at the two other operating points — the memory bench's large-image SOP /
+  # HOP cases (img30 covers the small-image ones in `smoke`).
+  one img01_simple_off_bpp050 $IMG01 50 cfg/tools_off.json cfg/profiles/simple.json
+  one img01_high_off_bpp050 $IMG01 50 cfg/tools_off.json cfg/profiles/high.json
 fi
 
 if [ "$SET" = regions ] || [ "$SET" = all ]; then

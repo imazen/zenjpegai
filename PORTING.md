@@ -855,6 +855,31 @@ measured numbers in the status table above when you close an item.
   `benchmarks/gpu_profile_2026-09-18_rtx2080.tsv` (per-dispatch; the params column feeds the
   roofline analysis in `scripts/bench/gpu_roofline.py`).
 
+### Memory / embedding
+
+- ~~**M1 Tracked heap + admission control.**~~ **Done 2026-09-19**: `src/mem.rs` — a
+  process-wide safe-Rust byte ledger (no `#[global_allocator]`; every large allocation owns a
+  `Charge` RAII token: `Tensor`/`BTensor` buffers incl. the `nn::fast` pool's live/parked
+  moves, packed weights, checkpoint bytes, ANS stream copies, entropy-region scratch, output
+  planes, the codestream writer, TLS conv scratch; a single `TOTAL` atomic feeds peak sampling
+  so concurrent drops/parks cannot tear the read). `MemoryReport { tracked_peak_bytes,
+  tracked_live_bytes, pool_bytes }` — per call via `MemoryWatch` /
+  `Decoder::decode_with_report` / `decode_with_stats` / `EncodeStats.memory`, cumulative via
+  `Decoder::memory_report` / `Encoder::memory_report`. Validated against heaptrack
+  (`scripts/bench/memory_tracked.sh`, `benchmarks/memory_tracked_2026-09-19.tsv`):
+  tracked/heaptrack ratio 0.95-1.00 on the six standard decodes and four encodes.
+  `MemoryBudget` (`decoder/budget.rs`): shared `Arc` byte budget, `Wait`/`FailFast` policy,
+  optional `max_jobs`, `allow_oversize` single-job tie-break, grants sized by
+  `estimate_memory`, released on completion/error/cancel — `Decoder::budget` /
+  `Encoder::budget`, CLI `--memory-budget`, `JpegAi{Decoder,Encoder}Config::with_budget`.
+  `estimate_memory` recalibrated: concurrent-synthesis-tile term + per-model-id cold
+  model-load floor (70/84 MiB); `tests/memory_ref.rs` asserts the estimate covers the tracked
+  peak on all 90 accepted reference vectors. wasm: `estimateMemory` / `memoryReport` exports,
+  per-decode `timings.memory`, `DecoderPool({ maxBytesInFlight })` byte admission (over-cap
+  jobs still run alone), demo timing line shows peak/pool/wasm bytes. Docs: README
+  "Embedding / resource control". Still missing: GPU-pool bytes are bounded but not in the
+  ledger; `MemoryWatch` under concurrent calls measures the process (documented upper bound).
+
 ### Decoder
 
 - **D1** eICCI on 4:2:0 / 4:2:2 (in progress on a SWE-2 agent; needs forced-flag vectors).

@@ -319,6 +319,23 @@
   miss the `≤1 LSB in <1/5000 samples` gate (1.1–8.0 % differ) and adversarial synthetic
   sources deviate up to 20 LSB — **rejected for shipped bundles; `ZJB1`/f32 stays the
   default**, the `--f16` option remains for consumers without the parity contract.
+- Tracked-heap accounting + admission control (`M1`, `src/mem.rs`): a process-wide safe-Rust
+  byte ledger — every large codec allocation (`Tensor`/`BTensor` buffers, the `nn::fast`
+  recycle pool's live/parked moves, packed weights, checkpoint bytes, ANS copies, entropy
+  scratch, output planes, the codestream writer) owns a `Charge` RAII token. Public surface:
+  `MemoryReport { tracked_peak_bytes, tracked_live_bytes, pool_bytes }` per call via
+  `MemoryWatch`, `Decoder::decode_with_report` / `decode_with_stats` / `EncodeStats.memory`,
+  cumulative via `Decoder::memory_report` / `Encoder::memory_report`; validated against
+  heaptrack at ratio 0.95-1.00 (`benchmarks/memory_tracked_2026-09-19.tsv`). `MemoryBudget`
+  shares a byte cap between decoder and encoder calls — `Wait`/`FailFast` policy, optional
+  `max_jobs`, `allow_oversize` tie-break, grants sized by `estimate_memory`, released on
+  completion/error/cancel (`Decoder::budget`, `Encoder::budget`, `Error::ResourceBusy`, CLI
+  `--memory-budget`/`--memory-report`, `*_with_budget` on the zencodec configs).
+  `estimate_memory` now models concurrent synthesis tiles and the cold model-load transient;
+  `tests/memory_ref.rs` checks it against the tracked peak on all 90 accepted reference
+  vectors. wasm exports `estimateMemory`/`memoryReport`, decode timings carry the per-call
+  report, `DecoderPool` accepts `maxBytesInFlight`, and the demo timing line shows
+  peak/pool/wasm bytes. See README "Embedding / resource control".
 - Investigated `colour_transform_idx = 2` (`scripts/ref_vectors/probe_colour_transform2.py`):
   dead, self-inconsistent code upstream — the decision is "not ported", such streams stay
   `Error::Unsupported` (PORTING.md "Reference dead code").
