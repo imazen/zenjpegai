@@ -150,11 +150,15 @@ export class DecoderPool {
     // it registered by canvasId so a retry needs no canvas.
     const transfer = [];
     if (msg.canvas) transfer.push(msg.canvas);
+    if (msg.modelBuffers) transfer.push(...Object.values(msg.modelBuffers));
     worker.postMessage(msg, transfer);
     // The canvas is gone from this thread now (transfer neuters it); the worker registered it
     // under `canvasId`, so a retry sends the id alone. Clear it so a retry can't try to
-    // re-transfer a detached object (that throws DataCloneError).
+    // re-transfer a detached object (that throws DataCloneError). Same for modelBuffers —
+    // each ArrayBuffer was transferred too, and the worker caches the decoded model on
+    // itself, so a retry needs none of them.
     msg.canvas = null;
+    msg.modelBuffers = null;
   }
 
   _dispatch() {
@@ -218,6 +222,10 @@ export class DecoderPool {
    *   the fact (the polyfill uses this for images that scroll into view while queued).
    * @param {function()} [opts.onDispatch] - called once the job leaves the queue and is posted
    *   to a worker (drives "queued -> decoding" placeholder states).
+   * @param {Object<string,ArrayBuffer>} [opts.modelBuffers] - `m<...>.zjb` file name ->
+   *   bundle bytes, from `prefetch.js`'s `takeModelBuffers`. Transferred to the worker
+   *   (detached here) and used instead of fetching/caching those bundles — only worth it for
+   *   a model the worker has not loaded yet.
    * @returns {Promise<{width:number, height:number, rgba:Uint8ClampedArray, timings:object}>}
    *   `timings.queued` is the ms the job spent waiting for a worker.
    */
@@ -226,7 +234,7 @@ export class DecoderPool {
       ? stream.buffer.slice(stream.byteOffset, stream.byteOffset + stream.byteLength)
       : stream;
     const id = ++this._seq;
-    const msg = { type: 'decode', id, stream: buf, modelsBaseUrl: this.modelsBaseUrl, bundleVersions: this.bundleVersions };
+    const msg = { type: 'decode', id, stream: buf, modelsBaseUrl: this.modelsBaseUrl, bundleVersions: this.bundleVersions, modelBuffers: opts.modelBuffers || null };
     return new Promise((resolve, reject) => {
       this._queue.push({
         id,
@@ -267,7 +275,7 @@ export class DecoderPool {
     return run;
   }
 
-  _present(stream, canvas, { verify = false, priority, onDispatch } = {}) {
+  _present(stream, canvas, { verify = false, priority, onDispatch, modelBuffers } = {}) {
     const buf = ArrayBuffer.isView(stream)
       ? stream.buffer.slice(stream.byteOffset, stream.byteOffset + stream.byteLength)
       : stream;
@@ -288,7 +296,7 @@ export class DecoderPool {
       canvas.__jaiCanvasId = canvasId;
       // `__jaiWorker` is assigned in _dispatch once a worker takes the job.
     }
-    const msg = { type: 'present', id, stream: buf, canvas: off, canvasId, modelsBaseUrl: this.modelsBaseUrl, bundleVersions: this.bundleVersions, verify };
+    const msg = { type: 'present', id, stream: buf, canvas: off, canvasId, modelsBaseUrl: this.modelsBaseUrl, bundleVersions: this.bundleVersions, verify, modelBuffers: modelBuffers || null };
     return new Promise((resolve, reject) => {
       this._queue.push({
         id,

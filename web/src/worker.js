@@ -24,10 +24,10 @@
 // back to the CPU engine internally anyway, but the threads package's CPU engine is faster.
 //
 // Message protocol (posted from `pool.js`):
-//   {type: 'decode', id, stream: ArrayBuffer, modelsBaseUrl, bundleVersions?}
+//   {type: 'decode', id, stream: ArrayBuffer, modelsBaseUrl, bundleVersions?, modelBuffers?}
 //     -> {type: 'result', id, width, height, rgba: ArrayBuffer, timings} (rgba.buffer transferred)
 //     -> {type: 'error', id, message}
-//   {type: 'present', id, stream: ArrayBuffer, canvas: OffscreenCanvas, modelsBaseUrl, verify}
+//   {type: 'present', id, stream: ArrayBuffer, canvas: OffscreenCanvas, modelsBaseUrl, verify, modelBuffers?}
 //     -> {type: 'result', id, width, height, presented: 'gpu'|'2d', png?, timings}
 //     Draws onto the transferred canvas: the webgpu package blits the decoder's RGBA texture
 //     without a CPU readback (`presented: 'gpu'`); anything else decodes and putImageData's on
@@ -40,6 +40,8 @@
 // `adapterProbe` is the JS-side `GPUAdapter.info` from the pre-download probe ({vendor,
 // architecture, device, description, isFallbackAdapter}) — the wgpu-side `gpu.adapter` only
 // carries `description`, which Chrome leaves empty for hardware adapters.
+
+import { prefetchBundle } from './prefetch.js';
 
 const isolated = typeof crossOriginIsolated !== 'undefined' && crossOriginIsolated === true;
 const cpuVariant = isolated ? 'threads' : 'simd';
@@ -81,52 +83,33 @@ function rayonThreads() {
     : Math.min(Math.max(1, navigator.hardwareConcurrency || 4), 16);
 }
 
-// Cache namespace for the model bundles. Keys inside it carry the bundle's own `?v=` version
-// token (see fetchBundle), so a bundle whose bytes change under the same file name gets a new
-// key. v1 keys had no version and could pin a stale bundle forever; the bump abandons them and
-// the delete below reclaims the space.
-const CACHE_NAME = 'zenjpegai-models-v2';
+// Cache namespace for the model bundles lives in `prefetch.js` (`MODEL_CACHE_NAME`). Keys
+// inside it carry the bundle's own `?v=` version token, so a bundle whose bytes change under
+// the same file name gets a new key. v1 keys had no version and could pin a stale bundle
+// forever; the v2 bump abandons them and the delete below reclaims the space. The page-side
+// prefetch writes entries under these same keys so `ensureModels` below hits them.
 const STALE_CACHES = ['zenjpegai-models-v1'];
 if (typeof caches !== 'undefined') for (const name of STALE_CACHES) caches.delete(name).catch(() => {});
 
-async function fetchBundle(url, version) {
-  // Cache API, not HTTP cache alone: guarantees the (multi-MB) bundle is fetched at most once
-  // per browser profile regardless of HTTP cache eviction, and lets the demo/tests assert a
-  // cache hit on the second image that reuses a model. The version token is part of the key
-  // (and of the fetch URL — harmless to a static host, which ignores the query): content
-  // swapped under the same file name is a different key, never a stale hit.
-  const key = version ? `${url}?v=${version}` : url;
-  let cache = null;
-  try {
-    cache = await caches.open(CACHE_NAME);
-  } catch {
-    // Cache API unavailable (some private-browsing modes); fall back to a plain fetch.
-  }
-  if (cache) {
-    const hit = await cache.match(key);
-    if (hit) return new Uint8Array(await hit.arrayBuffer());
-  }
-  const res = await fetch(key);
-  if (!res.ok) throw new Error(`model bundle fetch failed: ${key} (${res.status})`);
-  if (cache) {
-    try {
-      await cache.put(key, res.clone());
-    } catch {
-      // ignore cache write failures (quota, opaque response, etc.)
-    }
-  }
-  return new Uint8Array(await res.arrayBuffer());
-}
-
-/** `models/m<id>_common.zjb` + `models/m<id>_<op>.zjb`, relative to `modelsBaseUrl`. */
-async function ensureModels(mod, modelsBaseUrl, modelId, op, bundleVersions) {
+/** `models/m<id>_common.zjb` + `models/m<id>_<op>.zjb`, relative to `modelsBaseUrl`.
+ * The two halves are fetched in parallel (they are independent files; `addModels` still
+ * runs common-then-part). `buffers` is the optional `{fileName: ArrayBuffer}` the page
+ * transferred in with the job (`pool.js` `modelBuffers`): bundles the page prefetched —
+ * used directly, skipping even the Cache API read; anything missing falls back to
+ * `prefetchBundle`, which itself usually hits the prefetched cache entry. */
+async function ensureModels(mod, modelsBaseUrl, modelId, op, bundleVersions, buffers) {
   if (mod.hasModels(modelId, op)) return;
   const base = modelsBaseUrl.endsWith('/') ? modelsBaseUrl : `${modelsBaseUrl}/`;
   const common = `m${modelId}_common.zjb`;
-  mod.addModels(await fetchBundle(`${base}${common}`, bundleVersions?.[common]));
-  if (mod.hasModels(modelId, op)) return;
   const part = `m${modelId}_${op}.zjb`;
-  mod.addModels(await fetchBundle(`${base}${part}`, bundleVersions?.[part]));
+  const get = async (name) => {
+    const buf = buffers && buffers[name];
+    return buf ? new Uint8Array(buf) : new Uint8Array(await prefetchBundle(`${base}${name}`, bundleVersions?.[name]));
+  };
+  const [c, p] = await Promise.all([get(common), get(part)]);
+  mod.addModels(c);
+  if (mod.hasModels(modelId, op)) return;
+  mod.addModels(p);
 }
 
 // `self.onmessage` MUST be assigned before any `await` below, in the same synchronous turn the
@@ -288,7 +271,7 @@ async function decodeOne(msg) {
     const bytes = new Uint8Array(msg.stream);
     const t0 = performance.now();
     const head = mod.info(bytes);
-    await ensureModels(mod, modelsBaseUrl, head.modelId, head.operatingPoint, msg.bundleVersions);
+    await ensureModels(mod, modelsBaseUrl, head.modelId, head.operatingPoint, msg.bundleVersions, msg.modelBuffers);
     const t1 = performance.now();
     const img = await mod.decode(bytes); // a Promise in the webgpu package, sync elsewhere
     const t2 = performance.now();
@@ -320,7 +303,7 @@ async function presentOne(msg) {
     const bytes = new Uint8Array(msg.stream);
     const t0 = performance.now();
     const head = mod.info(bytes);
-    await ensureModels(mod, modelsBaseUrl, head.modelId, head.operatingPoint, msg.bundleVersions);
+    await ensureModels(mod, modelsBaseUrl, head.modelId, head.operatingPoint, msg.bundleVersions, msg.modelBuffers);
     const t1 = performance.now();
     let presented = '2d';
     let img = null;

@@ -1,5 +1,6 @@
 import { DecoderPool } from './src/pool.js';
 import { ensureCrossOriginIsolated } from './coi-loader.js';
+import { prefetchModelPairs, takeModelBuffers, modelPairNames } from './src/prefetch.js';
 
 // Best-effort: on a host that can't send COOP/COEP (GitHub Pages), this registers a service
 // worker that adds them and reloads once. If it can't (or the reload is already in flight),
@@ -59,6 +60,30 @@ const manifest = await fetch('manifest.json', { cache: 'no-cache' }).then((r) =>
 // under the same file name still gets a fresh cache entry.
 const bundleVersions = {};
 for (const [name, info] of Object.entries(manifest.models || {})) bundleVersions[name] = info.sha256;
+
+// Prefetch, while the wasm module is still downloading, the `common`+`op` bundles of the
+// model the FIRST card needs — then, once that pair is in, every other card's auto-decoded
+// variant model in manifest (= scroll) order, and finally the click-only second-rate
+// models — into the same Cache API keys the worker's `ensureModels` checks
+// (`src/prefetch.js`). The staggering matters: browsers run ~6 connections per origin, so
+// issuing all bundles at once would split the first card's ~16 MB across a third of the
+// link instead of all of it (the build-time <link preload> already starts this pair at
+// parse). This runs only on the post-reload (isolated) load on GitHub Pages: the coi reload
+// already happened in `ensureCrossOriginIsolated` above, so nothing prefetches on the
+// instance that is about to be thrown away.
+const pairOf = (v) => ({ modelId: v.modelId, op: v.operatingPoint });
+const firstVariant = manifest.images[0]?.variants?.[0];
+const prefetched = prefetchModelPairs('models/', firstVariant ? [pairOf(firstVariant)] : [], bundleVersions);
+Promise.allSettled([...prefetched.values()]).then(() => {
+  prefetchModelPairs('models/', [
+    ...manifest.images.slice(1).map((img) => img.variants[0]),
+    ...manifest.images.flatMap((img) => img.variants.slice(1)),
+  ].map(pairOf), bundleVersions)
+    .forEach((p, name) => {
+      if (!prefetched.has(name)) prefetched.set(name, p);
+    });
+});
+
 // `?gpu=off|auto|on|software|force-software` overrides the pool's adapter policy (default auto).
 const gpuMode = new URLSearchParams(location.search).get('gpu') || 'auto';
 const pool = new DecoderPool({ modelsBaseUrl: 'models/', bundleVersions, gpu: gpuMode });
@@ -168,10 +193,17 @@ async function decodeVariant(slug, variant, canvas, timing, buttons, active, pri
   const bytes = await fetch(url).then((r) => r.arrayBuffer());
   const t1 = performance.now();
   try {
+    // Hand the worker this stream's prefetched model bundles by transfer: they were fetched
+    // during init, so this skips even the Cache API read. `takeModelBuffers` consumes them —
+    // each later decode of the same model hits the cache entry prefetch also wrote.
+    const modelBuffers = variant.modelId != null && variant.operatingPoint
+      ? await takeModelBuffers(prefetched, modelPairNames(variant.modelId, variant.operatingPoint))
+      : null;
     // decodeToCanvas keeps presentation on the worker: 'gpu' means the RGBA texture was
     // blitted straight onto the canvas surface, '2d' means decoded pixels were putImageData'd.
     const r = await pool.decodeToCanvas(bytes, canvas, {
       priority,
+      modelBuffers,
       onDispatch: () => {
         timing.textContent = 'decoding…';
         if (card) card.dataset.state = 'decoding';

@@ -14,6 +14,8 @@
 // Worker, and `img-src ... blob:` only if a page opts a picture into render mode "img" (see
 // below); the default "canvas" mode needs neither `blob:` nor `data:`.
 import { DecoderPool } from './pool.js';
+import { prefetchModelPairs, takeModelBuffers, modelPairNames } from './prefetch.js';
+import { probeStreamInfo } from './stream-info.js';
 
 export const EXTENSION = '.jai';
 export const MIME = 'image/jpeg-ai';
@@ -191,6 +193,20 @@ async function decodeAndSwap(img, url, pool, opts, decodeOpts = {}) {
   if (!res.ok) throw new Error(`fetch ${url} failed: ${res.status}`);
   const bytes = await res.arrayBuffer();
   const t1 = performance.now();
+  // The worker would read these same two header fields (`modelId`, operating point) after
+  // wasm init and only then start the multi-MB model fetch — prefetching here, straight off
+  // the stream bytes, overlaps that download with the queue ahead of this job (`prefetch.js`
+  // writes the same Cache API keys `ensureModels` checks). The fetched pair is then handed
+  // to the worker by transfer — awaited BEFORE enqueueing so the worker never starts a
+  // second, racing fetch for the same bundle. Best-effort: a stream that does not probe gets
+  // no prefetch and the worker fetches exactly as before.
+  const head = probeStreamInfo(bytes);
+  const modelBuffers = head
+    ? await takeModelBuffers(
+        prefetchModelPairs(pool.modelsBaseUrl, [head], opts.bundleVersions),
+        modelPairNames(head.modelId, head.op),
+      )
+    : null;
   const mode = img.getAttribute('data-jai-render') || opts.renderMode;
   const alt = img.getAttribute('alt') ?? '';
   // Canvas mode can draw entirely inside the worker (`pool.decodeToCanvas`): the GPU path
@@ -208,10 +224,10 @@ async function decodeAndSwap(img, url, pool, opts, decodeOpts = {}) {
   let canvas = null;
   if (canWorkerDraw) {
     canvas = probe;
-    const r = await pool.decodeToCanvas(bytes, canvas, decodeOpts);
+    const r = await pool.decodeToCanvas(bytes, canvas, { ...decodeOpts, modelBuffers });
     ({ width, height, presented, timings } = r);
   } else {
-    const r = await pool.decode(bytes, decodeOpts);
+    const r = await pool.decode(bytes, { ...decodeOpts, modelBuffers });
     ({ width, height, rgba, timings } = r);
   }
   img.removeAttribute('data-jai-state');

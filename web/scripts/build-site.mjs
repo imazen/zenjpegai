@@ -8,7 +8,7 @@
 //   web/.demo-assets/manifest.json -> site/manifest.json
 //   upstream-notices/LICENSE  -> site/upstream-notices/LICENSE
 // Used both by the Playwright suite (serve.mjs points at this tree) and by the Pages workflow.
-import { cpSync, existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
@@ -54,6 +54,30 @@ for (const f of readdirSync(assets)) {
   else if (f.endsWith('.jai')) cpSync(join(assets, f), join(site, 'streams', f));
   else if (f.endsWith('.zjb')) cpSync(join(assets, f), join(site, 'models', f));
   else if (f === 'manifest.json') cpSync(join(assets, f), join(site, 'manifest.json'));
+}
+
+// `<link rel="preload" as="fetch" crossorigin="use-credentials">` for the FIRST card's model
+// pair: the fetch then starts at HTML parse, ahead of even the manifest read in demo.js. The
+// `?v=` digests only exist in manifest.json, so the links can only be stamped here at build
+// time — never hard-code them in demo/index.html. `use-credentials` + `prefetch.js`'s
+// `credentials: 'include'` are the pairing that makes the later fetch() reuse the preloaded
+// response instead of double-fetching (measured: anonymous `crossorigin` does not match
+// either `omit` or `same-origin` fetches).
+{
+  const mf = JSON.parse(readFileSync(join(site, 'manifest.json'), 'utf8'));
+  const first = mf.images?.[0]?.variants?.[0];
+  const preload = [];
+  if (first?.modelId != null && first?.operatingPoint) {
+    for (const name of [`m${first.modelId}_common.zjb`, `m${first.modelId}_${first.operatingPoint}.zjb`]) {
+      const sha = mf.models?.[name]?.sha256;
+      preload.push(`<link rel="preload" as="fetch" href="models/${name}${sha ? `?v=${sha}` : ''}" crossorigin="use-credentials">`);
+    }
+  }
+  if (preload.length) {
+    const htmlPath = join(site, 'index.html');
+    const html = readFileSync(htmlPath, 'utf8');
+    writeFileSync(htmlPath, html.replace('</head>', `${preload.join('\n')}\n</head>`));
+  }
 }
 
 const fixtures = join(web, 'tests', 'fixtures');
