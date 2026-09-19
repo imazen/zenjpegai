@@ -249,6 +249,7 @@ pub struct Encoder {
     engine: Engine,
     tables: AnsTables,
     limits: EncodeLimits,
+    budget: Option<crate::decoder::MemoryBudget>,
     cache: Mutex<HashMap<(usize, OperatingPoint), Arc<ModelSet>>>,
     /// eICCI networks loaded for the selection search, shared between encodes.
     icci_nets: crate::model::icci::NetCache,
@@ -272,6 +273,8 @@ struct Component {
     residual_q: Tensor<i16>,
     mask: Tensor<bool>,
     cube_flag: Vec<bool>,
+    /// `cube_flag`'s bytes in the tracked ledger (see [`crate::mem`]).
+    _charge: crate::mem::Charge,
     /// The header's `num_chs`: the residual substream's coded channel count.
     num_chs: usize,
 }
@@ -310,6 +313,7 @@ impl Encoder {
             engine,
             tables: AnsTables::new(),
             limits: EncodeLimits::default(),
+            budget: None,
             cache: Mutex::new(HashMap::new()),
             icci_nets: Default::default(),
         }
@@ -319,6 +323,20 @@ impl Encoder {
     pub fn limits(mut self, limits: EncodeLimits) -> Self {
         self.limits = limits;
         self
+    }
+
+    /// A shared byte budget every encode of this encoder draws its [`estimate_encode_memory`]
+    /// from before starting (default: none). The same [`crate::decoder::MemoryBudget`] type the
+    /// decoder uses: one budget shared by decoders and encoders bounds their *combined* heap.
+    pub fn budget(mut self, budget: Option<crate::decoder::MemoryBudget>) -> Self {
+        self.budget = budget;
+        self
+    }
+
+    /// The process's tracked-heap counters so far — see [`crate::MemoryReport`] and
+    /// [`crate::Decoder::memory_report`].
+    pub fn memory_report(&self) -> crate::MemoryReport {
+        crate::mem::cumulative()
     }
 
     /// Predicted heap use of encoding a `width` x `height` picture at operating point `op`
@@ -346,24 +364,31 @@ impl Encoder {
         &self.engine
     }
 
-    /// Judge `limits` against the source size and, when a memory bound is set, shrink the
-    /// recycled-buffer pool to fit under what is left (the decoder does the same in
-    /// `decode_inner`).
+    /// Judge `limits` against the source size, acquire the encode's share of the configured
+    /// [`crate::decoder::MemoryBudget`] (the grant lives in the returned guard) and, when a
+    /// memory bound is set, shrink the recycled-buffer pool to fit under what is left (the
+    /// decoder does the same in `decode_inner`).
     fn check_limits(
         &self,
         w: usize,
         h: usize,
         op: OperatingPoint,
         rate_matched: bool,
-    ) -> Result<()> {
+        stop: &dyn enough::Stop,
+    ) -> Result<Option<crate::decoder::budget::BudgetGuard>> {
         let estimate = self.limits.check(w, h, op, rate_matched)?;
+        let grant = self
+            .budget
+            .as_ref()
+            .map(|b| b.acquire(estimate.live_bytes, stop))
+            .transpose()?;
         if let Some(max) = self.limits.max_memory_bytes {
             let room = usize::try_from(max - estimate.live_bytes).unwrap_or(usize::MAX);
             if crate::nn::fast::pool_limit() > room {
                 crate::nn::fast::set_pool_limit(room);
             }
         }
-        Ok(())
+        Ok(grant)
     }
 
     fn model_set(&self, id: usize, op: OperatingPoint) -> Result<Arc<ModelSet>> {
@@ -454,6 +479,20 @@ impl Encoder {
             .map_err(|e| at!(e))
     }
 
+    /// [`Encoder::encode_with`] that also reports the tracked heap the call used (see
+    /// [`crate::MemoryReport`], [`crate::MemoryWatch`] — under concurrent callers the number
+    /// is the process's, an upper bound of this call's).
+    pub fn encode_report(
+        &self,
+        src: impl Into<SourceImage>,
+        params: EncodeParams,
+        stop: &dyn enough::Stop,
+    ) -> core::result::Result<(Vec<u8>, crate::MemoryReport), At<Error>> {
+        let watch = crate::mem::MemoryWatch::new();
+        let stream = self.encode_with(src, params, stop)?;
+        Ok((stream, watch.report()))
+    }
+
     /// [`Encoder::encode`] that also returns the intermediates of both components (luma,
     /// chroma). Used by the parity tests against the reference encoder's own dumps.
     pub fn encode_traced(
@@ -527,7 +566,8 @@ impl Encoder {
         params: EncodeParams,
         quality_map: Option<&QualityMap>,
     ) -> core::result::Result<(Vec<u8>, [ComponentTrace; 2]), At<Error>> {
-        self.check_limits(width, height, params.op, false)
+        let _grant = self
+            .check_limits(width, height, params.op, false, &enough::Unstoppable)
             .map_err(|e| at!(e))?;
         // Latents carry no source metadata: the reference's default (8 bit, 4:4:4, BT.709).
         let meta = SourceMeta::resolve(1, 1, 8, ColourTransform::Bt709, params.c_ver, params.c_hor)
@@ -559,7 +599,7 @@ impl Encoder {
         keep_trace: bool,
     ) -> Result<(Vec<u8>, Vec<Component>)> {
         stop.check()?;
-        self.check_limits(src.width(), src.height(), params.op, false)?;
+        let _grant = self.check_limits(src.width(), src.height(), params.op, false, stop)?;
         let meta = src.meta(params.c_ver, params.c_hor)?;
         let set = self.model_set(
             self.check_params(src.width(), src.height(), params)?,
@@ -650,7 +690,7 @@ impl Encoder {
         if !(target_bpp.is_finite() && target_bpp > 0.0) {
             return Err(Error::InvalidArgument("target bpp must be positive"));
         }
-        self.check_limits(src.width(), src.height(), op, true)?;
+        let _grant = self.check_limits(src.width(), src.height(), op, true, stop)?;
         let meta = src.meta(params.c_ver, params.c_hor)?;
         let pixels = (src.width() * src.height()) as f64;
         let input = preprocess(src, &meta)?;
@@ -1006,6 +1046,7 @@ impl Encoder {
 
         let mut components = Vec::with_capacity(2);
         let mut residual_payloads = Vec::with_capacity(2);
+        let mut payloads_charge = crate::mem::Charge::EMPTY;
         let mut lef_channel = None;
         // The post-filters decide on the decoded picture: keep the masked dequantised
         // residual (and the `likely` map for LSBS) so `reconstruct_latent` can rebuild
@@ -1091,12 +1132,20 @@ impl Encoder {
                 scales,
                 residual_q,
                 mask,
+                _charge: crate::mem::Charge::of_vec(&cube_flag),
                 cube_flag,
                 num_chs,
             };
             // 7a. This component's residual payload is coded now so that the big tensors it is
             //     built from can die here instead of after the other component's compress.
             residual_payloads.push(self.encode_residual(&hdr, ccs, &c)?);
+            payloads_charge.resize(
+                residual_payloads
+                    .iter()
+                    .flatten()
+                    .map(crate::mem::vec_bytes)
+                    .sum(),
+            );
             if ccs == 0 && params.lef {
                 // `LEF.compress` -> `analyze`: the channel of the luma scale map with the
                 // highest mean. Read it before the scale map is shed below.
@@ -1110,6 +1159,7 @@ impl Encoder {
                 c.residual_q = Tensor::zeros(0, 0, 0)?;
                 c.mask = Tensor::zeros(0, 0, 0)?;
                 c.cube_flag = Vec::new();
+                c._charge.resize(0);
             }
             components.push(c);
         }
@@ -1129,6 +1179,7 @@ impl Encoder {
         }
         let soz_threads = z_enc.finish();
         let soz = join_threads(&soz_threads.iter().map(|t| t.as_slice()).collect::<Vec<_>>());
+        let _soz_charge = crate::mem::Charge::of_vec(&soz);
 
         // 7c. The post-filters' `compress` (`EFElinear`, `eICCI`): each runs once on the
         //     decoded picture (never inside a rate trial). `reconstruct_latent` +
@@ -1288,11 +1339,14 @@ impl Encoder {
                 for (i, payload) in regions.iter().enumerate() {
                     let mut body = alloc::vec![i as u8];
                     body.extend_from_slice(payload);
+                    let _body_charge = crate::mem::Charge::of_vec(&body);
                     out.substream(marker, &body)?;
                 }
             } else {
                 let refs: Vec<&[u8]> = regions.iter().map(|p| p.as_slice()).collect();
-                out.substream(marker, &join_dependent_regions(&refs))?;
+                let joined = join_dependent_regions(&refs);
+                let _joined_charge = crate::mem::Charge::of_vec(&joined);
+                out.substream(marker, &joined)?;
             }
         }
         out.substream(Marker::Soz, &soz)?;
@@ -1317,6 +1371,8 @@ impl Encoder {
         let threads = comp.num_threads_r as usize;
         let grid = region_grid(hdr, ccs, Plane::Latent);
         let mut out = Vec::with_capacity(grid.core.len());
+        let mut out_charge = crate::mem::Charge::EMPTY;
+        let mut scratch_charge = crate::mem::Charge::EMPTY;
         let (mut sigma, mut coded, mut values) = (Vec::new(), Vec::new(), Vec::new());
         for area in &grid.core {
             let (rh, rw) = (
@@ -1347,10 +1403,16 @@ impl Encoder {
                     enc.encode_residual(&sigma, &coded, &values)?;
                 }
             }
+            scratch_charge.resize(
+                crate::mem::vec_bytes(&sigma)
+                    + crate::mem::vec_bytes(&coded)
+                    + crate::mem::vec_bytes(&values),
+            );
             let parts = enc.finish();
             out.push(join_threads(
                 &parts.iter().map(|t| t.as_slice()).collect::<Vec<_>>(),
             ));
+            out_charge.resize(out.iter().map(crate::mem::vec_bytes).sum());
         }
         Ok(out)
     }

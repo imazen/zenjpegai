@@ -97,14 +97,15 @@ fn stop_aborts_a_filtered_decode_early() {
     assert_eq!(dec.decode(&stream).unwrap(), full);
 }
 
-/// Peak heap of `zenjpegai decode --discard --pool-mb 0 --single-thread`, heaptrack,
-/// `benchmarks/memory_2026-09-17.tsv` (label `after-pool0`). The estimate must cover each and
-/// stay within 2x of it.
+/// Peak tracked heap of `zenjpegai decode --discard --pool-mb 0` (multi-thread — the estimate
+/// covers concurrent-tile peaks and the cold model-load transient, so a single-thread
+/// reference under-represents what it must bound), `benchmarks/memory_tracked_2026-09-19.tsv`
+/// regime. The estimate must cover each and stay within 2x of it.
 const MEASURED_LIVE: [(&str, u64); 4] = [
-    ("img30_simple_off_bpp050", 39_280_000),
-    ("img30_base_off_bpp050", 64_340_000),
-    ("img30_high_off_bpp050", 441_990_000),
-    ("img01_base_off_bpp050", 145_430_000),
+    ("img30_simple_off_bpp050", 40_640_000),
+    ("img30_base_off_bpp050", 65_700_000),
+    ("img30_high_off_bpp050", 443_340_000),
+    ("img01_base_off_bpp050", 237_840_000),
 ];
 
 #[test]

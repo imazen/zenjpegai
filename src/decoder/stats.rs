@@ -163,6 +163,7 @@ impl Probe {
             filters: d(&self.filters),
             output: d(&self.output),
             total: d(&self.total),
+            memory: crate::mem::MemoryReport::default(),
         }
     }
 }
@@ -342,6 +343,10 @@ pub struct DecodeStats {
     pub output: Duration,
     /// Whole call.
     pub total: Duration,
+    /// Tracked heap the call used — peak added to the process, still held, and parked in the
+    /// recycle pool (see [`crate::MemoryReport`]; not a stage time). Under concurrent decodes
+    /// it is the process's number, an upper bound of this call's.
+    pub memory: crate::mem::MemoryReport,
 }
 
 #[cfg(test)]

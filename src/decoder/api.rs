@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use enough::Stop;
 use whereat::{At, at};
 
+use super::budget::MemoryBudget;
 use super::limits::{Limits, MemoryEstimate};
 use super::output::{Picture, RgbImage, finish_par, to_source_format_par};
 use super::reconstruct;
@@ -16,6 +17,7 @@ use crate::error::Error;
 use crate::filters::{self, FilterContext};
 use crate::header::OperatingPoint;
 use crate::mans::AnsTables;
+use crate::mem::{MemoryReport, MemoryWatch};
 use crate::model::synthesis::{SynthesisPrimary, SynthesisSecondary};
 use crate::model::{self, CommonModel, ModelDir, ModelSource};
 use crate::nn::fast::Engine;
@@ -40,6 +42,7 @@ pub struct Decoder {
     operating_point: Option<OperatingPoint>,
     max_channels: [Option<u16>; 2],
     limits: Limits,
+    budget: Option<MemoryBudget>,
     cache: Mutex<HashMap<(usize, OperatingPoint), Arc<ModelSet>>>,
     icci_nets: filters::icci::NetCache,
 }
@@ -72,6 +75,7 @@ impl Decoder {
             operating_point: None,
             max_channels: [None, None],
             limits: Limits::default(),
+            budget: None,
             cache: Mutex::new(HashMap::new()),
             icci_nets: Default::default(),
         }
@@ -96,6 +100,23 @@ impl Decoder {
     pub fn limits(mut self, limits: Limits) -> Self {
         self.limits = limits;
         self
+    }
+
+    /// A shared byte budget every decode of this decoder draws its [`estimate_memory`] from
+    /// before starting (default: none — decode whenever called). One `MemoryBudget` shared by
+    /// several decoders bounds their *combined* heap: a call whose estimate does not fit
+    /// waits (FIFO, cancellation-aware) or fails fast, per the budget's policy. See
+    /// [`crate::decoder::budget`].
+    pub fn budget(mut self, budget: Option<MemoryBudget>) -> Self {
+        self.budget = budget;
+        self
+    }
+
+    /// The process's tracked-heap counters so far: all-time high-water mark, bytes held now
+    /// (decodes in flight, model caches, buffers parked in the recycle pool) and how much of
+    /// that is parked. See [`MemoryReport`] for what is and isn't counted.
+    pub fn memory_report(&self) -> MemoryReport {
+        crate::mem::cumulative()
     }
 
     /// Predicted heap use of decoding `stream` with this decoder's operating point, from the
@@ -187,13 +208,16 @@ impl Decoder {
     /// under a millisecond.
     pub fn decode_picture_stats(&self, stream: &[u8]) -> Result<(Picture, DecodeStats), At<Error>> {
         let probe = Probe::new();
+        let watch = MemoryWatch::new();
         let picture = self.decode_inner(
             stream,
             self.max_channels,
             Some(&probe),
             &enough::Unstoppable,
         )?;
-        Ok((picture, probe.finish()))
+        let mut stats = probe.finish();
+        stats.memory = watch.report();
+        Ok((picture, stats))
     }
 
     /// [`Decoder::decode_picture_stats`] decoding only the first `max_channels` latent
@@ -208,12 +232,43 @@ impl Decoder {
         max_channels: [Option<u16>; 2],
     ) -> Result<(Picture, DecodeStats), At<Error>> {
         let probe = Probe::new();
+        let watch = MemoryWatch::new();
         let mc = [
             max_channels[0].or(self.max_channels[0]),
             max_channels[1].or(self.max_channels[1]),
         ];
         let picture = self.decode_inner(stream, mc, Some(&probe), &enough::Unstoppable)?;
-        Ok((picture, probe.finish()))
+        let mut stats = probe.finish();
+        stats.memory = watch.report();
+        Ok((picture, stats))
+    }
+
+    /// [`Decoder::decode_picture`] that also reports the tracked heap the call used
+    /// (see [`MemoryReport`], [`MemoryWatch`] — under concurrent callers the number is the
+    /// process's, an upper bound of this call's). The decode itself is identical.
+    pub fn decode_picture_report(
+        &self,
+        stream: &[u8],
+        stop: &dyn enough::Stop,
+    ) -> Result<(Picture, MemoryReport), At<Error>> {
+        let watch = MemoryWatch::new();
+        let picture = self.decode_inner(stream, self.max_channels, None, stop)?;
+        Ok((picture, watch.report()))
+    }
+
+    /// [`Decoder::decode_with`] that also reports the tracked heap the call used — the
+    /// RGB-only counterpart of [`Decoder::decode_picture_report`].
+    pub fn decode_with_report(
+        &self,
+        stream: &[u8],
+        stop: &dyn enough::Stop,
+    ) -> Result<(RgbImage, MemoryReport), At<Error>> {
+        match self.decode_picture_report(stream, stop)? {
+            (Picture::Rgb(image), report) => Ok((image, report)),
+            (Picture::Yuv(_), _) => Err(at!(Error::Unsupported(
+                "the stream decodes to YUV planes: use decode_picture_report"
+            ))),
+        }
     }
 
     /// [`Decoder::decode_picture`] with cooperative cancellation (see [`Decoder::decode_with`]).
@@ -273,6 +328,15 @@ impl Decoder {
         let op = self.pick_operating_point(&headers)?;
         // Limits are judged on the header alone, before any picture-sized allocation.
         let estimate = self.limits.check_header(hdr, op).map_err(|e| at!(e))?;
+        // Admission control: wait for (or be refused by) the shared budget before the model
+        // load and the picture-sized buffers. The grant is held to the end of the call —
+        // success, error and cancellation alike — by the RAII guard.
+        let _grant = self
+            .budget
+            .as_ref()
+            .map(|b| b.acquire(estimate.live_bytes, stop))
+            .transpose()
+            .map_err(|e| at!(e))?;
         if let Some(max) = self.limits.max_memory_bytes {
             let room = usize::try_from(max - estimate.live_bytes).unwrap_or(usize::MAX);
             if crate::nn::fast::pool_limit() > room {

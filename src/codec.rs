@@ -140,6 +140,11 @@ impl CategorizedError for Error {
             Error::LimitExceeded(reason) => {
                 ErrorCategory::Resource(ResourceError::Limits(limit_kind_from_reason(reason)))
             }
+            // A shared MemoryBudget declined the job right now: a configured cap (memory)
+            // being contended, so the same category a per-job limit hit would produce.
+            Error::ResourceBusy(_) => {
+                ErrorCategory::Resource(ResourceError::Limits(LimitKind::Memory))
+            }
             Error::Cancelled(reason) => ErrorCategory::Stopped(*reason),
         }
     }
@@ -280,8 +285,24 @@ impl JpegAiDecoderConfig {
         engine: Engine,
         limits: Limits,
     ) -> Self {
+        Self::with_budget(models, engine, limits, None)
+    }
+
+    /// [`Self::with_limits`] with a shared [`crate::MemoryBudget`] every job's decode draws
+    /// its [`crate::estimate_memory`] grant from before starting — bounds the combined heap
+    /// of concurrent jobs driven through this config.
+    pub fn with_budget(
+        models: Arc<dyn ModelSource + Send + Sync>,
+        engine: Engine,
+        limits: Limits,
+        budget: Option<crate::MemoryBudget>,
+    ) -> Self {
         Self {
-            decoder: Arc::new(Decoder::with_source(Box::new(models), engine).limits(limits)),
+            decoder: Arc::new(
+                Decoder::with_source(Box::new(models), engine)
+                    .limits(limits)
+                    .budget(budget),
+            ),
             operating_point: None,
             limits,
         }
@@ -627,8 +648,24 @@ impl JpegAiEncoderConfig {
         engine: Engine,
         limits: EncodeLimits,
     ) -> Self {
+        Self::with_budget(models, engine, limits, None)
+    }
+
+    /// [`Self::with_limits`] with a shared [`crate::MemoryBudget`] every job's encode draws
+    /// its [`crate::estimate_encode_memory`] grant from before starting — bounds the combined
+    /// heap of concurrent encodes (and decodes, if the same budget is shared).
+    pub fn with_budget(
+        models: Arc<dyn ModelSource + Send + Sync>,
+        engine: Engine,
+        limits: EncodeLimits,
+        budget: Option<crate::MemoryBudget>,
+    ) -> Self {
         Self {
-            encoder: Arc::new(Encoder::with_source(Box::new(models), engine).limits(limits)),
+            encoder: Arc::new(
+                Encoder::with_source(Box::new(models), engine)
+                    .limits(limits)
+                    .budget(budget),
+            ),
             params: EncodeParams::default(),
             target_bpp: None,
             limits,

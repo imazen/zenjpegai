@@ -1,9 +1,14 @@
 //! Resource limits and the decoder's memory model.
 //!
 //! The model is calibrated on heaptrack measurements (`benchmarks/memory_2026-09-17.tsv`,
-//! recycling off): 560x888 SOP / BOP / HOP streams and a 2096x1400 BOP stream with 1024-sample
-//! synthesis tiles, all 8-bit 4:4:4 without post-filters. It reproduces those four points with
-//! 20-50 % headroom; other sizes are predictions of the model, not measurements.
+//! recycling off) and checked against the tracked-heap ledger (`src/mem.rs`,
+//! `benchmarks/memory_tracked_*.tsv`): 560x888 and 2096x1400 streams at every operating point,
+//! all 8-bit 4:4:4 without post-filters, the larger picture on 1024-sample synthesis tiles
+//! decoded on a 32-thread pool. It reproduces those points with 20-50 % headroom; other sizes
+//! are predictions of the model, not measurements. `live_bytes` is additionally floored at the
+//! cold model-load peak of the stream's `model_id` (65-76 MiB tracked, margined), which a
+//! fresh decoder transiently holds while packing the networks. `tests/memory_ref.rs` asserts
+//! the estimate covers the tracked peak of every reference stream.
 
 use crate::error::{Error, Result};
 use crate::header::{OperatingPoint, PictureHeader};
@@ -135,25 +140,69 @@ impl MemoryEstimate {
 
 /// Estimate the heap one decode of a picture with header `hdr` needs when synthesised with `op`.
 ///
-/// `live = fixed(op) + 20 B x picture samples + k(op) x samples of the largest synthesis tile`
-/// with `k` = 36 (SOP), 92 (BOP), 970 (HOP) bytes per sample; an untiled picture is one tile.
-/// `fixed` covers the packed networks and the transient checkpoint bytes of the first decode.
-/// See the module documentation for what this was measured on.
+/// `live = fixed(op) + 20 B x picture samples + k(op) x samples of the largest synthesis tile
+/// + e(op) x samples of the other tiles that synthesise concurrently` — tiles map onto the
+/// rayon pool, so a tiled picture holds up to `threads` tiles' working sets and every tile's
+/// buffered output at once. `k` = 36/92/970 bytes per largest-tile sample and `e` = 36/60/600
+/// per *extra* concurrently-scheduled tile sample for SOP/BOP/HOP — an extra tile's steady
+/// working set, calibrated to the observed 32-thread peak + ~30 % (the concurrent peak is
+/// schedule-dependent; that margin is the best fixed bound short of serialising tiles). An
+/// untiled picture is one tile and pays no `e` term. `fixed` covers the packed networks
+///   resident during the decode.
+///
+/// On top of that, `live` is at least `MODEL_LOAD_PEAK[model_id]`: a cold decoder loads and
+/// packs the networks inside the decode, which transiently holds the checkpoint bytes plus
+/// their parsed and packed copies — tracked peaks of ~65 MiB for the small-β models
+/// (ids 0-1) and ~76 MiB for the large ones (ids 2-3, whose common checkpoints are
+/// 50-61 MiB files). A decoder whose cache is already warm doesn't pay this, but the
+/// estimate cannot know the cache state, so it covers the cold case.
 pub fn estimate_memory(hdr: &PictureHeader, op: OperatingPoint) -> MemoryEstimate {
+    /// Cold-start model-load peaks per `model_id` (β 0.002/0.012/0.075/0.5), measured
+    /// tracked + ~13 % margin.
+    const MODEL_LOAD_PEAK: [u64; 4] = [70 << 20, 70 << 20, 84 << 20, 84 << 20];
     const PER_PICTURE_SAMPLE: u64 = 20;
-    let (fixed, per_tile_sample): (u64, u64) = match op {
-        OperatingPoint::Sop => (32 << 20, 36),
-        OperatingPoint::Bop => (32 << 20, 92),
-        OperatingPoint::Hop => (44 << 20, 970),
+    let (fixed, per_tile_sample, extra_tile_sample): (u64, u64, u64) = match op {
+        OperatingPoint::Sop => (32 << 20, 36, 36),
+        OperatingPoint::Bop => (32 << 20, 92, 60),
+        OperatingPoint::Hop => (44 << 20, 970, 600),
     };
     let (w, h) = (hdr.width as u64, hdr.height as u64);
-    let tile = |len: u64| match hdr.components[0].synthesis_tiling {
-        Some(t) => len.min(t.tile_size as u64),
-        None => len,
-    };
+    // Tile areas the way the decoder computes them (region-aware tiling only shrinks tiles,
+    // so the region-free grid is the conservative case; a malformed tiling falls back to one
+    // whole-picture tile, which is what the decoder's own error would face).
+    let (lat_h, lat_w) = hdr.latent_size(0);
+    let areas = crate::tools::tiles::synthesis_tiles(
+        h as usize,
+        w as usize,
+        lat_h as usize,
+        lat_w as usize,
+        hdr.components[0].synthesis_tiling,
+        None,
+    )
+    .map(|ts| {
+        ts.iter()
+            .map(|t| t.image.width as u64 * t.image.height as u64)
+            .collect::<alloc::vec::Vec<u64>>()
+    })
+    .unwrap_or_else(|_| alloc::vec![w * h]);
+    let largest = areas.iter().copied().max().unwrap_or(0);
+    let total: u64 = areas.iter().sum();
+    // How many tile working sets can be live at once: the rayon pool's width, capped by the
+    // tile count. Without the `parallel` feature (or a 1-thread pool) tiles are sequential.
+    #[cfg(feature = "parallel")]
+    let par = rayon::current_num_threads() as u64;
+    #[cfg(not(feature = "parallel"))]
+    let par = 1u64;
+    let extra = (total - largest).min(largest.saturating_mul(par.saturating_sub(1)));
+    let model_load = MODEL_LOAD_PEAK
+        .get(hdr.model_id as usize)
+        .copied()
+        .unwrap_or(MODEL_LOAD_PEAK[MODEL_LOAD_PEAK.len() - 1]);
     let live_bytes = fixed
         .saturating_add(PER_PICTURE_SAMPLE.saturating_mul(w * h))
-        .saturating_add(per_tile_sample.saturating_mul(tile(w) * tile(h)));
+        .saturating_add(per_tile_sample.saturating_mul(largest))
+        .saturating_add(extra_tile_sample.saturating_mul(extra))
+        .max(model_load);
     MemoryEstimate {
         live_bytes,
         pool_bytes: crate::nn::fast::pool_limit() as u64,
@@ -219,10 +268,18 @@ mod tests {
         assert!(e(&hdr, OperatingPoint::Sop) < e(&hdr, OperatingPoint::Bop));
         assert!(e(&hdr, OperatingPoint::Bop) < e(&hdr, OperatingPoint::Hop));
         let untiled = e(&hdr, OperatingPoint::Hop);
+        // A few big tiles still beats one whole-picture working set; many small ones do not —
+        // they synthesise concurrently, each with its own working set, which the estimate
+        // counts. Both directions are the point: tiling does not simply divide memory.
         hdr.components[0].synthesis_tiling = Some(crate::header::SynthesisTiling {
-            tile_size: 256,
+            tile_size: 512,
             overlap: 64,
         });
-        assert!(e(&hdr, OperatingPoint::Hop) < untiled / 3);
+        assert!(e(&hdr, OperatingPoint::Hop) < untiled);
+        hdr.components[0].synthesis_tiling = Some(crate::header::SynthesisTiling {
+            tile_size: 128,
+            overlap: 64,
+        });
+        assert!(e(&hdr, OperatingPoint::Hop) > e(&hdr, OperatingPoint::Sop));
     }
 }

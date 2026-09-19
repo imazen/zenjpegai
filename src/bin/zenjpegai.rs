@@ -76,6 +76,11 @@ OPTIONS:
     --time             print timing
     --stats            print the per-stage decode breakdown (TSV on stderr)
     --pool-mb <n>      cap the recycled-buffer pool at n MiB (default 1024; 0 = no recycling)
+    --memory-budget <n>
+                       cap the heap all decodes/encodes may hold at once, in bytes: a job
+                       whose estimate does not fit waits for room (admission control; see
+                       MemoryBudget in the library docs)
+    --memory-report    print the tracked-heap MemoryReport after the run (stderr, TSV)
     --discard          decode only, write no file (profiling; <out.png> is ignored)
 
 pack-models writes a ZJB1 bundle holding only the tensors the decoder reads for the given models
@@ -125,6 +130,8 @@ struct Args {
     stats: bool,
     discard: bool,
     pool_mb: Option<usize>,
+    memory_budget: Option<u64>,
+    memory_report: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -164,6 +171,8 @@ fn parse_args() -> Result<Args, String> {
         stats: false,
         discard: false,
         pool_mb: None,
+        memory_budget: None,
+        memory_report: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -313,6 +322,14 @@ fn parse_args() -> Result<Args, String> {
                         .map_err(|e| format!("--pool-mb: {e}"))?,
                 )
             }
+            "--memory-budget" => {
+                a.memory_budget = Some(
+                    value("--memory-budget")?
+                        .parse()
+                        .map_err(|e| format!("--memory-budget: {e}"))?,
+                )
+            }
+            "--memory-report" => a.memory_report = true,
             "-h" | "--help" => return Err(String::new()),
             s if s.starts_with("--") => return Err(format!("unknown option `{s}`")),
             _ => a.positional.push(arg),
@@ -493,7 +510,8 @@ fn run() -> Result<(), String> {
                     )
                 }
             };
-            let encoder = Encoder::with_engine(models, engine);
+            let encoder = Encoder::with_engine(models, engine)
+                .budget(args.memory_budget.map(zenjpegai::MemoryBudget::new));
             let mut stream = Vec::new();
             for run in 0..args.repeat.max(1) {
                 let t = Instant::now();
@@ -547,6 +565,17 @@ fn run() -> Result<(), String> {
                 stream.len(),
                 stream.len() as f64 * 8.0 / (image.width() * image.height()) as f64
             );
+            if args.memory_report {
+                let est = encoder.estimate_memory(
+                    image.width() as u64,
+                    image.height() as u64,
+                    params.op,
+                    args.bpp.is_some(),
+                );
+                eprintln!("estimate_live_bytes\t{}", est.live_bytes);
+                eprintln!("estimate_peak_bytes\t{}", est.peak_bytes());
+                print_memory_report(&encoder.memory_report());
+            }
             Ok(())
         }
         ["decode", input, output] => {
@@ -571,7 +600,8 @@ fn run() -> Result<(), String> {
                 Decoder::with_engine(models, engine)
             }
             .operating_point(args.op)
-            .max_channels(args.max_channels.0, args.max_channels.1);
+            .max_channels(args.max_channels.0, args.max_channels.1)
+            .budget(args.memory_budget.map(zenjpegai::MemoryBudget::new));
             let mut image = None;
             for run in 0..args.repeat.max(1) {
                 let t = Instant::now();
@@ -612,6 +642,13 @@ fn run() -> Result<(), String> {
                 image = Some(img);
             }
             let image = image.ok_or("nothing decoded")?;
+            if args.memory_report {
+                if let Ok(est) = decoder.estimate_memory(&stream) {
+                    eprintln!("estimate_live_bytes\t{}", est.live_bytes);
+                    eprintln!("estimate_peak_bytes\t{}", est.peak_bytes());
+                }
+                print_memory_report(&decoder.memory_report());
+            }
             // The PNG encoder needs memory of its own: hand the decoder's recycled buffers back.
             decoder.release_buffers();
             if args.discard {
@@ -743,6 +780,13 @@ fn print_decode_stats(run: usize, s: &zenjpegai::DecodeStats) {
     row("filters", s.filters);
     row("output", s.output);
     row("total", s.total);
+}
+
+/// `--memory-report`: the cumulative tracked-heap counters, `name<TAB>bytes` on stderr.
+fn print_memory_report(r: &zenjpegai::MemoryReport) {
+    eprintln!("tracked_peak_bytes\t{}", r.tracked_peak_bytes);
+    eprintln!("tracked_live_bytes\t{}", r.tracked_live_bytes);
+    eprintln!("pool_bytes\t{}", r.pool_bytes);
 }
 
 fn main() -> ExitCode {

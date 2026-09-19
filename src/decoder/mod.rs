@@ -4,6 +4,8 @@ use alloc::vec::Vec;
 
 #[cfg(feature = "std")]
 mod api;
+#[cfg(feature = "std")]
+pub mod budget;
 pub mod entropy;
 pub mod limits;
 pub mod output;
@@ -12,6 +14,8 @@ pub(crate) mod stats;
 
 #[cfg(feature = "std")]
 pub use api::Decoder;
+#[cfg(feature = "std")]
+pub use budget::{BudgetGuard, BudgetPolicy, MemoryBudget};
 #[cfg(feature = "std")]
 pub use stats::DecodeStats;
 
