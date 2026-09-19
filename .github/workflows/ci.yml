@@ -157,8 +157,10 @@ jobs:
           tool: cargo-fuzz
       - run: cargo fuzz --version
 
+      # cargo-fuzz 0.13 defaults to x86_64-unknown-linux-musl (static libFuzzer), which
+      # the toolchain does not install; the GNU target is what local runs use.
       - name: Build fuzz targets (nightly)
-        run: cd fuzz && cargo +nightly fuzz build
+        run: cd fuzz && cargo +nightly fuzz build --target x86_64-unknown-linux-gnu
 
       - name: Fuzz regression suite (stable)
         run: cargo +stable test --test fuzz_regression --features unstable-internals

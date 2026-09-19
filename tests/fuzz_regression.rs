@@ -43,13 +43,14 @@ fn run_one(name: &str, entry: fn(&[u8]), input: &[u8]) -> Result<(), String> {
 #[test]
 fn regression_seeds_do_not_panic() {
     let dir = regression_dir();
-    let mut seeds: Vec<PathBuf> = match fs::read_dir(&dir) {
-        Ok(rd) => rd
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.is_file())
-            .collect(),
-        Err(_) => Vec::new(),
-    };
+    // The directory is committed (it holds `.gitkeep`): a missing one means a broken
+    // checkout, and replaying nothing must not pass as if everything replayed clean.
+    let rd = fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("{}: unreadable regression dir: {e}", dir.display()));
+    let mut seeds: Vec<PathBuf> = rd
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.is_file())
+        .collect();
     seeds.sort();
     for seed in &seeds {
         let input = fs::read(seed).expect("read regression seed");

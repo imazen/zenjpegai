@@ -54,9 +54,10 @@ wasm-parity:
 fuzz minutes="7" *targets="container_headers entropy_stage decode_full":
     #!/usr/bin/env bash
     set -euo pipefail
-    cd fuzz && cargo +nightly fuzz build
+    # cargo-fuzz 0.13 defaults to musl, which is not installed here; GNU is what CI uses.
+    cd fuzz && cargo +nightly fuzz build --target x86_64-unknown-linux-gnu
     for target in {{targets}}; do
-        nice -n 19 cargo +nightly fuzz run "$target" corpus/"$target" seeds -- \
+        nice -n 19 cargo +nightly fuzz run "$target" corpus/"$target" seeds --target x86_64-unknown-linux-gnu -- \
             -dict=zenjpegai.dict -artifact_prefix=artifacts/"$target"/ \
             -max_len=262144 -rss_limit_mb=4096 -max_total_time=$(( {{minutes}} * 60 )) \
             2>&1 | tee ~/tmp/zenjpegai-fuzz-"$target".log
