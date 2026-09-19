@@ -123,7 +123,8 @@ async function loadPackage(name) {
   t = performance.now();
   // Object form: wasm-bindgen's positional `init(module_or_path, memory)` signature is
   // deprecated and warns. Passing the fetched bytes makes init a pure compile+instantiate.
-  await m.default({ module_or_path: wasmBytes });
+  const init = await m.default({ module_or_path: wasmBytes });
+  wasmMem = init.memory || null;
   milestone('instantiate', { ms: performance.now() - t });
   if (PACKAGES[name].threads) {
     const n = rayonThreads();
@@ -254,6 +255,7 @@ async function ensureModels(mod, modelsBaseUrl, modelId, op, bundleVersions, buf
 // `threads` package deadlocks rayon, its workers left Atomics.wait-ing on state a still-in-flight
 // sibling call owns), so there is no separate `chain` variable — `queue` IS the serialization.
 let mod = null;
+let wasmMem = null; // the module's WebAssembly.Memory, captured at init (its byteLength grows)
 let variant = cpuVariant;
 let gpuInfo = null;
 let gpuError = null;
@@ -374,6 +376,18 @@ async function drain() {
       continue;
     }
     if (msg.type === 'releaseBuffers') mod.releaseBuffers();
+    else if (msg.type === 'estimate') {
+      // Header-parse estimate for the pool's maxBytesInFlight admission: cheap (no models,
+      // no decode) and cannot trap the GPU path, so it needs no trap race.
+      try {
+        const est = mod.estimateMemory(new Uint8Array(msg.stream));
+        self.postMessage({ type: 'estimate-result', id: msg.id, liveBytes: est.liveBytes, peakBytes: est.peakBytes });
+      } catch (err) {
+        // A stream whose headers won't parse fails its decode later with the real error;
+        // a zero estimate just lets it be scheduled meanwhile.
+        self.postMessage({ type: 'estimate-result', id: msg.id, liveBytes: 0, peakBytes: 0, error: String((err && err.message) || err) });
+      }
+    }
     else if (msg.type === 'decode' || msg.type === 'present') {
       // Race the call against the trap signal: if the wasm traps, `onerror` above fails the
       // message and `trapSignal` lets this loop continue instead of hanging on a promise that
@@ -460,6 +474,11 @@ function timings(t0, t1, t2, presentMs, img, modelRows, waitRuntime, head) {
     path: (img && img.path) || 'cpu',
     gpuError,
     gpu: (img && img.gpu) || null,
+    // Per-call tracked-heap report from the wasm decode (`{trackedPeakBytes, trackedLiveBytes,
+    // poolBytes}`; see MemoryReport in the crate docs) and this module's wasm linear-memory
+    // size — the two numbers a page-level memory panel needs.
+    memory: (img && img.memory) || null,
+    wasmBytes: (wasmMem && wasmMem.buffer.byteLength) || null,
   };
 }
 

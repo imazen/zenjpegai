@@ -481,6 +481,11 @@ async function decodeVariant(slug, variant, canvas, timing, facts, buttons, acti
     parts.push(`${t.variant} · ${t.path}${r.presented === 'gpu' ? '+presented' : ''}`);
     if (quality === 'reduced') parts.push('reduced(y64,uv32)');
     const fell = t.gpuError ? ` · fallback: ${t.gpuError}` : '';
+    // Tracked-heap report of the decode (wasm export `memory` — see MemoryReport in the crate
+    // docs) and the module's linear-memory size; both are null on older packages.
+    const mib = (b) => `${(b / 1048576).toFixed(0)} MiB`;
+    if (t.memory) parts.push(`peak ${mib(t.memory.trackedPeakBytes)} · pool ${mib(t.memory.poolBytes)}`);
+    if (t.wasmBytes) parts.push(`wasm ${mib(t.wasmBytes)}`);
     timing.textContent = parts.join(' · ') + fell;
     const title = decodeTitle(t);
     if (title) timing.title = title;

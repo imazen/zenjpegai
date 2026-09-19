@@ -88,8 +88,14 @@ export class DecoderPool {
    *   should not.
    * @param {function(object)} [onEvent] - called for every startup milestone and model-bundle
    *   load, page-clock `atMs` (see the schema comment above); also appended to `pool.events`.
+   * @param {number} [maxBytesInFlight] - cap on the summed `estimateMemory` live bytes of
+   *   in-flight decodes (unset: only the worker count bounds concurrency). A queued job gets
+   *   a cheap header estimate through an idle worker first; it is dispatched only when it
+   *   fits under the cap — except that a job whose estimate exceeds the cap still runs,
+   *   alone (the `MemoryBudget.allow_oversize` analogue). Estimates are upper bounds with
+   *   margin, so the cap over-admits slightly versus real heap use.
    */
-  constructor({ modelsBaseUrl, maxWorkers = 4, workerUrl, bundleVersions, gpu = 'auto', threads, onEvent } = {}) {
+  constructor({ modelsBaseUrl, maxWorkers = 4, workerUrl, bundleVersions, gpu = 'auto', threads, onEvent, maxBytesInFlight } = {}) {
     if (!modelsBaseUrl) throw new Error('DecoderPool requires modelsBaseUrl');
     // Resolved to an absolute URL against the PAGE's location: workers have their own base URL
     // (the worker script's own location), so a relative modelsBaseUrl passed through as-is would
@@ -108,6 +114,11 @@ export class DecoderPool {
     this._canvasSeq = 0;
     this._maxInflight = 0;
     this._completed = 0;
+    // Byte-based admission (unset: off). `_inflightBytes` sums the estimated live bytes of
+    // dispatched decodes; `_maxInflightBytes` records its high-water mark for stats().
+    this.maxBytesInFlight = maxBytesInFlight || 0;
+    this._inflightBytes = 0;
+    this._maxInflightBytes = 0;
     this.threads = threads ?? null;
     this.events = [];
     this.onEvent = onEvent || null;
@@ -162,6 +173,17 @@ export class DecoderPool {
         this._emit({ ...detail, atMs: spawnedAt + at, worker: index });
         return;
       }
+      if (msg.type === 'estimate-result') {
+        // Byte-admission bookkeeping: mark the queued job's estimate and retry dispatch.
+        // A job whose decode already ran (no longer queued) is ignored.
+        const job = this._queue.find((j) => j.id === msg.id);
+        if (job) {
+          job.estBytes = msg.liveBytes;
+          job.estimating = false;
+          this._dispatch();
+        }
+        return;
+      }
       if (msg.type !== 'result' && msg.type !== 'error') return;
       const p = this._pending.get(msg.id);
       if (!p) return;
@@ -175,6 +197,7 @@ export class DecoderPool {
         return;
       }
       this._pending.delete(msg.id);
+      this._inflightBytes -= p.estBytes || 0;
       this._completed++;
       if (msg.type === 'error') {
         const err = new Error(msg.message);
@@ -198,6 +221,9 @@ export class DecoderPool {
         p.reject(new Error(`worker error: ${ev.message || ev}`));
         this._pending.delete(id);
       }
+      // An estimate may have been in flight to this worker: re-mark queued jobs so the next
+      // dispatch re-asks a live one.
+      if (this.maxBytesInFlight) for (const job of this._queue) job.estimating = false;
       // Queued jobs pinned to this worker (canvas presents) can never run now — the canvas
       // lived inside it — so fail them loudly instead of leaving them queued forever.
       const stuck = this._queue.filter((j) => j.pinned === w);
@@ -241,6 +267,18 @@ export class DecoderPool {
   }
 
   _dispatch() {
+    // Byte admission, phase one: every queued job needs a live-bytes estimate before it can
+    // be dispatched. Estimating is a header parse — cheap and safe on an idle worker (the
+    // message lands in its FIFO behind nothing) — so ask the first idle worker for each
+    // outstanding estimate. The worker stays in `_idle`: an estimate reply is handled
+    // whatever the worker goes on to do.
+    if (this.maxBytesInFlight) {
+      for (const job of this._queue) {
+        if (job.estBytes != null || job.estimating || !this._idle.length) continue;
+        job.estimating = true;
+        this._idle[0].postMessage({ type: 'estimate', id: job.id, stream: job.msg.stream });
+      }
+    }
     while (this._idle.length && this._queue.length) {
       // Best (idle worker, job) pair: a pinned job can only go to its owner worker, so the
       // best queued job may not be runnable on the first idle worker — scan them all.
@@ -251,13 +289,20 @@ export class DecoderPool {
         for (let i = 0; i < this._queue.length; i++) {
           const job = this._queue[i];
           if (job.pinned && job.pinned !== worker) continue;
+          // Byte admission, phase two: with a cap, an unestimated job cannot go yet, and an
+          // estimated one only if it fits — unless nothing is in flight at all, in which
+          // case even an over-cap job runs (alone; it can never make progress otherwise).
+          if (this.maxBytesInFlight) {
+            if (job.estBytes == null) continue;
+            if (this._inflightBytes > 0 && this._inflightBytes + job.estBytes > this.maxBytesInFlight) continue;
+          }
           if (bj < 0 || compareJobs(job, this._queue[bj]) < 0) {
             bi = wi;
             bj = i;
           }
         }
       }
-      if (bj < 0) break; // everything left is pinned to workers that are busy right now
+      if (bj < 0) break; // everything left is pinned or over the byte cap right now
       const worker = this._idle.splice(bi, 1)[0];
       const job = this._queue.splice(bj, 1)[0];
       if (job.canvas) {
@@ -270,9 +315,14 @@ export class DecoderPool {
         reject: job.reject,
         worker,
         msg: job.msg,
+        estBytes: job.estBytes || 0,
         queuedMs: performance.now() - job.enqueuedAt,
         enqueuedAt: job.enqueuedAt,
       });
+      if (this.maxBytesInFlight) {
+        this._inflightBytes += job.estBytes || 0;
+        this._maxInflightBytes = Math.max(this._maxInflightBytes, this._inflightBytes);
+      }
       this._maxInflight = Math.max(this._maxInflight, this._pending.size);
       job.onDispatch?.();
       this._send(worker, job.msg);
@@ -287,6 +337,9 @@ export class DecoderPool {
       isolated: this.isolated,
       inflight: this._pending.size,
       maxInflight: this._maxInflight,
+      inflightBytes: this._inflightBytes,
+      maxInflightBytes: this._maxInflightBytes,
+      maxBytesInFlight: this.maxBytesInFlight || null,
       queued: this._queue.length,
       completed: this._completed,
     };

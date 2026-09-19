@@ -149,6 +149,33 @@ fn chroma_format(c_ver: u8, c_hor: u8) -> String {
     }
 }
 
+fn memory_obj(r: zenjpegai::MemoryReport) -> js_sys::Object {
+    let out = js_sys::Object::new();
+    set(&out, "trackedPeakBytes", r.tracked_peak_bytes as f64);
+    set(&out, "trackedLiveBytes", r.tracked_live_bytes as f64);
+    set(&out, "poolBytes", r.pool_bytes as f64);
+    out
+}
+
+/// Predicted heap of decoding `stream` (`zenjpegai::estimate_memory`):
+/// `{ liveBytes, peakBytes }`. `liveBytes` is what admission control grants by; `peakBytes`
+/// adds the recycle pool's cap. Needs no weights.
+#[wasm_bindgen(js_name = estimateMemory)]
+pub fn estimate_memory(stream: &[u8]) -> Result<js_sys::Object, JsError> {
+    let est = state().decoder.estimate_memory(stream).map_err(js_err)?;
+    let out = js_sys::Object::new();
+    set(&out, "liveBytes", est.live_bytes as f64);
+    set(&out, "peakBytes", est.peak_bytes() as f64);
+    Ok(out)
+}
+
+/// This module's cumulative tracked-heap counters (`zenjpegai::MemoryReport`):
+/// `{ trackedPeakBytes, trackedLiveBytes, poolBytes }`.
+#[wasm_bindgen(js_name = memoryReport)]
+pub fn memory_report() -> js_sys::Object {
+    memory_obj(state().decoder.memory_report())
+}
+
 /// Header fields of a codestream: `{ width, height, bitDepth, modelId, operatingPoint,
 /// operatingPoints, chromaFormat, postFilters }`. `operatingPoint` is the one [`decode`]
 /// uses (the stream's first listed). `chromaFormat` is the coded subsampling; `postFilters`
@@ -254,6 +281,8 @@ fn decode_cpu_opts(
     set(&out, "height", img.height as u32);
     set_rgba(&out, &rgb_to_rgba(&img));
     set(&out, "stats", stats_obj(&stats));
+    // `stats.memory` is the per-call tracked-heap report (MemoryWatch over the decode).
+    set(&out, "memory", memory_obj(stats.memory));
     Ok(out)
 }
 
@@ -274,7 +303,10 @@ pub fn decode(stream: &[u8]) -> Result<js_sys::Object, JsError> {
 #[cfg(feature = "gpu")]
 #[wasm_bindgen]
 pub async fn decode(stream: Vec<u8>) -> Result<js_sys::Object, JsError> {
-    gpu::decode_opts(&stream, None).await
+    let watch = zenjpegai::MemoryWatch::new();
+    let out = gpu::decode_opts(&stream, None).await?;
+    set(&out, "memory", memory_obj(watch.report()));
+    Ok(out)
 }
 
 /// [`decode`] reading only the first `max_y` / `max_uv` latent channels of each component
@@ -296,7 +328,10 @@ pub async fn decode_partial(
     max_y: u16,
     max_uv: u16,
 ) -> Result<js_sys::Object, JsError> {
-    gpu::decode_opts(&stream, Some(channel_cap(max_y, max_uv))).await
+    let watch = zenjpegai::MemoryWatch::new();
+    let out = gpu::decode_opts(&stream, Some(channel_cap(max_y, max_uv))).await?;
+    set(&out, "memory", memory_obj(watch.report()));
+    Ok(out)
 }
 
 /// Drop the feature-map buffers kept between decodes (wasm memory itself never shrinks; this

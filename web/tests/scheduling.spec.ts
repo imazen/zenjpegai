@@ -217,6 +217,53 @@ test.describe('decode scheduling', () => {
     expect(worst).toBeLessThanOrEqual(solo * 2);
   });
 
+  test('maxBytesInFlight serialises decodes by estimated bytes', async ({ page }) => {
+    test.setTimeout(120_000);
+    // A 1-byte cap: every decode's estimate exceeds it, so each runs alone (a job bigger
+    // than the whole cap still runs — by itself — like MemoryBudget's oversize rule).
+    await page.goto(`${BASE_PLAIN}/decode.html?gpu=off&maxBytes=1`);
+    await page.evaluate(() => window.__ready);
+    const capped = await page.evaluate(async (stream) => {
+      const bytes = await fetch(stream).then((r) => r.arrayBuffer());
+      await Promise.all(Array.from({ length: 4 }, () => window.__pool.decode(bytes)));
+      return window.__pool.stats();
+    }, STREAM);
+    expect(capped.maxInflight).toBe(1);
+    expect(capped.maxBytesInFlight).toBe(1);
+    expect(capped.maxInflightBytes).toBeGreaterThan(0); // the oversize job's estimate ran
+    expect(capped.inflightBytes).toBe(0); // released on completion
+    expect(capped.completed).toBe(4);
+
+    // Default pool (no byte cap): the same decodes overlap up to the worker count.
+    await page.goto(`${BASE_PLAIN}/decode.html?gpu=off`);
+    await page.evaluate(() => window.__ready);
+    const open = await page.evaluate(async (stream) => {
+      const bytes = await fetch(stream).then((r) => r.arrayBuffer());
+      await Promise.all(Array.from({ length: 4 }, () => window.__pool.decode(bytes)));
+      return window.__pool.stats();
+    }, STREAM);
+    if (open.size > 1) expect(open.maxInflight).toBeGreaterThan(1);
+    expect(open.maxBytesInFlight).toBeNull();
+
+    // A cap sized to two estimates admits exactly two at once — the cap, not the pool, did
+    // the serialising. `capped.maxInflightBytes` is the one estimate the oversize job ran with.
+    const twoX = Math.max(1, capped.maxInflightBytes) * 2;
+    await page.goto(`${BASE_PLAIN}/decode.html?gpu=off&maxBytes=${twoX}`);
+    await page.evaluate(() => window.__ready);
+    const sized = await page.evaluate(async (stream) => {
+      const bytes = await fetch(stream).then((r) => r.arrayBuffer());
+      const one = await window.__pool.decode(bytes);
+      await Promise.all(Array.from({ length: 4 }, () => window.__pool.decode(bytes)));
+      return { stats: window.__pool.stats(), memory: one.timings.memory };
+    }, STREAM);
+    if (sized.stats.size > 1) expect(sized.stats.maxInflight).toBe(2);
+    expect(sized.stats.maxInflightBytes).toBeLessThanOrEqual(twoX);
+    // The decode carried the per-call tracked-heap report in its timings.
+    if (sized.memory) {
+      expect(sized.memory.trackedPeakBytes).toBeGreaterThan(0);
+    }
+  });
+
   test('append measurements to benchmarks/wasm_demo_scheduling_<date>.tsv', async ({}, testInfo) => {
     const date = new Date().toISOString().slice(0, 10);
     const dir = join(__dirname, '..', '..', 'benchmarks');
