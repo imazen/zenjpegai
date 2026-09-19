@@ -180,7 +180,6 @@ impl Decoder {
     /// subsampling (4:4:4, 4:2:2 or 4:2:0), 8 or 10 bits per sample.
     pub fn decode_picture(&self, stream: &[u8]) -> Result<Picture, At<Error>> {
         self.decode_inner(stream, None, &enough::Unstoppable)
-            .map(|(p, _)| p)
     }
 
     /// [`Decoder::decode_picture`] that also reports how long each pipeline stage took
@@ -188,7 +187,7 @@ impl Decoder {
     /// under a millisecond.
     pub fn decode_picture_stats(&self, stream: &[u8]) -> Result<(Picture, DecodeStats), At<Error>> {
         let probe = Probe::new();
-        let (picture, _) = self.decode_inner(stream, Some(&probe), &enough::Unstoppable)?;
+        let picture = self.decode_inner(stream, Some(&probe), &enough::Unstoppable)?;
         Ok((picture, probe.finish()))
     }
 
@@ -198,7 +197,7 @@ impl Decoder {
         stream: &[u8],
         stop: &dyn enough::Stop,
     ) -> Result<Picture, At<Error>> {
-        self.decode_inner(stream, None, stop).map(|(p, _)| p)
+        self.decode_inner(stream, None, stop)
     }
 
     /// [`Decoder::decode`] with cooperative cancellation.
@@ -211,7 +210,7 @@ impl Decoder {
         stream: &[u8],
         stop: &dyn enough::Stop,
     ) -> Result<RgbImage, At<Error>> {
-        match self.decode_inner(stream, None, stop)?.0 {
+        match self.decode_inner(stream, None, stop)? {
             Picture::Rgb(image) => Ok(image),
             Picture::Yuv(_) => Err(at!(Error::Unsupported(
                 "the stream decodes to YUV planes: use decode_picture"
@@ -233,7 +232,7 @@ impl Decoder {
         stream: &[u8],
         probe: Option<&Probe>,
         stop: &dyn enough::Stop,
-    ) -> Result<(Picture, ()), At<Error>> {
+    ) -> Result<Picture, At<Error>> {
         let t_total = Tick::now();
         // Checks from pooled tasks funnel through the gate: a counting `Stop` sees the same
         // check sequence a serial decode would produce.
@@ -361,6 +360,6 @@ impl Decoder {
         let picture = finish_par(eng.parallel, hdr, &planes).map_err(|e| at!(e))?;
         record(probe.map(|p| &p.output), t);
         record(probe.map(|p| &p.total), t_total);
-        Ok((picture, ()))
+        Ok(picture)
     }
 }
