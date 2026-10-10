@@ -515,7 +515,7 @@ pub(crate) fn walk(data: &[u8]) -> Result<Inventory, InventoryError> {
     if inv
         .parts()
         .iter()
-        .any(|p| p.disposition == Disposition::Malformed)
+        .any(|p| p.disposition() == Disposition::Malformed)
     {
         soc_notes.push("a part is Malformed (see its detail)".into());
     }
