@@ -129,13 +129,15 @@ const EXPECTED: &[&str] = &[
     "segment FF8C 101..130 structure \"made by Jane Doe's camera\"",
     "  header - 101..105 structure",
     "  block FF8C 105..130 skipped \"made by Jane Doe's camera\"",
-    "segment FF8C 130..137 dropped \"UDI\"",
-    "  header - 130..133 dropped",
+    "segment FF8C 130..137 structure \"UDI\"",
+    "  header - 130..133 structure",
     "  block FF8C 133..137 dropped \"UDI\"",
     "segment FF84 137..149 structure \"RDI\"",
     "  header - 137..140 structure",
     "  field rdi-flags 140..141 structure",
-    "  field cicp 141..145 metadata(cicp) \"RDI\"",
+    "  field cicp 141..143 metadata(cicp) \"RDI\"",
+    "  field matrix-coefficients 143..144 dropped",
+    "  field cicp-range 144..145 metadata(cicp)",
     "  field clli 145..149 dropped",
     "segment FF90 149..158 structure \"unknown\"",
     "  header - 149..152 structure",
@@ -312,10 +314,14 @@ const EXPECTED_FULL: &[&str] = &[
     "segment FF84 80..157 structure \"RDI\"",
     "  header - 80..84 structure",
     "  field rdi-flags 84..85 structure",
-    "  field cicp 85..89 metadata(cicp) \"RDI\"",
+    "  field cicp 85..87 metadata(cicp) \"RDI\"",
+    "  field matrix-coefficients 87..88 dropped",
+    "  field cicp-range 88..89 metadata(cicp)",
     "  field mdcv 89..113 dropped",
     "  field clli 113..117 dropped",
-    "  field display-mapping 117..157 dropped",
+    "  field dm-type 117..118 dropped",
+    "  field dm-size 118..120 structure",
+    "  field dm-data 120..157 dropped",
     "segment FF81 157..159 structure \"EOC\"",
     "trailer - 159..164 trailing",
 ];
@@ -420,8 +426,8 @@ fn rdi_fields_are_split_and_native_only_ones_are_dropped() {
         .find(|p| matches!(&p.tag, zencodec::inventory::PartTag::Name(n) if n == "cicp"))
         .unwrap();
     assert!(matches!(cicp.disposition, Disposition::Metadata(_)));
-    assert_eq!(cicp.len(), 4);
-    for name in ["mdcv", "clli", "display-mapping"] {
+    assert_eq!(cicp.len(), 2);
+    for name in ["matrix-coefficients", "mdcv", "clli", "dm-type", "dm-data"] {
         let p = inv
             .parts()
             .iter()
@@ -586,4 +592,70 @@ fn udi_labels_use_the_longest_printable_run() {
         "Owner: Jörg Müller"
     );
     assert_eq!(label_of(&[0xDE, 0xAD, 0xBE, 0xEF]), "UDI");
+}
+
+// ── review round 2 ───────────────────────────────────────────────────
+
+fn soc_detail(data: &[u8]) -> String {
+    let inv = inventory_of(data);
+    part_at(&inv, 0).detail.clone().unwrap_or_default()
+}
+
+// F2: bytes the decoder reads are not Dropped.
+#[test]
+fn repeated_substream_framing_and_dm_size_are_structure() {
+    let data = fixture();
+    let inv = inventory_of(&data);
+    // The repeated UDI at 130..137: framing 130..133 is read by Codestream::parse.
+    assert_eq!(
+        part_at(&inv, 130).disposition,
+        Disposition::Structure,
+        "{inv}"
+    );
+    assert_eq!(part_at(&inv, 134).disposition, Disposition::Dropped);
+    let full = full_fixture();
+    let inv = inventory_of(&full);
+    let dm_size = inv
+        .parts()
+        .iter()
+        .find(|p| matches!(&p.tag, zencodec::inventory::PartTag::Name(n) if n == "dm-size"))
+        .unwrap();
+    assert_eq!(dm_size.disposition, Disposition::Structure);
+    assert_eq!(dm_size.len(), 2);
+}
+
+// F3: whole-file rejections the walker can see are noted on SOC.
+#[test]
+fn whole_file_rejections_are_noted_on_soc() {
+    // No SOZ, no SORP/SORS (no regions).
+    let mut w = CodestreamWriter::new();
+    w.substream(Marker::Pih, &pih()).unwrap();
+    let d = soc_detail(&w.finish());
+    assert!(
+        d.contains("no SOZ") && d.contains("no SORP") && d.contains("no SORS"),
+        "{d}"
+    );
+    // Quality map declared, no SOQ.
+    let pih_bytes = region_pih();
+    let hdr = PictureHeader::parse(&pih_bytes).unwrap();
+    let mut w = CodestreamWriter::new();
+    w.substream(Marker::Pih, &pih_bytes).unwrap();
+    w.substream(Marker::Ton, &ToolHeader::default().write(&hdr).unwrap())
+        .unwrap();
+    w.substream(Marker::Soz, &[1; 12]).unwrap();
+    w.substream(Marker::Sorp, &[0, 2, 2]).unwrap();
+    w.substream(Marker::Sors, &[0, 3, 3]).unwrap();
+    let d = soc_detail(&w.finish());
+    assert!(d.contains("quality map but there is no SOQ"), "{d}");
+    // Any Malformed part.
+    let mut w = CodestreamWriter::new();
+    w.substream(Marker::Pih, &pih()).unwrap();
+    w.substream(Marker::Ton, &[0xFF, 0xFF]).unwrap();
+    w.substream(Marker::Soz, &[1; 4]).unwrap();
+    w.substream(Marker::Sorp, &[2; 4]).unwrap();
+    w.substream(Marker::Sors, &[3; 4]).unwrap();
+    let d = soc_detail(&w.finish());
+    assert!(d.contains("a part is Malformed"), "{d}");
+    // A complete stream carries no note.
+    assert_eq!(soc_detail(&full_fixture()), "");
 }

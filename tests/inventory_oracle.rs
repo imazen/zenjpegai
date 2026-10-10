@@ -144,13 +144,14 @@ fn reference_probe_lists_the_same_substreams() {
             .unwrap()
             .unwrap();
         inv.validate().unwrap();
-        // The inventory's substreams in file order: (marker, payload size, payload part).
-        let mine: Vec<(u8, u64, Disposition)> = inv
+        // The inventory's substreams in file order:
+        // (marker, payload size, payload disposition, region-index byte).
+        let mine: Vec<(u8, u64, Disposition, Option<u8>)> = inv
             .children(None)
             .into_iter()
             .map(|id| (id, inv.get(id).unwrap()))
             .filter_map(|(id, p)| match p.tag {
-                PartTag::Marker(m) if matches!(m, 0x82..=0x8C) => {
+                PartTag::Marker(m @ 0x82..=0x8C) => {
                     let kids = inv.children(Some(id));
                     let header_end = kids
                         .first()
@@ -161,10 +162,16 @@ fn reference_probe_lists_the_same_substreams() {
                         .iter()
                         .map(|&k| inv.get(k).unwrap())
                         .find(|k| k.range.start >= header_end && k.kind.name() == "block");
+                    let region = kids
+                        .iter()
+                        .map(|&k| inv.get(k).unwrap())
+                        .find(|k| matches!(&k.tag, PartTag::Name(n) if n == "region-index"))
+                        .map(|k| data[k.range.start as usize]);
                     Some((
                         m,
                         p.range.end - header_end,
                         body.map_or(p.disposition, |b| b.disposition),
+                        region,
                     ))
                 }
                 _ => None,
@@ -187,20 +194,27 @@ fn reference_probe_lists_the_same_substreams() {
             !PROBE_FAILS.iter().any(|(n, _)| *n == dir_name),
             "{dir_name} is pinned as a probe failure but the probe worked"
         );
-        // Region k of a type is the k-th substream of that marker in the file.
+        // The probe's region k is the region-index byte (independent regions), else the k-th
+        // substream of that marker in the file.
         let mut seen = std::collections::HashMap::<u8, usize>::new();
         for (m, k, size) in &probe {
             let nth = seen.entry(*m).or_default();
-            let (_, psize, disp) = mine
-                .iter()
-                .filter(|(mm, _, _)| mm == m)
-                .nth(*nth)
-                .unwrap_or_else(|| panic!("{dir_name}: no substream {m:#x} #{nth}\n{inv}"));
-            assert_eq!(*k, *nth, "{dir_name}: probe region numbering for {m:#x}");
-            assert_eq!(psize, size, "{dir_name}: {m:#x} region {k} size\n{inv}");
-            if matches!(m, 0x88 | 0x89 | 0x8A) {
+            let of_type: Vec<_> = mine.iter().filter(|e| e.0 == *m).collect();
+            let entry = if of_type.iter().any(|e| e.3.is_some()) {
+                of_type
+                    .iter()
+                    .find(|e| e.3 == Some(*k as u8))
+                    .unwrap_or_else(|| panic!("{dir_name}: no {m:#x} with region index {k}\n{inv}"))
+            } else {
+                assert_eq!(*k, *nth, "{dir_name}: probe region numbering for {m:#x}");
+                of_type
+                    .get(*nth)
+                    .unwrap_or_else(|| panic!("{dir_name}: no substream {m:#x} #{nth}\n{inv}"))
+            };
+            assert_eq!(entry.1, *size, "{dir_name}: {m:#x} region {k} size\n{inv}");
+            if matches!(m, 0x88..=0x8A) {
                 assert_eq!(
-                    *disp,
+                    entry.2,
                     Disposition::ImageData,
                     "{dir_name}: {m:#x} region {k}\n{inv}"
                 );
@@ -208,8 +222,8 @@ fn reference_probe_lists_the_same_substreams() {
             *nth += 1;
             substreams += 1;
         }
-        // Every substream the inventory lists is one the probe lists, and the type order
-        // (first appearance) is the file order.
+        // Every substream the inventory lists is one the probe lists, and the types appear
+        // in the same order (the probe groups substreams by type, in file order).
         assert_eq!(
             mine.len(),
             probe.len(),
@@ -224,14 +238,12 @@ fn reference_probe_lists_the_same_substreams() {
             }
             v
         };
-        let mut types_mine: Vec<u8> = mine.iter().map(|(m, _, _)| *m).collect();
-        let order_mine = order(&mut types_mine.drain(..));
+        let order_mine = order(&mut mine.iter().map(|e| e.0));
         let order_probe = order(&mut probe.iter().map(|(m, _, _)| *m));
-        let mut a = order_mine.clone();
-        let mut b = order_probe.clone();
-        a.sort_unstable();
-        b.sort_unstable();
-        assert_eq!(a, b, "{dir_name}: same set of substream types");
+        assert_eq!(
+            order_mine, order_probe,
+            "{dir_name}: order of substream types\n{inv}"
+        );
         compared += 1;
     }
     let mut want: Vec<_> = PROBE_FAILS
