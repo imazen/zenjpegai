@@ -223,8 +223,8 @@ impl PictureHeader {
         4 * cube_h * cube_w
     }
 
-    /// Parse a `PIH` substream payload.
-    pub fn parse(payload: &[u8]) -> Result<Self> {
+    /// [`Self::parse`], also returning the bytes the header fields occupy.
+    pub(crate) fn parse_consumed(payload: &[u8]) -> Result<(Self, usize)> {
         let mut r = BitReader::new(payload);
 
         // CodingEngine.decode_header
@@ -352,7 +352,12 @@ impl PictureHeader {
                 entropy_index,
             });
         }
-        Ok(hdr)
+        Ok((hdr, r.bytes_consumed()))
+    }
+
+    /// Parse a `PIH` substream payload.
+    pub fn parse(payload: &[u8]) -> Result<Self> {
+        Self::parse_consumed(payload).map(|(h, _)| h)
     }
 
     /// Serialise back to a `PIH` substream payload (round-trips through [`Self::parse`]).
@@ -1031,7 +1036,7 @@ impl EfeNonlinearHeader {
 impl ToolHeader {
     /// Parse the TON payload. The EFE linear filter codes one chroma filter instead of four when
     /// the picture is coded without chroma subsampling, so the picture header is needed.
-    pub fn parse(payload: &[u8], pih: &PictureHeader) -> Result<Self> {
+    pub(crate) fn parse_consumed(payload: &[u8], pih: &PictureHeader) -> Result<(Self, usize)> {
         let mut r = BitReader::new(payload);
         let lsbs_enabled = [r.read_bit()?, r.read_bit()?];
         let mut t = ToolHeader {
@@ -1057,7 +1062,12 @@ impl ToolHeader {
         if r.read_bit()? {
             t.lef_channel = Some(r.read_bounded(255)? as u8);
         }
-        Ok(t)
+        Ok((t, r.bytes_consumed()))
+    }
+
+    /// Parse a `TON` substream payload.
+    pub fn parse(payload: &[u8], pih: &PictureHeader) -> Result<Self> {
+        Self::parse_consumed(payload, pih).map(|(t, _)| t)
     }
 
     /// Serialise back to a `TON` substream payload (round-trips through [`Self::parse`]).
@@ -1158,7 +1168,7 @@ pub struct RenderingInfo {
 
 impl RenderingInfo {
     /// Parse an `RDI` substream payload.
-    pub fn parse(payload: &[u8]) -> Result<Self> {
+    pub(crate) fn parse_consumed(payload: &[u8]) -> Result<(Self, usize)> {
         let mut r = BitReader::new(payload);
         let cicp_present = r.read_bit()?;
         let mdcv_present = r.read_bit()?;
@@ -1208,7 +1218,12 @@ impl RenderingInfo {
             }
             info.display_mapping = Some((dm_type, data));
         }
-        Ok(info)
+        Ok((info, r.bytes_consumed()))
+    }
+
+    /// Parse an `RDI` substream payload.
+    pub fn parse(payload: &[u8]) -> Result<Self> {
+        Self::parse_consumed(payload).map(|(i, _)| i)
     }
 
     /// Serialise back to an `RDI` substream payload (round-trips through [`Self::parse`]).

@@ -112,6 +112,8 @@ required-features = ["cli"]
 
 [dev-dependencies]
 zenbench = "0.1.9"
+# Conformance harness (check_inventory); the git patch below supplies the unreleased version.
+zencodec-testkit = ">=0.1.0, <0.3.0"
 
 [[bench]]
 name = "conv_kernels"
@@ -207,3 +209,9 @@ incremental = false
 [profile.wasm-release-z]
 inherits = "wasm-release"
 opt-level = "z"
+
+# Structural inventories (imazen/zencodec#133). Swap for the released zencodec
+# before merge.
+[patch.crates-io]
+zencodec = { git = "https://github.com/imazen/zencodec", branch = "feat/inventory" }
+zencodec-testkit = { git = "https://github.com/imazen/zencodec", branch = "feat/inventory" }

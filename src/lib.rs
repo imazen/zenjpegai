@@ -44,6 +44,8 @@ pub(crate) mod container;
 pub mod decoder;
 #[cfg(not(feature = "unstable-internals"))]
 pub(crate) mod decoder;
+#[cfg(feature = "zencodec")]
+mod inventory;
 // The encoder is unconditionally `pub` (unlike the decoder-side internals above, which are
 // gated behind `unstable-internals`) but its API is still settling — PORTING.md lists what is
 // not ported yet. `missing_docs` on the committed public API is not applied to it for that

@@ -13,7 +13,11 @@ enough = "0.4.4"
 
 [dependencies.zenjpegai]
 path = ".."
-features = ["unstable-internals"]
+features = ["unstable-internals", "zencodec"]
+
+[dependencies.zencodec]
+version = ">=0.1.26, <0.3.0"
+
 
 # Prevent this from interfering with workspaces
 [workspace]
@@ -39,3 +43,13 @@ name = "decode_full"
 path = "fuzz_targets/decode_full.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "inventory"
+path = "fuzz_targets/inventory.rs"
+test = false
+doc = false
+
+# Structural inventories (imazen/zencodec#133); swap for the release before merge.
+[patch.crates-io]
+zencodec = { git = "https://github.com/imazen/zencodec", branch = "feat/inventory" }
