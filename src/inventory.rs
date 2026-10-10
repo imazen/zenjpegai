@@ -272,11 +272,14 @@ pub(crate) fn walk(data: &[u8]) -> Result<Inventory, InventoryError> {
         let mut region_index_byte = false;
         let mut consumed: Option<usize> = None;
         let mut rdi_fields: Option<&RenderingInfo> = None;
-        let mut dropped_whole = false;
         match s.marker {
             None => {
                 disposition = Disposition::Unknown;
                 detail = Some("unknown substream marker; the decoder rejects the file".into());
+                let note = "an unknown substream marker";
+                if !soc_notes.iter().any(|n| n == note) {
+                    soc_notes.push(note.into());
+                }
             }
             Some(Marker::Sorp | Marker::Sors) => {
                 let ccs = usize::from(s.marker == Some(Marker::Sors));
@@ -317,7 +320,6 @@ pub(crate) fn walk(data: &[u8]) -> Result<Inventory, InventoryError> {
             }
             Some(_) if !s.is_first => {
                 disposition = Disposition::Dropped;
-                dropped_whole = true;
                 detail = Some(
                     "repeated substream: the decoder reads only the first with this marker".into(),
                 );
@@ -401,7 +403,6 @@ pub(crate) fn walk(data: &[u8]) -> Result<Inventory, InventoryError> {
         }
         // `Codestream::parse` reads every marker and size field, repeated substreams
         // included, so only a repeat's payload is Dropped.
-        let _ = dropped_whole;
         let framing_disposition = if disposition == Disposition::Malformed {
             Disposition::Malformed
         } else {

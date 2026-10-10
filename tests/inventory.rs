@@ -659,3 +659,22 @@ fn whole_file_rejections_are_noted_on_soc() {
     // A complete stream carries no note.
     assert_eq!(soc_detail(&full_fixture()), "");
 }
+
+// Review round 3: a reserved marker makes the decoder reject the file; SOC says so.
+#[test]
+fn reserved_marker_is_noted_on_soc() {
+    let mut b = vec![0xFF, 0x80];
+    b.extend(raw_substream(0xFF82, &pih()));
+    b.extend(raw_substream(0xFF88, &[1; 4]));
+    b.extend(raw_substream(0xFF89, &[2; 4]));
+    b.extend(raw_substream(0xFF8A, &[3; 4]));
+    b.extend(raw_substream(0xFF85, b"reserved"));
+    b.extend([0xFF, 0x81]);
+    let d = soc_detail(&b);
+    assert!(d.contains("an unknown substream marker"), "{d:?}");
+    // The same stream without the reserved substream has no note.
+    let cut = b.len() - 2 - (2 + 1 + 8);
+    let mut ok = b[..cut].to_vec();
+    ok.extend([0xFF, 0x81]);
+    assert_eq!(soc_detail(&ok), "");
+}
