@@ -226,24 +226,40 @@ pub(crate) fn walk(data: &[u8]) -> Result<Inventory, InventoryError> {
     ];
 
     // SOC, with a note when the decoder would reject the stream as a whole.
-    let mut soc_notes: Vec<&'static str> = Vec::new();
+    let mut soc_notes: Vec<String> = Vec::new();
     if eoc_end.is_none() {
-        soc_notes.push("no EOC substream: the decoder rejects the file");
+        soc_notes.push("no EOC substream".into());
     }
     if subs.first().is_some_and(|s| s.marker != Some(Marker::Pih)) || subs.is_empty() {
-        soc_notes.push("the first substream is not PIH: the decoder rejects the file");
+        soc_notes.push("the first substream is not PIH".into());
     }
-    let mut soc = Part::new(
-        PartKind::Header,
-        PartTag::Marker(0x80),
-        0..2,
-        Disposition::Structure,
-    )
-    .with_label("SOC");
-    if !soc_notes.is_empty() {
-        soc = soc.with_detail(soc_notes.join("; "));
+    // Substreams the decoder requires once the picture header parses.
+    if pih_ok.is_some() {
+        let has = |m: Marker| subs.iter().any(|s| s.marker == Some(m));
+        if !has(Marker::Soz) {
+            soc_notes.push("no SOZ substream".into());
+        }
+        if !independent {
+            for (m, n) in [(Marker::Sorp, "SORP"), (Marker::Sors, "SORS")] {
+                if !has(m) {
+                    soc_notes.push(format!("no {n} substream (missing residual substream)"));
+                }
+            }
+        }
+        if quality_map == Some(true) && !has(Marker::Soq) {
+            soc_notes.push("the picture header declares a quality map but there is no SOQ".into());
+        }
     }
-    inv.push(None, soc)?;
+    let soc_id = inv.push(
+        None,
+        Part::new(
+            PartKind::Header,
+            PartTag::Marker(0x80),
+            0..2,
+            Disposition::Structure,
+        )
+        .with_label("SOC"),
+    )?;
 
     let truncated_last = matches!(&stop_reason, Some((u64::MAX, _)));
     for (i, s) in subs.iter().enumerate() {
@@ -383,9 +399,10 @@ pub(crate) fn walk(data: &[u8]) -> Result<Inventory, InventoryError> {
             ));
             disposition = Disposition::Malformed;
         }
-        let framing_disposition = if dropped_whole {
-            Disposition::Dropped
-        } else if disposition == Disposition::Malformed {
+        // `Codestream::parse` reads every marker and size field, repeated substreams
+        // included, so only a repeat's payload is Dropped.
+        let _ = dropped_whole;
+        let framing_disposition = if disposition == Disposition::Malformed {
             Disposition::Malformed
         } else {
             Disposition::Structure
@@ -493,6 +510,20 @@ pub(crate) fn walk(data: &[u8]) -> Result<Inventory, InventoryError> {
         malformed(&mut inv, at, why)?;
     }
     inv.fill_gaps(None, Disposition::Malformed)?;
+    // One note on SOC covers every consumed claim of a file the decoder rejects.
+    if inv
+        .parts()
+        .iter()
+        .any(|p| p.disposition == Disposition::Malformed)
+    {
+        soc_notes.push("a part is Malformed (see its detail)".into());
+    }
+    if !soc_notes.is_empty() {
+        inv.set_detail(
+            soc_id,
+            format!("the decoder rejects the file: {}", soc_notes.join("; ")),
+        );
+    }
     Ok(inv)
 }
 
@@ -534,10 +565,28 @@ fn push_rendering_fields(
         field(
             inv,
             &mut at,
-            4,
+            2,
             "cicp",
             Disposition::Metadata(MetadataKind::Cicp),
-            None,
+            Some("colour primaries and transfer characteristics"),
+        )?;
+        field(
+            inv,
+            &mut at,
+            1,
+            "matrix-coefficients",
+            Disposition::Dropped,
+            Some("forced to 0 through zencodec; native RenderingInfo only"),
+        )?;
+        field(
+            inv,
+            &mut at,
+            1,
+            "cicp-range",
+            Disposition::Metadata(MetadataKind::Cicp),
+            Some(
+                "full-range flag; the 3 chroma sample location bits in this byte are native RenderingInfo only",
+            ),
         )?;
     }
     if ri.mdcv.is_some() {
@@ -564,8 +613,24 @@ fn push_rendering_fields(
         field(
             inv,
             &mut at,
-            3 + dm.len() as u64,
-            "display-mapping",
+            1,
+            "dm-type",
+            Disposition::Dropped,
+            Some(NATIVE_ONLY),
+        )?;
+        field(
+            inv,
+            &mut at,
+            2,
+            "dm-size",
+            Disposition::Structure,
+            Some("read to find the end of the rendering information"),
+        )?;
+        field(
+            inv,
+            &mut at,
+            dm.len() as u64,
+            "dm-data",
             Disposition::Dropped,
             Some(NATIVE_ONLY),
         )?;
