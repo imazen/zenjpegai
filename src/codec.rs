@@ -446,6 +446,9 @@ impl<'a> DecodeJob<'a> for JpegAiDecodeJob {
         &self,
         data: &[u8],
     ) -> core::result::Result<Option<zencodec::inventory::Inventory>, Self::Error> {
+        self.effective_limits()
+            .check_input(data.len())
+            .map_err(<Error as Into<At<CodecError>>>::into)?;
         crate::inventory::walk(data)
             .map(Some)
             .map_err(|_| Error::LimitExceeded("inventory exceeds the part cap").into())
