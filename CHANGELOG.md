@@ -8,10 +8,15 @@
 
 ### Added
 
-- `DecodeJob::inventory` for the zencodec decoder: a byte-exact map of the codestream's substreams
-  (SOC, PIH, TON, SOQ, SOZ, SORP, SORS, UDI, RDI, EOC), repeated and unknown substreams, labelled
-  UDI content and bytes after EOC, with what the decode path does with each. Needs the
-  `feat/inventory` zencodec patch until zencodec#133 releases. (cbe4ec6a)
+- `DecodeJob::inventory` for the zencodec decoder: a byte-exact map of the codestream. Every
+  substream (SOC, PIH, TON, SOQ, SOZ, SORP, SORS, UDI, RDI, EOC) is a segment with its framing
+  and payload; independent-region SORP/SORS are image data with the region index split out; RDI
+  is split into flags, CICP and the native-only MDCV, CLLI and display-mapping fields; repeated
+  and unknown substreams, rejected headers, labelled UDI text and bytes after EOC are reported
+  with what the decode path does with each. Not distinguished: thread-size framing and the
+  unread bytes at the start of each ANS thread inside entropy-coded payloads. Needs the
+  `feat/inventory` zencodec patch until zencodec#133 releases. (870a8b3, review fixes in the
+  commits after it on `feat/inventory`)
 
 #### Encoder
 - Encoder: `num_chs` below the model's channel count (`E10`) — `EncodeParams::num_chs` /
