@@ -8,6 +8,11 @@
 
 ### Added
 
+- `DecodeJob::inventory` for the zencodec decoder: a byte-exact map of the codestream's substreams
+  (SOC, PIH, TON, SOQ, SOZ, SORP, SORS, UDI, RDI, EOC), repeated and unknown substreams, labelled
+  UDI content and bytes after EOC, with what the decode path does with each. Needs the
+  `feat/inventory` zencodec patch until zencodec#133 releases. (cbe4ec6a)
+
 #### Encoder
 - Encoder: `num_chs` below the model's channel count (`E10`) — `EncodeParams::num_chs` /
   CLI `--num-chs y,uv` port the reference's

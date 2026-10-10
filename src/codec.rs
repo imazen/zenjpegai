@@ -259,7 +259,8 @@ static JPEGAI_DECODE_CAPS: DecodeCapabilities = DecodeCapabilities::new()
     .with_stop(true)
     .with_hdr(true)
     .with_enforces_max_pixels(true)
-    .with_enforces_max_memory(true);
+    .with_enforces_max_memory(true)
+    .with_inventory(true);
 
 /// Reusable JPEG AI decoder configuration: a shared, cached [`Decoder`] plus the operating point
 /// jobs synthesise with. `Clone` is cheap (`Arc`); every clone shares the same model cache.
@@ -439,6 +440,15 @@ impl<'a> DecodeJob<'a> for JpegAiDecodeJob {
             .map_err(<Error as Into<At<CodecError>>>::into)?;
         let headers = self.decoder.read_headers(data).map_err(into_codec_error)?;
         Ok(headers_to_info(&headers))
+    }
+
+    fn inventory(
+        &self,
+        data: &[u8],
+    ) -> core::result::Result<Option<zencodec::inventory::Inventory>, Self::Error> {
+        crate::inventory::walk(data)
+            .map(Some)
+            .map_err(|_| Error::LimitExceeded("inventory exceeds the part cap").into())
     }
 
     fn output_info(&self, data: &[u8]) -> core::result::Result<OutputInfo, Self::Error> {

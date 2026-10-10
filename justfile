@@ -72,3 +72,9 @@ web-test:
     node web/scripts/fetch-demo-assets.mjs
     node web/scripts/build-site.mjs
     cd web && npx playwright test
+
+# Compare the inventory with the reference software's bitstream probe on every reference stream.
+inventory-oracle:
+    ZENJPEGAI_REF={{ref}} INVENTORY_ORACLE_VECTORS=/mnt/v/output/zenjpegai/reference/vectors \
+        INVENTORY_ORACLE_PROBE={{ref}}/.venv/bin/python \
+        cargo test --features zencodec --test inventory_oracle -- --ignored --nocapture
