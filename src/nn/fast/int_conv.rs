@@ -43,7 +43,7 @@ impl<T: I16x16Backend + I32x8Backend + Send + Sync> SimdMadd<8, 16> for i16x16<T
     type Acc = i32x8<T>;
     #[inline(always)]
     fn weights(t: T, w: &[i16; 16]) -> Self {
-        i16x16::load(t, w)
+        i16x16::load_t(t, w)
     }
     #[inline(always)]
     fn pair(t: T, x0: i16, x1: i16) -> Self {
@@ -51,7 +51,7 @@ impl<T: I16x16Backend + I32x8Backend + Send + Sync> SimdMadd<8, 16> for i16x16<T
         for k in 0..8 {
             a[2 * k + 1] = x1;
         }
-        i16x16::from_array(t, a)
+        i16x16::from_array_t(t, a)
     }
     #[inline(always)]
     fn madd(self, o: Self) -> i32x8<T> {
@@ -59,7 +59,7 @@ impl<T: I16x16Backend + I32x8Backend + Send + Sync> SimdMadd<8, 16> for i16x16<T
     }
     #[inline(always)]
     fn acc_load(t: T, a: &[i32; 8]) -> i32x8<T> {
-        i32x8::load(t, a)
+        i32x8::load_t(t, a)
     }
     #[inline(always)]
     fn acc_add(a: i32x8<T>, b: i32x8<T>) -> i32x8<T> {
@@ -77,7 +77,7 @@ impl<T: I16x32Backend + I32x16Backend + Send + Sync> SimdMadd<16, 32> for i16x32
     type Acc = i32x16<T>;
     #[inline(always)]
     fn weights(t: T, w: &[i16; 32]) -> Self {
-        i16x32::load(t, w)
+        i16x32::load_t(t, w)
     }
     #[inline(always)]
     fn pair(t: T, x0: i16, x1: i16) -> Self {
@@ -85,7 +85,7 @@ impl<T: I16x32Backend + I32x16Backend + Send + Sync> SimdMadd<16, 32> for i16x32
         for k in 0..16 {
             a[2 * k + 1] = x1;
         }
-        i16x32::from_array(t, a)
+        i16x32::from_array_t(t, a)
     }
     #[inline(always)]
     fn madd(self, o: Self) -> i32x16<T> {
@@ -93,7 +93,7 @@ impl<T: I16x32Backend + I32x16Backend + Send + Sync> SimdMadd<16, 32> for i16x32
     }
     #[inline(always)]
     fn acc_load(t: T, a: &[i32; 16]) -> i32x16<T> {
-        i32x16::load(t, a)
+        i32x16::load_t(t, a)
     }
     #[inline(always)]
     fn acc_add(a: i32x16<T>, b: i32x16<T>) -> i32x16<T> {
