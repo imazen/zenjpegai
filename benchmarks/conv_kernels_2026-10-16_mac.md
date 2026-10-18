@@ -169,6 +169,33 @@ produces a nonempty profile". Exact results:
   verified as pure forwarders, and `fast_vs_reference` exercises the same
   tier × threading matrix on the kernels touched.
 
+### Addendum 2026-10-17: reference checkout + vectors now present on this Mac
+
+After this report was first written the reference environment was fetched:
+
+- `~/work/zen/jpeg-ai-reference-software` — clone at pinned `b9e573f`
+  (`GIT_LFS_SKIP_SMUDGE=1` + `git lfs pull --include="models/,data/"`; 3.4 GB:
+  80 `.pth` checkpoints 974 MB, `data/test` PNGs 721 MB).
+- `~/work/zen/zenjpegai-refdata/{vectors,inputs}` — 74 vector dirs rsynced
+  from `dev:/mnt/v/output/zenjpegai/reference/` (6.4 GB; set
+  `ZENJPEGAI_VECTORS=/Users/lilith/work/zen/zenjpegai-refdata/vectors`).
+
+Re-run with both env vars: **all model-free suites still green, plus**
+`weights_ref` 4/4 (all 80 upstream `.pth` checkpoints parse, FNV-1a verified),
+`filters_efe_ref` 17/17, `memory_ref` 6/6, `packed_bundle` 4/4, and the
+previously-unrunnable **`tiers_and_threads_agree_bit_for_bit` passes**
+(decode_ref). `decode_ref` 44/47, `entropy_ref` 35/37, `encode_ref` 11/22,
+`f16_weights` 5/6: every remaining failure is a `vector_dir` missing-file
+panic at `tests/common/mod.rs:45` — never a numeric diff.
+
+Unsynced for disk headroom (container was at 100%; ~0.7 GiB free):
+`img01_base_off_{indregions,indregions_threads8}_m1` (~640 MB),
+`img01_base_off_bpp{012,025,075,100}` (~1.1 GB), `enc_img01_bop_m1_b0{,_y80u40,
+_indregions,_depregions}` (~765 MB), `img30_base_on_bpp{012,050,075}`
+(~745 MB), `img01_base_on_*` (~7.3 GB). The reference *Python* env still
+cannot run here — pinned `torch==1.10.2+cpu` has no arm64 macOS wheels — so
+vectors can only be synced, not regenerated, on this host.
+
 Peak RSS (run-heavy): bench sweeps 0.48 GiB each; test suite 1.02 GiB.
 
 ## Files
