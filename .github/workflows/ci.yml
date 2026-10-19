@@ -41,7 +41,6 @@ jobs:
         include:
           - { os: ubuntu-latest, name: Linux x64 }
           - { os: windows-11-arm, name: Windows arm64 }
-          - { os: macos-15-intel, name: macOS x64 }
           - { os: macos-latest, name: macOS arm64 }
     steps:
       - uses: actions/checkout@v7

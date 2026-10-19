@@ -917,3 +917,13 @@ Appended by the WebGPU browser agent (`webgpu` workspace), 2026-09-18:
   `auto` on the CPU engine was superseded by the b3gpu pass (B1 row above): `auto` takes a
   non-software adapter when one exists (`web/README.md` §7).
 
+
+## Structural inventory integration (2026-10-19)
+
+The inventory PR uses zencodec main's direct `Inventory` return and `Part` getters,
+with the unreleased zencodec and zencodec-testkit supplied by matching git patches.
+`just inventory-check` runs format, clippy, the reference-backed suite (the existing
+`tiers_and_threads` filter), and the independent bitstream-probe oracle. On dev,
+the oracle matched role, order, size and disposition for 517 substreams in 85
+reference streams; its seven expected probe failures remain pinned. The standalone
+fuzz inventory target builds via `just inventory-fuzz-check`.
