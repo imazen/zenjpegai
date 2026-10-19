@@ -141,7 +141,6 @@ fn reference_probe_lists_the_same_substreams() {
         let inv = JpegAiDecoderConfig::default()
             .job()
             .inventory(&data)
-            .unwrap()
             .unwrap();
         inv.validate().unwrap();
         // The inventory's substreams in file order:
@@ -150,27 +149,27 @@ fn reference_probe_lists_the_same_substreams() {
             .children(None)
             .into_iter()
             .map(|id| (id, inv.get(id).unwrap()))
-            .filter_map(|(id, p)| match p.tag {
+            .filter_map(|(id, p)| match p.tag() {
                 PartTag::Marker(m @ 0x82..=0x8C) => {
                     let kids = inv.children(Some(id));
                     let header_end = kids
                         .first()
-                        .map(|&k| inv.get(k).unwrap().range.end)
-                        .unwrap_or(p.range.start);
+                        .map(|&k| inv.get(k).unwrap().range().end)
+                        .unwrap_or(p.range().start);
                     // The payload part: the first child that is not the framing header.
                     let body = kids
                         .iter()
                         .map(|&k| inv.get(k).unwrap())
-                        .find(|k| k.range.start >= header_end && k.kind.name() == "block");
+                        .find(|k| k.range().start >= header_end && k.kind().name() == "block");
                     let region = kids
                         .iter()
                         .map(|&k| inv.get(k).unwrap())
-                        .find(|k| matches!(&k.tag, PartTag::Name(n) if n == "region-index"))
-                        .map(|k| data[k.range.start as usize]);
+                        .find(|k| matches!(k.tag(), PartTag::Name(n) if n == "region-index"))
+                        .map(|k| data[k.range().start as usize]);
                     Some((
-                        m,
-                        p.range.end - header_end,
-                        body.map_or(p.disposition, |b| b.disposition),
+                        *m,
+                        p.range().end - header_end,
+                        body.map_or(p.disposition(), |b| b.disposition()),
                         region,
                     ))
                 }

@@ -42,6 +42,9 @@ impl StopAfter {
 }
 
 impl enough::Stop for StopAfter {
+    // fetch_update is deprecated in std ≥1.99 in favour of try_update, which needs Rust 1.95 —
+    // above the crate MSRV (1.89). Stay on the deprecated name until the MSRV covers it.
+    #[allow(deprecated)]
     fn check(&self) -> Result<(), enough::StopReason> {
         match self
             .0

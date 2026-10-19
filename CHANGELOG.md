@@ -15,7 +15,7 @@
   and unknown substreams, rejected headers, labelled UDI text and bytes after EOC are reported
   with what the decode path does with each. Not distinguished: thread-size framing and the
   unread bytes at the start of each ANS thread inside entropy-coded payloads. Needs the
-  `feat/inventory` zencodec patch until zencodec#133 releases. (870a8b3, review fixes in the
+  zencodec `main` git patch until the inventory API releases. (870a8b3, review fixes in the
   commits after it on `feat/inventory`)
 
 #### Encoder
@@ -380,9 +380,27 @@
   corpora/artifacts sync to `/mnt/v/fuzzes/zenjpegai/` via
   `~/work/zen-workspace/fuzz-sync.sh`. First campaign: no crash, timeout, OOM, or
   slow-unit findings.
+- NEON conv/int-conv verification on Apple Silicon (M4 Pro,
+  `benchmarks/conv_kernels_2026-10-16_mac.md`): swept the row micro-kernel tile `B`
+  (`conv_row_neon` 6-16, `int_row_neon` 6-14) over the synthetic conv shapes plus three
+  new HSD-shaped integer-conv groups in `benches/conv_kernels.rs` — the committed
+  constants (B=12 float, B=6 int) already sit at the optimum; no kernel change. LLVM
+  already emits lane-form `fmla`/`ld1r` for the broadcast-input pattern. All numbers are
+  zenbench `--cpu-policy=unrestricted` exploratory runs (macOS cannot bind to P-cores).
+  Coz usability probe: the `coz` crate (0.1.3) compiles on aarch64-apple-darwin but its
+  progress-point lookup is `#[cfg(target_os = "linux")]`-gated, so instrumented Rust
+  programs profile as empty; native coz built from source does produce a causal profile
+  on a C probe (Mach thread sampling, no sudo/SIP needed) — unusable for this Rust
+  codebase without a crate patch; not added as a dependency.
 - Repository skeleton.
 
 ### Fixed
+- Rust 1.99 deprecation cleanups so `cargo clippy --all-targets --all-features --
+  -D warnings` stays green: `src/nn/fast` magetypes `load`/`splat`/`from_array` →
+  `load_t`/`splat_t`/`from_array_t` (pure forwarders, bit-identical);
+  `tests/codec_ref.rs` `ComputeEnvironment::new()` → `conservative()` (same value);
+  `fuzz/fuzz_targets/common.rs` keeps `fetch_update` under `#[allow(deprecated)]`
+  (its `try_update` rename needs Rust 1.95 > MSRV 1.89).
 - Fuzz infrastructure (review pass): `tests/fuzz_regression.rs` panics on an
   unreadable `fuzz/regression/` (it previously replayed as an empty success) and
   now also replays the committed `fuzz/seeds/` streams through every entry

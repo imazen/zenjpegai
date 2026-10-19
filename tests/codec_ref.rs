@@ -74,7 +74,7 @@ fn resource_estimate_is_same_order_of_magnitude_as_the_calibrated_one() {
         1400,
         zenpixels::PixelDescriptor::RGB8_SRGB,
     );
-    let compute = zencodec::estimate::ComputeEnvironment::new().with_cores(1);
+    let compute = zencodec::estimate::ComputeEnvironment::conservative();
     let est = config.estimate_decode_resources(&image, &compute);
     let structural = est.peak_memory_bytes_est().unwrap();
     let calibrated_live = calibrated.live_bytes;
@@ -401,7 +401,7 @@ fn encode_resource_estimate_is_the_calibrated_model() {
         img.height as u32,
         zenpixels::PixelDescriptor::RGB8_SRGB,
     );
-    let compute = zencodec::estimate::ComputeEnvironment::new().with_cores(1);
+    let compute = zencodec::estimate::ComputeEnvironment::conservative();
     let calibrated = zenjpegai::estimate_encode_memory(
         img.width as u64,
         img.height as u64,

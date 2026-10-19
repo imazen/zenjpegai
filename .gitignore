@@ -3,6 +3,7 @@ target/
 .workongoing
 .jj/
 .cargo/config.toml
+.zenbench/
 
 # model weights and reference streams never go in git (see models/README.md)
 *.pth

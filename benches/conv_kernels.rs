@@ -3,7 +3,7 @@
 //!
 //!     cargo bench --bench conv_kernels
 use zenbench::prelude::*;
-use zenjpegai::nn::fast::{BTensor, Engine, PackedConv, PackedConvTranspose, Tier};
+use zenjpegai::nn::fast::{BTensor, Engine, PackedConv, PackedConvTranspose, PackedIntConv, Tier};
 use zenjpegai::nn::{Conv2d, ConvTranspose2d};
 use zenjpegai::tensor::Tensor;
 
@@ -16,6 +16,18 @@ fn filled(n: usize, seed: u32) -> Vec<f32> {
             s ^= s << 5;
             (s >> 8) as f32 / (1u32 << 24) as f32 - 0.5
         })
+        .collect()
+}
+
+/// `filled`, mapped into the int8 range the hyper-scale decoder convolutions actually see.
+fn filled_i8(n: usize, seed: u32) -> Vec<i8> {
+    filled(n, seed).iter().map(|&v| (v * 200.0) as i8).collect()
+}
+
+fn filled_i32(n: usize, seed: u32) -> Vec<i32> {
+    filled(n, seed)
+        .iter()
+        .map(|&v| (v * 200.0) as i32)
         .collect()
 }
 
@@ -110,6 +122,46 @@ fn convt_group(suite: &mut Suite, name: &str, in_ch: usize, out_ch: usize, h: us
     });
 }
 
+/// Integer hyper-scale decoder convolution: `forward` takes the planar `Tensor<i32>` directly.
+fn int_group(
+    suite: &mut Suite,
+    name: &str,
+    in_ch: usize,
+    out_ch: usize,
+    k: usize,
+    h: usize,
+    w: usize,
+) {
+    let weight = filled_i8(out_ch * in_ch * k * k, 7);
+    let bias = filled_i32(out_ch, 8);
+    let shift = vec![16u8; out_ch];
+    let x = filled_i32(in_ch * h * w, 9);
+    let macs = (out_ch * in_ch * k * k * h * w) as u64;
+    suite.group(name, |g| {
+        g.throughput(Throughput::Elements(macs));
+        for tier in Tier::available() {
+            if matches!(tier, Tier::Scalar) {
+                continue;
+            }
+            for parallel in [false, true] {
+                let eng = Engine::with(tier, parallel);
+                let packed =
+                    PackedIntConv::new(out_ch, in_ch, k, &weight, &bias, &shift, tier.block())
+                        .unwrap();
+                let x = Tensor::from_vec(in_ch, h, w, x.clone()).unwrap();
+                let label = format!(
+                    "{}{}",
+                    tier_name(tier),
+                    if parallel { "_mt" } else { "_1t" }
+                );
+                g.bench(label, move |b| {
+                    b.iter(|| packed.forward(&eng, &x, true).unwrap())
+                });
+            }
+        }
+    });
+}
+
 fn benches(suite: &mut Suite) {
     let (h, w) = (88, 131);
     conv_group(suite, "res_conv3x3_160_160@1/16", [160, 160, 3, 1, h, w]);
@@ -127,6 +179,11 @@ fn benches(suite: &mut Suite) {
     convt_group(suite, "up2_convT4x4_64_64@1/8", 64, 64, 2 * h, 2 * w);
     conv_group(suite, "conv3_3x3_64_96@1/4", [64, 96, 3, 1, 4 * h, 4 * w]);
     conv_group(suite, "conv4_1x1_96_16@1/4", [96, 16, 1, 1, 4 * h, 4 * w]);
+    // Hyper-scale decoder (integer path): conv1x1 -> 3x3 -> pointwise 1x1 to 16 * chs, all on
+    // the latent grid. chs = 128 is representative; real checkpoint values vary by profile.
+    int_group(suite, "hsd_conv1x1_128_128@1/16", 128, 128, 1, h, w);
+    int_group(suite, "hsd_conv3x3_128_128@1/16", 128, 128, 3, h, w);
+    int_group(suite, "hsd_conv1x1_128_2048@1/16", 128, 16 * 128, 1, h, w);
 }
 
 zenbench::main!(benches);

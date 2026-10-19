@@ -74,6 +74,8 @@ pub struct EntropyOptions {
     pub parallel: bool,
 }
 
+// Not derivable: `parallel` defaults to the feature flag, not `false`.
+#[allow(clippy::derivable_impls)]
 impl Default for EntropyOptions {
     fn default() -> Self {
         Self {

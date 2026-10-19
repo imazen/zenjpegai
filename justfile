@@ -78,3 +78,16 @@ inventory-oracle:
     ZENJPEGAI_REF={{ref}} INVENTORY_ORACLE_VECTORS=/mnt/v/output/zenjpegai/reference/vectors \
         INVENTORY_ORACLE_PROBE={{ref}}/.venv/bin/python \
         cargo test --features zencodec --test inventory_oracle -- --ignored --nocapture
+
+# Local PR inventory gates, including reference-backed conformance and the probe oracle.
+inventory-check:
+    cargo fmt -p zenjpegai -p zenjpegai-gpu -p zenjpegai-wasm
+    cargo fmt -p zenjpegai -p zenjpegai-gpu -p zenjpegai-wasm --check
+    cargo clippy --all-targets --all-features -- -D warnings
+    ZENJPEGAI_REF={{ref}} cargo test --lib --tests --all-features -- --skip tiers_and_threads
+    just inventory-oracle
+
+# Keep the standalone fuzz resolver on the same inventory API as the library.
+inventory-fuzz-check:
+    cargo update --manifest-path fuzz/Cargo.toml
+    cargo +nightly fuzz build --fuzz-dir fuzz --target x86_64-unknown-linux-gnu inventory

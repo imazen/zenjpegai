@@ -72,8 +72,7 @@ fn inventory_of(data: &[u8]) -> Inventory {
     let inv = JpegAiDecoderConfig::default()
         .job()
         .inventory(data)
-        .unwrap()
-        .expect("capability declared");
+        .unwrap();
     inv.validate().unwrap_or_else(|e| panic!("{e}\n{inv}"));
     inv
 }
@@ -84,13 +83,13 @@ fn render(inv: &Inventory, parent: Option<PartId>, depth: usize, out: &mut Vec<S
         let mut s = format!(
             "{}{} {} {}..{} {}",
             "  ".repeat(depth),
-            p.kind.name(),
-            p.tag,
-            p.range.start,
-            p.range.end,
-            p.disposition
+            p.kind().name(),
+            p.tag(),
+            p.range().start,
+            p.range().end,
+            p.disposition()
         );
-        if let Some(l) = &p.label {
+        if let Some(l) = p.label() {
             s.push_str(&format!(" {l:?}"));
         }
         out.push(s);
@@ -182,10 +181,13 @@ fn bytes_after_the_header_fields_are_split_off() {
     let tail = inv
         .parts()
         .iter()
-        .find(|p| p.detail.as_deref() == Some("bytes after the last field the parser reads"))
+        .find(|p| p.detail() == Some("bytes after the last field the parser reads"))
         .expect("a tail part");
-    assert_eq!(tail.range, 22..25);
-    assert_eq!(tail.disposition, zencodec::inventory::Disposition::Dropped);
+    assert_eq!(tail.range(), 22..25);
+    assert_eq!(
+        tail.disposition(),
+        zencodec::inventory::Disposition::Dropped
+    );
 }
 
 // ── review round 1 ───────────────────────────────────────────────────
@@ -196,8 +198,8 @@ use zenjpegai::header::{Mdcv, PictureHeader, QualityMapHeader, Regions, ToolHead
 fn part_at(inv: &Inventory, at: u64) -> &Part {
     inv.parts()
         .iter()
-        .filter(|p| p.range.start <= at && at < p.range.end)
-        .min_by_key(|p| p.range.end - p.range.start)
+        .filter(|p| p.range().start <= at && at < p.range().end)
+        .min_by_key(|p| p.range().end - p.range().start)
         .unwrap()
 }
 
@@ -334,21 +336,21 @@ fn independent_region_substreams_are_image_data() {
     let image: Vec<_> = inv
         .parts()
         .iter()
-        .filter(|p| p.kind.name() == "block" && p.disposition == Disposition::ImageData)
-        .filter(|p| matches!(p.tag, zencodec::inventory::PartTag::Marker(0x89 | 0x8A)))
+        .filter(|p| p.kind().name() == "block" && p.disposition() == Disposition::ImageData)
+        .filter(|p| matches!(p.tag(), zencodec::inventory::PartTag::Marker(0x89 | 0x8A)))
         .collect();
     assert_eq!(image.len(), 4, "{inv}");
     assert!(
         inv.parts()
             .iter()
-            .all(|p| p.disposition != Disposition::Dropped
-                || !matches!(p.tag, zencodec::inventory::PartTag::Marker(0x89 | 0x8A)))
+            .all(|p| p.disposition() != Disposition::Dropped
+                || !matches!(p.tag(), zencodec::inventory::PartTag::Marker(0x89 | 0x8A)))
     );
     // The region index byte is its own Structure field.
     let idx = inv
         .parts()
         .iter()
-        .filter(|p| matches!(&p.tag, zencodec::inventory::PartTag::Name(n) if n == "region-index"))
+        .filter(|p| matches!(p.tag(), zencodec::inventory::PartTag::Name(n) if n == "region-index"))
         .count();
     assert_eq!(idx, 4);
 }
@@ -372,11 +374,11 @@ fn bad_region_indices_and_second_residual_without_regions_are_malformed() {
         .parts()
         .iter()
         .filter(|p| {
-            matches!(p.kind.name(), "block" | "header")
-                && p.disposition == Disposition::Malformed
-                && p.detail.as_deref().is_some_and(|d| d.contains("rejects"))
+            matches!(p.kind().name(), "block" | "header")
+                && p.disposition() == Disposition::Malformed
+                && p.detail().is_some_and(|d| d.contains("rejects"))
         })
-        .map(|p| p.detail.clone().unwrap())
+        .map(|p| p.detail().unwrap())
         .collect();
     assert_eq!(bad.len(), 3, "{inv}");
     assert!(
@@ -391,13 +393,8 @@ fn bad_region_indices_and_second_residual_without_regions_are_malformed() {
     w.substream(Marker::Sorp, &[2; 5]).unwrap();
     let inv = inventory_of(&w.finish());
     let p = part_at(&inv, inv.input_len() - 6 - 1 - 2 + 4);
-    assert_eq!(p.disposition, Disposition::Malformed, "{inv}");
-    assert!(
-        p.detail
-            .as_deref()
-            .unwrap()
-            .contains("the decoder rejects the file")
-    );
+    assert_eq!(p.disposition(), Disposition::Malformed, "{inv}");
+    assert!(p.detail().unwrap().contains("the decoder rejects the file"));
 }
 
 // finding 2
@@ -412,30 +409,29 @@ fn rdi_fields_are_split_and_native_only_ones_are_dropped() {
     let inv = inventory_of(&data);
     let at = data.windows(5).position(|x| x == b"SERIA").unwrap() as u64;
     let secret = part_at(&inv, at);
-    assert_eq!(secret.disposition, Disposition::Dropped, "{inv}");
+    assert_eq!(secret.disposition(), Disposition::Dropped, "{inv}");
     assert!(
         secret
-            .detail
-            .as_deref()
+            .detail()
             .unwrap()
             .contains("native RenderingInfo only")
     );
     let cicp = inv
         .parts()
         .iter()
-        .find(|p| matches!(&p.tag, zencodec::inventory::PartTag::Name(n) if n == "cicp"))
+        .find(|p| matches!(p.tag(), zencodec::inventory::PartTag::Name(n) if n == "cicp"))
         .unwrap();
-    assert!(matches!(cicp.disposition, Disposition::Metadata(_)));
+    assert!(matches!(cicp.disposition(), Disposition::Metadata(_)));
     assert_eq!(cicp.len(), 2);
     for name in ["matrix-coefficients", "mdcv", "clli", "dm-type", "dm-data"] {
         let p = inv
             .parts()
             .iter()
-            .find(|p| matches!(&p.tag, zencodec::inventory::PartTag::Name(n) if n == name))
+            .find(|p| matches!(p.tag(), zencodec::inventory::PartTag::Name(n) if n == name))
             .unwrap();
-        assert_eq!(p.disposition, Disposition::Dropped, "{name}");
+        assert_eq!(p.disposition(), Disposition::Dropped, "{name}");
     }
-    assert!(inv.unconsumed().any(|(_, p)| p.range.contains(&at)));
+    assert!(inv.unconsumed().any(|(_, p)| p.range().contains(&at)));
 }
 
 // finding 3
@@ -477,42 +473,26 @@ fn rejected_streams_are_marked() {
         .parts()
         .iter()
         .find(|p| {
-            p.kind.name() == "block" && matches!(p.tag, zencodec::inventory::PartTag::Marker(0x83))
+            p.kind().name() == "block"
+                && matches!(p.tag(), zencodec::inventory::PartTag::Marker(0x83))
         })
         .unwrap();
-    assert_eq!(ton.disposition, Disposition::Malformed, "{inv}");
-    assert!(
-        ton.detail
-            .as_deref()
-            .unwrap()
-            .contains("rejects the tool header")
-    );
+    assert_eq!(ton.disposition(), Disposition::Malformed, "{inv}");
+    assert!(ton.detail().unwrap().contains("rejects the tool header"));
     // No EOC: the note is on SOC (the writer's finish would add EOC, so cut it).
     let mut w = CodestreamWriter::new();
     w.substream(Marker::Pih, &pih_bytes).unwrap();
     let mut b = w.finish();
     b.truncate(b.len() - 2);
     let inv = inventory_of(&b);
-    assert!(
-        part_at(&inv, 0)
-            .detail
-            .as_deref()
-            .unwrap()
-            .contains("no EOC")
-    );
+    assert!(part_at(&inv, 0).detail().unwrap().contains("no EOC"));
     // First substream is not PIH.
     let mut b = vec![0xFF, 0x80];
     b.extend(raw_substream(0xFF8C, b"hello world"));
     b.extend(raw_substream(0xFF82, &pih_bytes));
     b.extend([0xFF, 0x81]);
     let inv = inventory_of(&b);
-    assert!(
-        part_at(&inv, 0)
-            .detail
-            .as_deref()
-            .unwrap()
-            .contains("not PIH")
-    );
+    assert!(part_at(&inv, 0).detail().unwrap().contains("not PIH"));
     // A PIH that fails to parse.
     let mut b = vec![0xFF, 0x80];
     b.extend(raw_substream(0xFF82, &[0xFF; 3]));
@@ -521,9 +501,9 @@ fn rejected_streams_are_marked() {
     let p = inv
         .parts()
         .iter()
-        .find(|p| p.kind.name() == "block")
+        .find(|p| p.kind().name() == "block")
         .unwrap();
-    assert_eq!(p.disposition, Disposition::Malformed);
+    assert_eq!(p.disposition(), Disposition::Malformed);
 }
 
 // finding 5
@@ -569,12 +549,11 @@ fn udi_labels_use_the_longest_printable_run() {
         inv.parts()
             .iter()
             .find(|p| {
-                p.kind.name() == "block"
-                    && matches!(p.tag, zencodec::inventory::PartTag::Marker(0x8C))
+                p.kind().name() == "block"
+                    && matches!(p.tag(), zencodec::inventory::PartTag::Marker(0x8C))
             })
             .unwrap()
-            .label
-            .clone()
+            .label()
             .unwrap()
             .to_string()
     };
@@ -598,7 +577,7 @@ fn udi_labels_use_the_longest_printable_run() {
 
 fn soc_detail(data: &[u8]) -> String {
     let inv = inventory_of(data);
-    part_at(&inv, 0).detail.clone().unwrap_or_default()
+    part_at(&inv, 0).detail().unwrap_or_default().to_owned()
 }
 
 // F2: bytes the decoder reads are not Dropped.
@@ -608,19 +587,19 @@ fn repeated_substream_framing_and_dm_size_are_structure() {
     let inv = inventory_of(&data);
     // The repeated UDI at 130..137: framing 130..133 is read by Codestream::parse.
     assert_eq!(
-        part_at(&inv, 130).disposition,
+        part_at(&inv, 130).disposition(),
         Disposition::Structure,
         "{inv}"
     );
-    assert_eq!(part_at(&inv, 134).disposition, Disposition::Dropped);
+    assert_eq!(part_at(&inv, 134).disposition(), Disposition::Dropped);
     let full = full_fixture();
     let inv = inventory_of(&full);
     let dm_size = inv
         .parts()
         .iter()
-        .find(|p| matches!(&p.tag, zencodec::inventory::PartTag::Name(n) if n == "dm-size"))
+        .find(|p| matches!(p.tag(), zencodec::inventory::PartTag::Name(n) if n == "dm-size"))
         .unwrap();
-    assert_eq!(dm_size.disposition, Disposition::Structure);
+    assert_eq!(dm_size.disposition(), Disposition::Structure);
     assert_eq!(dm_size.len(), 2);
 }
 

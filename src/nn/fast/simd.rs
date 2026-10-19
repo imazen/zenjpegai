@@ -25,11 +25,11 @@ impl<T: F32x8Backend + Send + Sync> SimdF32<8> for f32x8<T> {
     type Token = T;
     #[inline(always)]
     fn splat(t: T, x: f32) -> Self {
-        f32x8::splat(t, x)
+        f32x8::splat_t(t, x)
     }
     #[inline(always)]
     fn load(t: T, a: &[f32; 8]) -> Self {
-        f32x8::load(t, a)
+        f32x8::load_t(t, a)
     }
     #[inline(always)]
     fn store(self, a: &mut [f32; 8]) {
@@ -45,11 +45,11 @@ impl<T: F32x16Backend + Send + Sync> SimdF32<16> for f32x16<T> {
     type Token = T;
     #[inline(always)]
     fn splat(t: T, x: f32) -> Self {
-        f32x16::splat(t, x)
+        f32x16::splat_t(t, x)
     }
     #[inline(always)]
     fn load(t: T, a: &[f32; 16]) -> Self {
-        f32x16::load(t, a)
+        f32x16::load_t(t, a)
     }
     #[inline(always)]
     fn store(self, a: &mut [f32; 16]) {
