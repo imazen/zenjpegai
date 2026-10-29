@@ -1122,6 +1122,54 @@ mod oracle {
                     i + 3,
                     yhd / want_yh1.data.len() as f64
                 );
+                // `LightPrimary(y_hat)` vs `x_hat`/`decoder(y_hat)` on the
+                // exact reference y_hat — any residual is a real
+                // LightPrimary/decoder forward difference (not the y_hat
+                // diff amplified), which would explain the ~20% Jacobian gap.
+                let yh_b = BTensor::from_planar(&want_yh1, eng.tier.block()).unwrap();
+                let (lh_rec, _) = synthesis
+                    .forward_tape(eng, &yh_b, want_rec.h, want_rec.w, &enough::Unstoppable)
+                    .unwrap();
+                let (mut lhd, mut lhmax) = (0.0f64, 0.0f32);
+                for k in 0..lh_rec.data.len().min(want_rec.data.len()) {
+                    lhd += (lh_rec.data[k] - want_rec.data[k]).abs() as f64;
+                    lhmax = lhmax.max((lh_rec.data[k] - want_rec.data[k]).abs());
+                }
+                eprintln!(
+                    "  LightPrimary(y_hat) vs x_hat: absdiff {:.3e} max {:.3e}",
+                    lhd / want_rec.data.len() as f64,
+                    lhmax
+                );
+                // Where does LightPrimary differ from decoder? Edge vs interior,
+                // and is it at clip-boundary (rec near 0/255) positions?
+                let (mut e_edge, mut e_int, mut e_clip, mut e_noclip, mut n_clip) =
+                    (0.0f64, 0.0f64, 0.0f64, 0.0f64, 0usize);
+                let (rh, rw) = (want_rec.h, want_rec.w);
+                for y in 0..rh {
+                    for x in 0..rw {
+                        let k = y * rw + x;
+                        let d = (lh_rec.data[k] - want_rec.data[k]).abs() as f64;
+                        if y < 11 || y >= rh - 11 || x < 11 || x >= rw - 11 {
+                            e_edge += d;
+                        } else {
+                            e_int += d;
+                        }
+                        if want_rec.data[k] < 1.0 || want_rec.data[k] > 254.0 {
+                            e_clip += d;
+                            n_clip += 1;
+                        } else {
+                            e_noclip += d;
+                        }
+                    }
+                }
+                eprintln!(
+                    "    edge absdiff {:.3e}  interior {:.3e}  clip {:.3e} (n {})  noclip {:.3e}",
+                    e_edge / want_rec.data.len() as f64,
+                    e_int / want_rec.data.len() as f64,
+                    e_clip / want_rec.data.len() as f64,
+                    n_clip,
+                    e_noclip / want_rec.data.len() as f64
+                );
                 let want_dr = dump[&format!("rdlr.{i}.x_hat_grad")].tensor_f32();
                 // Feed the reference's own `x_hat_grad` through the synthesis
                 // backward — if downstream is right, `synth - d_resi` should

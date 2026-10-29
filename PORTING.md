@@ -787,11 +787,19 @@ measured numbers in the status table above when you close an item.
   a whole-field finite-diff-verified adjoint; `rp.rec == x_hat` (3.5e-5),
   `rp.y_hat == y_hat` (1.6e-7), `x_hat` feeds metrics only. The resi_dq→resi_rq→diff
   STE path and the 255× ms-ssim domain scale were the two bugs found and fixed.
-  **Remaining gap — NOT `d_rec`**: feeding the reference's own `x_hat_grad` through
-  `SynthesisPrimary::backward` still yields `d_out_yhat` only ~0.79-correlated with
-  `y_hat_grad`, so the residual is a scalar-matching-but-Jacobian-different
-  `LightPrimary`/decoder (or a `d_out_yhat` composition subtlety), not the metric
-  gradient, pooling, or MCM. Remaining: exact `d y_hat` parity, then the Adagrad/StepLR
+  **Root cause — `LightPrimary`/`decoder` differ ~2.75e-5 forward**: running
+  `SynthesisPrimary` on the *exact* reference `y_hat` gives `rec` differing from
+  `x_hat`/`decoder` by 2.75e-5 (interior-concentrated: 2.63e-5, edge 1.2e-6,
+  clip ~0, max 5.6e-4). A systematic interior forward difference → the ~20%
+  Jacobian decorrelation (d_rec 0.80, ref_synth 0.79, d(y) 0.72 — all
+  consistent). Feeding the reference's own `x_hat_grad` through
+  `SynthesisPrimary::backward` gives `d_out_yhat` only ~0.79-correlated with
+  `y_hat_grad`, so the gap is `LightPrimary`/`decoder` itself, not `d_rec`,
+  pooling, or MCM. Decode tests verify 8-bit `pixels` (`assert_eq`), so a
+  sub-pixel (<0.5) continuous-rec difference is invisible there — `LightPrimary`
+  matches `decoder` in pixels but not in the continuous rec/Jacobian. The
+  ~20% gap is a real `LightPrimary`/`decoder` porting difference needing
+  layer-by-layer isolation against `tool.decoder` intermediates. Remaining: exact `d y_hat` parity, then the Adagrad/StepLR
   driver + best-iterate selection + `_compress_y` decisions rewrite + stream emission.
   Driver semantics (`process_y` / `rdlr_y_iteration` / `rdlr_tool`): the leaf is the
   *tile-core* latent (`tiling.get_data(lat_tile, optimized_part_of_lattile_rel_to_overlap)`;
