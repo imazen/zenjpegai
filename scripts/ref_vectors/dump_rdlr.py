@@ -184,6 +184,7 @@ def main():
 
         def _gcrp(self, tool, *a, _o=_orig_gcrp, **kw):
             _install_cas3(tool)
+            _hook_synth(tool)
             r = _o(self, tool, *a, **kw)
             n = _gcrp_count[0]
             _gcrp_count[0] += 1
@@ -209,8 +210,16 @@ def main():
         put(f"rdlr.cas.{n}.resi_hat", out[0])
         put(f"rdlr.cas.{n}.resi_dq", out[1])
         put(f"rdlr.cas.{n}.y_hat", out[2])
+        # retain_grad on the rate point's intermediates — the VJP oracle's
+        # upstream gradient at every chain boundary (populated by the
+        # iteration's loss.backward()).
+        for o in out:
+            if isinstance(o, torch.Tensor) and o.requires_grad:
+                o.retain_grad()
+        _cas_grads[n] = (y_hat, out)
         return out
 
+    _cas_grads = {}
     CommonEncDecModules._compress_ar_scale = _cas
 
     # Record the GM likelihood model's actual inputs/outputs per call —
@@ -228,9 +237,35 @@ def main():
             put(f"rdlr.gm.{n}.resi", input)
             put(f"rdlr.gm.{n}.scale", scale)
             put(f"rdlr.gm.{n}.rate_y", float((-torch.log2(out)).sum()))
+            for t in (input, out):
+                if t.requires_grad:
+                    t.retain_grad()
+            _gm_grads[n] = (input, out)
         return out
 
+    _gm_grads = {}
     GMProbModel.forward = _gm_fwd
+
+    # The synthesis output (`rec_Y_in`, `measurements['x_hat']`) — its `.grad`
+    # isolates the metric VJP from the synthesis VJP.
+    _rec_grads = {}
+    _rec_count = [0]
+
+    def _rec_hook(mod, inputs, out):
+        n = _rec_count[0]
+        _rec_count[0] += 1
+        if isinstance(out, torch.Tensor) and out.dim() == 4:
+            put(f"rdlr.rec.{n}.x_hat", out)
+            if out.requires_grad:
+                out.retain_grad()
+            _rec_grads[n] = out
+
+    _synth_hooked = [False]
+
+    def _hook_synth(tool):
+        if not _synth_hooked[0]:
+            tool.decoder.register_forward_hook(_rec_hook)
+            _synth_hooked[0] = True
 
     # The latent-domain optimized area (where the leaf sits inside the overlap
     # tile) is a process_y local; capture it off `tiling.assign_data`.
@@ -303,6 +338,24 @@ def main():
         put(f"rdlr.{i}.loss", float(r))
         if leaf.grad is not None:
             put(f"rdlr.{i}.y_grad", leaf.grad)
+        # The retained-grad captures at every chain boundary — the VJP oracle.
+        c = 3 + i  # cas.3+i is this iteration's _compress_ar_scale
+        if c in _cas_grads:
+            y_in, out = _cas_grads[c]
+            if y_in.grad is not None:
+                put(f"rdlr.{i}.cas_y_in_grad", y_in.grad)
+            for j, tag in enumerate(("resi_hat", "resi_dq", "y_hat", "cube_flag")):
+                if j < len(out) and out[j].grad is not None:
+                    put(f"rdlr.{i}.{tag}_grad", out[j].grad)
+        g = i + 1  # gm.i+1 is this iteration's entropy call
+        if g in _gm_grads:
+            inp, lik = _gm_grads[g]
+            if inp.grad is not None:
+                put(f"rdlr.{i}.gm_resi_grad", inp.grad)
+            if lik.grad is not None:
+                put(f"rdlr.{i}.gm_lik_grad", lik.grad)
+        if i in _rec_grads and _rec_grads[i].grad is not None:
+            put(f"rdlr.{i}.x_hat_grad", _rec_grads[i].grad)
         return r
 
     RDLRCompY.rdlr_y_iteration = y_iter

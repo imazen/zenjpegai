@@ -758,6 +758,24 @@ measured numbers in the status table above when you close an item.
   `entropy(resi, scale_lin, 0)` GM likelihood (rate numerator), `encode_z` into ECLibLH
   (rate denominator), PSNR + `pytorch_msssim` on the tile core. The UV pass feeds the luma
   `y_hat[::2,::2]` as `sup_info` and adds the luma tile's rate via `calc_additional_rate`.
+  **Status (in progress):** at b9e573f RDLR is dead code — five stale call sites
+  (`TileManager.set_alignment_size`, `setup_tiles_enc`'s missing psi/z args,
+  `get_core_of_overlapping_latent_tile`'s missing `tile_manager_hd`,
+  `BitstreamStructure.encode_init/encode_term`, `_compress_y`) — each restored by
+  monkeypatch in `scripts/ref_vectors/dump_rdlr.py`, which runs the reference's RDLR and
+  dumps per-iteration y / cas.{resi_hat,resi_dq,y_hat} / gm.{resi,scale,rate_y} /
+  gcrp.{rate,psnr,msssim} / leaf + post-backward `y_grad` / loss / lr / slope normals /
+  mix ratio. `src/encoder/rdlr.rs` ports `get_current_rate_point`'s forward chain and is
+  oracle-verified on all 8 iterations of `rdlr_img30_bop_m1_b0` (rate_y within ~5 bits of
+  ~650k, bpp/PSNR/MS-SSIM at displayed precision, `resi_hat` exact on 6/8, ±1 boundary
+  flips elsewhere). Semantics pinned: `resi = y - y_hat + resi_q` (index units); σ =
+  `max(exp(clamp((scale_lin+64)/128, 0, 34)·log_k + ln 0.11), 0.11)` — `scale_lin =
+  exp(scale_log/2^7·log_k + ln 0.11)` — the GM's own `_index_to_scale` float-shift +
+  `_likelihood`'s `/2^7`, not the plain table lookup; `rate_y` sums over all positions
+  (no mask/num_chs); `test_numBits = ECLibLH z bits + rate_y`, `bpp` over source pixels.
+  Remaining: the VJP (input-gradient kernels through the MCM context, synthesis, GM
+  likelihood, PSNR/MS-SSIM — see below) and the Adagrad/StepLR driver + best-iterate
+  selection + the `_compress_y` decisions rewrite + stream emission.
   Port cost: **input-gradient (VJP) kernels for every op in the reconstruct chain** —
   MCM's four phases, the synthesis decoder (convs, transposed conv, TAM/CAB, gates,
   layernorm, pixel shuffle, ResAU), `ms_ssim`, PSNR, the GM likelihood, the STE wrapper —

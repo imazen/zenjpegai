@@ -181,6 +181,110 @@ fn gm_nbits(resi: f32, sigma: f32) -> f64 {
     -p.log2()
 }
 
+/// `d(-log2 l)/d(resi)` at `(resi, sigma)` — the rate term's upstream VJP.
+/// `l = 0.5·erfc(-0.7071·(0.5-|v|)/σ) - 0.5·erfc(-0.7071·(-0.5-|v|)/σ)`;
+/// `d(erfc u)/du = -2·e^{-u²}/√π`; where `l` hit the `1e-9` floor,
+/// `LowerBound`'s backward passes `1`, giving `d/d(l) = -1/(l·ln2)` with
+/// `l = 1e-9` — the reference's own semantics (`LowerBoundFunction` returns
+/// `max(x, bound)` and its backward zeroes nothing; autograd sees the clamped
+/// value and passes the gradient through `x`'s gradient when `x > bound` —
+/// below the bound the output is constant and the grad is 0). Torch's
+/// `torch.clamp`-equivalent custom Function here is `LowerBound`: forward
+/// `max`, backward grad where `x >= bound` else 0.
+fn gm_nbits_vjp(resi: f32, sigma: f32) -> f64 {
+    const C: f64 = -0.7071067811865476;
+    const SQRT_PI: f64 = 1.772453850905516;
+    let s = sigma as f64;
+    let v = resi.abs() as f64;
+    let upper = 0.5 * libm::erfc(C * (0.5 - v) / s);
+    let lower = 0.5 * libm::erfc(C * (-0.5 - v) / s);
+    let p = upper - lower;
+    if p <= LIKELIHOOD_BOUND {
+        return 0.0;
+    }
+    // dl/dv = (0.7071/(σ·√π)) · (e^{-((0.5+v)/σ)²} - e^{-((0.5-v)/σ)²})
+    let du = (0.5 - v) / s;
+    let dl = (0.5 + v) / s;
+    let k = 0.7071067811865476 / (s * SQRT_PI);
+    let dl_dv = k * (libm::exp(-dl * dl) - libm::exp(-du * du));
+    -(1.0 / (p * core::f64::consts::LN_2)) * dl_dv * resi.signum() as f64
+}
+
+/// The iteration's loss and its upstream scalars — `rdlr_y_iteration`'s
+/// change vectors and slope-normal projections.
+pub(crate) struct LossUpstream {
+    /// `loss.item()` — the mixed loss for the best-iterate comparison.
+    pub loss: f64,
+    /// `dL/d(rate)` — `rate` = `test_bpp_Y`.
+    pub d_rate: f64,
+    /// `dL/d(psnr)`.
+    pub d_psnr: f64,
+    /// `dL/d(msssim)`.
+    pub d_msssim: f64,
+}
+
+/// `rdlr_y_iteration`'s loss composition and the upstream scalar gradients —
+/// the piece of the backward that doesn't touch the latent. `rp` is the
+/// current rate point, `ref` the `get_ref_rate_data` point; the slopes are
+/// `_get_slopes_parameters`' angles, `ratio` the PSNR/MS-SSIM mix.
+pub(crate) fn loss_upstream(
+    rp: &RatePoint,
+    ref_rate: f64,
+    ref_psnr: f64,
+    ref_msssim: f64,
+    slope_psnr: f64,
+    slope_msssim: f64,
+    ratio: f64,
+) -> LossUpstream {
+    let rate_log_diff = rp.bpp.ln() - ref_rate.ln();
+    let psnr_diff = rp.psnr - ref_psnr;
+    let msssim_diff = rp.msssim - ref_msssim;
+    let (np_x, np_y) = (-slope_psnr.sin(), slope_psnr.cos());
+    let (nm_x, nm_y) = (-slope_msssim.sin(), slope_msssim.cos());
+    let loss_psnr = -(np_x * rate_log_diff + np_y * psnr_diff);
+    let loss_msssim = -20.0 * (nm_x * rate_log_diff + nm_y * msssim_diff);
+    let loss = loss_msssim * ratio + loss_psnr * (1.0 - ratio);
+    // Upstream: dL/d(rate_log_diff), dL/d(psnr), dL/d(msssim).
+    let d_rate_log = -(20.0 * ratio * nm_x + (1.0 - ratio) * np_x);
+    LossUpstream {
+        loss,
+        d_rate: d_rate_log / rp.bpp,
+        d_psnr: -(1.0 - ratio) * np_y,
+        d_msssim: -(20.0 * ratio * nm_y),
+    }
+}
+
+/// `d(rate_y)/d(resi)` at every position — `dL/d(resi)` with the upstream
+/// `dL/d(rate_y)` folded in. `rate_y = Σ -log2 l`; `dL/d(rate_y) = d_rate /
+/// pixels`.
+pub(crate) fn rate_vjp(
+    d_rate_y: f64,
+    y: &Tensor<f32>,
+    y_hat: &Tensor<f32>,
+    residual_q: &Tensor<i16>,
+    scale_log: &Tensor<i32>,
+) -> Tensor<f32> {
+    let log_k = log_k() as f32;
+    let inv = 1.0f32 / (1u32 << SIGMA_PRECISION) as f32;
+    let mut out = Tensor::<f32>::zeros(residual_q.c, residual_q.h, residual_q.w).unwrap();
+    for ch in 0..residual_q.c {
+        let (r, s, yq, yh) = (
+            residual_q.plane(ch),
+            scale_log.plane(ch),
+            y.plane(ch),
+            y_hat.plane(ch),
+        );
+        for i in 0..r.len() {
+            let resi = yq[i] - yh[i] + r[i] as f32;
+            let scale_lin = math::exp(s[i] as f32 * inv * log_k + LN_SIGMA_MIN);
+            let idx = ((scale_lin + 64.0) / 128.0).clamp(0.0, 34.0);
+            let sigma = math::exp(idx * log_k + LN_SIGMA_MIN).max(SCALE_BOUND);
+            out.plane_mut(ch)[i] = (d_rate_y * gm_nbits_vjp(resi, sigma)) as f32;
+        }
+    }
+    out
+}
+
 /// `calc_distortion_loss` for the luma tile: `mean((a-b)²)` over `area` (+1e-10),
 /// `ms_ssim(a, b, data_range = 255)`.
 fn distortion(
@@ -504,6 +608,29 @@ mod oracle {
             }
             assert!(ms < 4e-6, "iter {i}: gm scale diff {ms}");
             assert!(md < 0.15, "iter {i}: gm resi diff {md}");
+            // The rate term's upstream: `dL/d(resi)` = `dL/d(rate)·d(rate)/d(rate_y)·
+            // d(rate_y)/d(resi)` — `gm_resi_grad` is exactly that.
+            let ref_rate = dump["rdlr.gcrp.0.rate"].f32s() as f64;
+            let ref_psnr = dump["rdlr.gcrp.0.psnr"].f32s() as f64;
+            let ref_msssim = dump["rdlr.gcrp.0.msssim"].f32s() as f64;
+            let slope_psnr = dump["rdlr.slope.psnrY"].f32s() as f64;
+            let slope_msssim = dump["rdlr.slope.msssim_Torch"].f32s() as f64;
+            let ratio = dump["rdlr.ratio_psnr_msssim"].f32s() as f64;
+            let up = loss_upstream(&rp, ref_rate, ref_psnr, ref_msssim, slope_psnr, slope_msssim, ratio);
+            let want_loss = dump[&format!("rdlr.{i}.loss")].f32s() as f64;
+            assert!(
+                (up.loss - want_loss).abs() < 1e-4,
+                "iter {i}: loss {} vs reference {want_loss}",
+                up.loss
+            );
+            let d_rate_y = up.d_rate / pixels;
+            let d_resi = rate_vjp(d_rate_y, &y, &rp.y_hat, &rp.residual_q, &scales.scale_log);
+            let want_dresi = dump[&format!("rdlr.{i}.gm_resi_grad")].tensor_f32();
+            let mut md = 0.0f32;
+            for k in 0..d_resi.data.len() {
+                md = md.max((d_resi.data[k] - want_dresi.data[k]).abs());
+            }
+            assert!(md < 0.02, "iter {i}: gm_resi_grad diff {md}");
             let want_rate = dump[&format!("rdlr.gcrp.{}.rate", i + 1)].f32s() as f64;
             let want_psnr = dump[&format!("rdlr.gcrp.{}.psnr", i + 1)].f32s() as f64;
             let want_msssim = dump[&format!("rdlr.gcrp.{}.msssim", i + 1)].f32s() as f64;
