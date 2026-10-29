@@ -285,6 +285,50 @@ pub(crate) fn rate_vjp(
     out
 }
 
+// --- VJP (input-gradient) primitives ---------------------------------------
+//
+// Every backward is the input gradient only (model weights are frozen — no
+// dL/dw anywhere in RDLR). Determinism rule: f32 accumulation in fixed order,
+// matching the forward path's op-order/FMA policy; `math::` kernels reused
+// where a forward op already has a fixed implementation.
+
+/// `relu6`'s input gradient: `0 < x < 6`.
+fn relu6_backward(dout: &Tensor<f32>, x: &Tensor<f32>) -> Tensor<f32> {
+    let mut out = dout.clone();
+    for (o, &v) in out.data.iter_mut().zip(&x.data) {
+        if v <= 0.0 || v >= 6.0 {
+            *o = 0.0;
+        }
+    }
+    out
+}
+
+/// `elu`'s input gradient: `x > 0 ? 1 : exp(x)`.
+fn elu_backward(dout: &Tensor<f32>, x: &Tensor<f32>) -> Tensor<f32> {
+    let mut out = dout.clone();
+    for (o, &v) in out.data.iter_mut().zip(&x.data) {
+        if v <= 0.0 {
+            *o *= math::exp(v);
+        }
+    }
+    out
+}
+
+/// `resi = y - means_hat`, `means_hat = y_hat - resi_hat`: the residual term's
+/// backward onto `y`, `y_hat`, `resi_hat` (`+1, -1, +1` — `resi_hat`'s STE
+/// makes it `data_q`'s passthrough; `resi_dq`'s dequantize is non-differentiable
+/// in the reference — `resi_hat_grad` == `gm_resi_grad` exactly).
+/// Returns `(d_y_direct, d_y_hat, d_resi_hat)` — the y_hat/resi_hat gradients
+/// before downstream synthesis/MCM accumulation.
+fn resi_vjp(d_resi: &Tensor<f32>) -> (Tensor<f32>, Tensor<f32>, Tensor<f32>) {
+    let mut d_y = d_resi.clone();
+    let mut d_yhat = d_resi.clone();
+    for v in d_yhat.data.iter_mut() {
+        *v = -*v;
+    }
+    (d_y, d_yhat, d_resi.clone())
+}
+
 /// `calc_distortion_loss` for the luma tile: `mean((a-b)²)` over `area` (+1e-10),
 /// `ms_ssim(a, b, data_range = 255)`.
 fn distortion(

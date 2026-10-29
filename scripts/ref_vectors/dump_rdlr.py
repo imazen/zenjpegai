@@ -213,6 +213,8 @@ def main():
         # retain_grad on the rate point's intermediates — the VJP oracle's
         # upstream gradient at every chain boundary (populated by the
         # iteration's loss.backward()).
+        if y_hat.requires_grad:
+            y_hat.retain_grad()
         for o in out:
             if isinstance(o, torch.Tensor) and o.requires_grad:
                 o.retain_grad()

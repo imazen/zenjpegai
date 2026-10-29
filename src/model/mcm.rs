@@ -64,6 +64,45 @@ impl FusionPredNet {
         fast::relu(&mut x);
         self.conv3.forward(eng, &x)
     }
+
+    /// [`Self::forward`] that also returns the two ReLU inputs, saved for the
+    /// VJP input gradient ([`crate::encoder::rdlr`]).
+    fn forward_tape(&self, eng: &Engine, x: &BTensor) -> Result<(BTensor, BTensor, BTensor)> {
+        let mut a1 = self.conv1.forward(eng, x)?;
+        let pre_relu1 = a1.clone();
+        fast::relu(&mut a1);
+        let mut a2 = self.conv2.forward(eng, &a1)?;
+        let pre_relu2 = a2.clone();
+        fast::relu(&mut a2);
+        Ok((self.conv3.forward(eng, &a2)?, pre_relu1, pre_relu2))
+    }
+
+    /// The input gradient through `conv3(relu(conv2(relu(conv1(x)))))`: given
+    /// `d_out` (the gradient on this net's output) and the saved ReLU inputs,
+    /// the gradient on `x`. Planar `[channels]` tensors throughout.
+    fn backward(
+        &self,
+        d_out: &Tensor<f32>,
+        pre_relu1: &Tensor<f32>,
+        pre_relu2: &Tensor<f32>,
+        in_shape: (usize, usize, usize),
+    ) -> Result<Tensor<f32>> {
+        let d_r2 = self.conv3.backward(d_out, in_shape.1, in_shape.2)?;
+        let mut d_a2 = d_r2;
+        for (d, &p) in d_a2.data.iter_mut().zip(&pre_relu2.data) {
+            if p <= 0.0 {
+                *d = 0.0;
+            }
+        }
+        let d_r1 = self.conv2.backward(&d_a2, in_shape.1, in_shape.2)?;
+        let mut d_a1 = d_r1;
+        for (d, &p) in d_a1.data.iter_mut().zip(&pre_relu1.data) {
+            if p <= 0.0 {
+                *d = 0.0;
+            }
+        }
+        self.conv1.backward(&d_a1, in_shape.1, in_shape.2)
+    }
 }
 
 /// One MCM phase. Phase 0 has no spatial context.
@@ -218,6 +257,10 @@ pub const CUBE_SIZE: usize = 8;
 /// per-position tools (RVS / GRFS, the quality map) index their tables there.
 pub trait Quantiser {
     fn quantise(&self, ch: usize, index: usize, x: f32, coded: bool) -> (i16, f32);
+    /// The STE gain `d(quantize_resi(x))/dx` at `(ch, index)` — `quantize_resi` is
+    /// multiplicative (gain · quality-map · RVS), so its derivative is the product
+    /// `quantize_resi(1.0)` evaluated at the position.
+    fn ste_gain(&self, ch: usize, index: usize) -> f32;
 }
 
 /// The gain unit alone: `round_ties_even(clamp(x * scaler))`, then `q / (scaler + 1e-9)`.
@@ -236,6 +279,10 @@ impl Quantiser for GainQuantiser<'_> {
             0.0
         };
         (q as i16, q / (s + 1e-9f32))
+    }
+    #[inline]
+    fn ste_gain(&self, ch: usize, _index: usize) -> f32 {
+        self.scaler[ch]
     }
 }
 
@@ -414,6 +461,206 @@ impl ContextModel {
             psi: Tensor::<f32>::zeros(1, 1, 1)?,
         })
     }
+
+    /// `Context.pred`'s input gradient (RDLR VJP): the upstream gradients on
+    /// `y_hat` and `resi_hat` (the quantised residual, STE) → the gradient on
+    /// `y`. Replays the stage loop recording the ReLU inputs, then walks the
+    /// stages backward:
+    ///
+    /// - `diff_s = y_s − mu_s` → `d(y)` gets `d(diff_s)` at stage positions.
+    /// - `resi_rq_s = STE(diff_s · scaler)` → `d(diff_s) = d(resi_hat)·scaler`
+    ///   where coded.
+    /// - `y_hat_s = resi_dq_s + mu_s`, `resi_dq` non-differentiable → `d(mu_s) =
+    ///   d(y_hat_s) − d(diff_s)`.
+    /// - `mu_s = fusion_s(cat[t_s, psi_s])` → fusion backward → `d(t_s)` →
+    ///   `grouped(pointwise(cat y_hat_{<s}))` backward → accumulates onto
+    ///   earlier stages' `d(y_hat)`.
+    ///
+    /// `q` is needed only for the STE's `scaler` per channel; `d_out_yhat` /
+    /// `d_out_resihat` are `[C, H, W]` at latent resolution.
+    #[allow(clippy::too_many_arguments)]
+    pub fn compress_backward<Q: Quantiser>(
+        &self,
+        eng: &Engine,
+        y: &Tensor<f32>,
+        psi: &BTensor,
+        q: &Q,
+        mask: &Tensor<bool>,
+        num_chs: usize,
+        cube_thr: f32,
+        d_out_yhat: &Tensor<f32>,
+        d_out_resihat: &Tensor<f32>,
+        stop: &dyn enough::Stop,
+    ) -> Result<Tensor<f32>> {
+        let (c, h, w) = (self.chs, y.h, y.w);
+        let (hh, hw) = (h.div_ceil(2), w.div_ceil(2));
+        let v = psi.v;
+
+        // Pass 1: replay the stage loop, recording the tape (fusion ReLU
+        // inputs + the coded mask + each stage's grid diff for the STE).
+        let mut context: Option<BTensor> = None;
+        let mut tapes: Vec<StageTape> = Vec::with_capacity(self.phases.len());
+        for (s, phase) in self.phases.iter().enumerate() {
+            stop.check()?;
+            let psi_s = psi.slice_channels(s * c, (s + 1) * c)?;
+            let (mut stage, pr1, pr2) = match (&phase.context, &context) {
+                (Some((pointwise, grouped)), Some(ctx)) => {
+                    let t = grouped.forward(eng, &pointwise.forward(eng, ctx)?)?;
+                    phase
+                        .fusion
+                        .forward_tape(eng, &BTensor::cat(&[&t, &psi_s])?)?
+                }
+                _ => {
+                    let (o, a, b) = phase.fusion.forward_tape(eng, &psi_s)?;
+                    (o, a, b)
+                }
+            };
+            let (py, px) = STAGE_POSITIONS[s];
+            let mut diff = Tensor::<f32>::zeros(c, hh, hw)?;
+            let mut err = Tensor::<f32>::zeros(c, hh, hw)?;
+            let mut coded = Tensor::<bool>::zeros(c, hh, hw)?;
+            for ch in 0..c {
+                let (b, lane) = (ch / v, ch % v);
+                for yy in 0..hh {
+                    let sy = 2 * yy + py;
+                    let row = &stage.data[(b * hh + yy) * hw * v..][..hw * v];
+                    for xx in 0..hw {
+                        let sx = 2 * xx + px;
+                        let inside = sy < h && sx < w;
+                        let m = inside && mask.data[(ch * h + sy) * w + sx];
+                        let d = if ch >= num_chs {
+                            0.0
+                        } else if inside {
+                            y.data[(ch * h + sy) * w + sx] - row[xx * v + lane]
+                        } else {
+                            -row[xx * v + lane]
+                        };
+                        let i = (ch * hh + yy) * hw + xx;
+                        diff.data[i] = d;
+                        coded.data[i] = m;
+                        let li = if inside { sy * w + sx } else { 0 };
+                        let (_, dq) = q.quantise(ch, li, d, m);
+                        err.data[i] = if is_padding(s, h, w, hh, hw, yy, xx) {
+                            0.0
+                        } else {
+                            (dq - d).abs()
+                        };
+                    }
+                }
+            }
+            let flags = cube_flags_of(&err, cube_thr);
+            // Pass 2: the coded mask the STE sees (`coded || !cube`), and the
+            // y_hat stage for the context accumulation (the dq-add is
+            // non-differentiable — the mask only gates the STE).
+            let mut coded2 = coded.data.clone();
+            for ch in 0..c {
+                let (b, lane) = (ch / v, ch % v);
+                for yy in 0..hh {
+                    let sy = 2 * yy + py;
+                    let row = &mut stage.data[(b * hh + yy) * hw * v..][..hw * v];
+                    for xx in 0..hw {
+                        let sx = 2 * xx + px;
+                        let i = (ch * hh + yy) * hw + xx;
+                        let cube =
+                            flags[(yy / CUBE_SIZE) * hw.div_ceil(CUBE_SIZE) + xx / CUBE_SIZE];
+                        let inside = sy < h && sx < w;
+                        let code = (coded.data[i] || !cube) && !is_padding(s, h, w, hh, hw, yy, xx);
+                        coded2[i] = code;
+                        let li = if inside { sy * w + sx } else { 0 };
+                        let (_, dq) = q.quantise(ch, li, diff.data[i], code);
+                        row[xx * v + lane] += dq;
+                    }
+                }
+            }
+            context = Some(match context {
+                None => stage,
+                Some(ctx) => BTensor::cat(&[&ctx, &stage])?,
+            });
+            tapes.push(StageTape {
+                pre_relu1: pr1.to_planar()?,
+                pre_relu2: pr2.to_planar()?,
+                coded: coded2,
+            });
+        }
+
+        // Pass 2 (backward): the stage down-shuffle inverse — each stage's
+        // `d(y_hat)` lives on its `(py,px)` parity of the full-res grid.
+        let mut d_y = Tensor::<f32>::zeros(c, h, w)?;
+        // `d(y_hat)` per stage on the half-res grid, accumulating context
+        // contributions from later stages.
+        let mut d_yhat_s: Vec<Tensor<f32>> = (0..self.phases.len())
+            .map(|_| Tensor::<f32>::zeros(c, hh, hw))
+            .collect::<Result<_>>()?;
+        for (s, phase) in self.phases.iter().enumerate().rev() {
+            let (py, px) = STAGE_POSITIONS[s];
+            // Scatter `d_out_yhat` into this stage's grid; `d_out_resihat`'s
+            // STE contribution gives `d(diff)`.
+            let mut d_mu = Tensor::<f32>::zeros(c, hh, hw)?;
+            let mut d_diff = Tensor::<f32>::zeros(c, hh, hw)?;
+            let tape = &tapes[s];
+            for ch in 0..c {
+                for yy in 0..hh {
+                    let sy = 2 * yy + py;
+                    for xx in 0..hw {
+                        let sx = 2 * xx + px;
+                        let inside = sy < h && sx < w;
+                        let i = (ch * hh + yy) * hw + xx;
+                        let gi = if inside { (ch * h + sy) * w + sx } else { 0 };
+                        let dyh = if inside {
+                            d_out_yhat.data[gi] + d_yhat_s[ch].data[i]
+                        } else {
+                            0.0
+                        };
+                        // STE: d(diff) = d(resi_hat)·quantize_gain·coded.
+                        let dd = if inside && tape.coded[i] && ch < num_chs {
+                            d_out_resihat.data[gi] * q.ste_gain(ch, sy * w + sx)
+                        } else {
+                            0.0
+                        };
+                        d_diff.data[i] = dd;
+                        // d(mu) = d(y_hat) - d(diff)  (diff = y - mu).
+                        d_mu.data[i] = dyh - dd;
+                        // d(y) at the stage position += d(diff).
+                        if inside {
+                            d_y.data[gi] += dd;
+                        }
+                    }
+                }
+            }
+            let (in_c, _, _) = (d_mu.c, d_mu.h, d_mu.w);
+            let _ = in_c;
+            let joined =
+                phase
+                    .fusion
+                    .backward(&d_mu, &tape.pre_relu1, &tape.pre_relu2, (0, hh, hw))?;
+            if let Some((pointwise, grouped)) = &phase.context {
+                // joined = cat([t (chs), psi_s (chs)]) → d(t) = first chs.
+                let mut d_t = Tensor::<f32>::zeros(c, hh, hw)?;
+                let n = c * hh * hw;
+                d_t.data[..n].copy_from_slice(&joined.data[..n]);
+                // t = grouped(pointwise(cat y_hat_{<s})) → cat backward.
+                let d_pw = grouped.backward(&d_t, hh, hw)?;
+                let d_cat = pointwise.backward(&d_pw, hh, hw)?;
+                // Accumulate each prior stage's slice into its `d(y_hat)`.
+                for j in 0..s {
+                    for k in 0..d_yhat_s[j].data.len() {
+                        d_yhat_s[j].data[k] += d_cat.data[j * c * hh * hw + k];
+                    }
+                }
+            }
+        }
+        Ok(d_y)
+    }
+}
+
+/// Per-stage forward intermediates saved for `compress_backward`.
+struct StageTape {
+    /// `conv1`'s output before its ReLU, planar `[chs, hh, hw]`.
+    pre_relu1: Tensor<f32>,
+    /// `conv2`'s output before its ReLU.
+    pre_relu2: Tensor<f32>,
+    /// The effective code mask (`mask || !cube`) — the STE gate.
+    coded: Vec<bool>,
 }
 
 /// `STAGE_POSITIONS` inverted: `(py, px)` → stage index.

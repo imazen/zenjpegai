@@ -10,6 +10,7 @@ use super::tensor::BTensor;
 use crate::error::{Error, Result};
 use crate::nn::{Conv2d, ConvTranspose2d, reference};
 use crate::tensor::Tensor;
+use alloc::sync::Arc;
 
 /// A convolution ready to run on one engine's block size.
 #[derive(Clone, Debug)]
@@ -18,6 +19,11 @@ pub struct ConvLayer {
     fallback: Option<(Conv2d, [usize; 4])>,
     packed: Option<PackedConv>,
     depthwise: Option<PackedDepthwise>,
+    /// The unfused weights, for the VJP input gradient (RDLR). Arc so model
+    /// clones stay refcount-cheap.
+    conv2d: Arc<Conv2d>,
+    /// The `with_extra_pad` zero border — the backward crops it off.
+    extra_pad: [usize; 4],
     v: usize,
 }
 
@@ -29,31 +35,58 @@ impl ConvLayer {
     /// `extra_pad` is `[top, left, bottom, right]` zero padding on top of the layer's own.
     pub fn with_extra_pad(conv: Conv2d, eng: &Engine, extra_pad: [usize; 4]) -> Result<Self> {
         let v = eng.tier.block();
+        let conv2d = Arc::new(conv);
         if extra_pad == [0; 4]
-            && let Ok(d) = PackedDepthwise::new(&conv, v)
+            && let Ok(d) = PackedDepthwise::new(&conv2d, v)
         {
             return Ok(Self {
                 fallback: None,
                 packed: None,
                 depthwise: Some(d),
+                conv2d,
+                extra_pad,
                 v,
             });
         }
-        match PackedConv::new(&conv, v, extra_pad) {
+        match PackedConv::new(&conv2d, v, extra_pad) {
             Ok(p) => Ok(Self {
                 fallback: None,
                 packed: Some(p),
                 depthwise: None,
+                conv2d,
+                extra_pad,
                 v,
             }),
             Err(Error::Unsupported(_)) => Ok(Self {
-                fallback: Some((conv, extra_pad)),
+                fallback: Some(((*conv2d).clone(), extra_pad)),
                 packed: None,
                 depthwise: None,
+                conv2d,
+                extra_pad,
                 v,
             }),
             Err(e) => Err(e),
         }
+    }
+
+    /// The input gradient through this layer (RDLR VJP) — `d_out` and the
+    /// result are planar `[in_ch, h, w]` tensors at the input's resolution.
+    pub fn backward(&self, dout: &Tensor<f32>, h: usize, w: usize) -> Result<Tensor<f32>> {
+        let [pt, pl, pb, pr] = self.extra_pad;
+        let d = reference::conv2d_backward(dout, &self.conv2d, h + pt + pb, w + pl + pr)?;
+        if self.extra_pad == [0; 4] {
+            return Ok(d);
+        }
+        // The forward zero-padded the input; the gradient through it drops the
+        // border rows/columns.
+        let mut out = Tensor::<f32>::zeros(d.c, h, w)?;
+        for c in 0..d.c {
+            for y in 0..h {
+                let src = &d.plane(c)[(y + pt) * d.w + pl..][..w];
+                out.plane_mut(c)[y * w..][..w].copy_from_slice(src);
+            }
+        }
+        Ok(out)
     }
 
     pub fn forward(&self, eng: &Engine, x: &BTensor) -> Result<BTensor> {
@@ -94,25 +127,36 @@ impl ConvLayer {
 pub struct ConvTransposeLayer {
     fallback: Option<ConvTranspose2d>,
     packed: Option<PackedConvTranspose>,
+    /// The unfused weights, for the VJP input gradient (RDLR).
+    conv: Arc<ConvTranspose2d>,
     v: usize,
 }
 
 impl ConvTransposeLayer {
     pub fn new(conv: ConvTranspose2d, eng: &Engine) -> Result<Self> {
         let v = eng.tier.block();
-        match PackedConvTranspose::new(&conv, v) {
+        let c = Arc::new(conv);
+        match PackedConvTranspose::new(&c, v) {
             Ok(p) => Ok(Self {
                 fallback: None,
                 packed: Some(p),
+                conv: c,
                 v,
             }),
             Err(Error::Unsupported(_)) => Ok(Self {
-                fallback: Some(conv),
+                fallback: Some((*c).clone()),
                 packed: None,
+                conv: c,
                 v,
             }),
             Err(e) => Err(e),
         }
+    }
+
+    /// The input gradient through this layer (RDLR VJP): an ordinary stride-`s`
+    /// conv of the output gradient with the same kernel.
+    pub fn backward(&self, dout: &Tensor<f32>, h: usize, w: usize) -> Result<Tensor<f32>> {
+        reference::conv_transpose2d_backward(dout, &self.conv, h, w)
     }
 
     pub fn forward(&self, eng: &Engine, x: &BTensor) -> Result<BTensor> {

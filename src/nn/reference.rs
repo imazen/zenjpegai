@@ -235,6 +235,106 @@ pub fn conv_transpose2d(conv: &ConvTranspose2d, x: &Tensor<f32>) -> Result<Tenso
     Ok(out)
 }
 
+/// `conv2d`'s input gradient (RDLR VJP): `d_in[ci,y,x] = Σ_co Σ_ky Σ_kx
+/// d_out[co,oy,ox] · w[co, ci∈g, ky, kx]` — the 180°-flipped full conv of the
+/// output gradient. Bias does not touch the input gradient. Deterministic
+/// f32 accumulation in raster order.
+pub fn conv2d_backward(
+    dout: &Tensor<f32>,
+    conv: &Conv2d,
+    h: usize,
+    w: usize,
+) -> Result<Tensor<f32>> {
+    if dout.c != conv.out_ch {
+        return Err(Error::InvalidArgument(
+            "conv2d_backward: output channel count mismatch",
+        ));
+    }
+    let mut din = Tensor::<f32>::zeros(conv.in_ch, h, w)?;
+    let (icg, ocg) = (conv.in_ch / conv.groups, conv.out_ch / conv.groups);
+    let (oh, ow) = (dout.h, dout.w);
+    for co in 0..conv.out_ch {
+        let g = co / ocg;
+        let wb = &conv.weight[(co * icg) * conv.kh * conv.kw..][..icg * conv.kh * conv.kw];
+        for ci in 0..icg {
+            let c_in = g * icg + ci;
+            let dst = din.plane_mut(c_in);
+            for oy in 0..oh {
+                for ox in 0..ow {
+                    let g_o = dout.plane(co)[oy * ow + ox];
+                    if g_o == 0.0 {
+                        continue;
+                    }
+                    for ky in 0..conv.kh {
+                        let y = oy * conv.stride + ky;
+                        if y < conv.pad_h || y - conv.pad_h >= h {
+                            continue;
+                        }
+                        let iy = y - conv.pad_h;
+                        for kx in 0..conv.kw {
+                            let x = ox * conv.stride + kx;
+                            if x < conv.pad_w || x - conv.pad_w >= w {
+                                continue;
+                            }
+                            dst[iy * w + x - conv.pad_w] +=
+                                g_o * wb[ci * conv.kh * conv.kw + ky * conv.kw + kx];
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(din)
+}
+
+/// `conv_transpose2d`'s input gradient (RDLR VJP): an ordinary stride-`stride`
+/// conv of the output gradient with the same kernel — `conv_transpose` scatters
+/// `in[y,x]` to `out[s·y + ky - pad, s·x + kx - pad]`, so the backward gathers.
+pub fn conv_transpose2d_backward(
+    dout: &Tensor<f32>,
+    conv: &ConvTranspose2d,
+    h: usize,
+    w: usize,
+) -> Result<Tensor<f32>> {
+    if dout.c != conv.out_ch {
+        return Err(Error::InvalidArgument(
+            "conv_transpose2d_backward: output channel count mismatch",
+        ));
+    }
+    let mut din = Tensor::<f32>::zeros(conv.in_ch, h, w)?;
+    let (oh, ow) = (dout.h, dout.w);
+    // weight layout [in_ch, out_ch, k, k]: din[ic] sums dout[oc] · w[ic,oc].
+    for ic in 0..conv.in_ch {
+        let wb =
+            &conv.weight[(ic * conv.out_ch) * conv.k * conv.k..][..conv.out_ch * conv.k * conv.k];
+        let dst = din.plane_mut(ic);
+        for oc in 0..conv.out_ch {
+            let d = dout.plane(oc);
+            for y in 0..h {
+                for x in 0..w {
+                    let mut acc = 0.0f32;
+                    for ky in 0..conv.k {
+                        let oy = y * conv.stride + ky;
+                        if oy < conv.pad || oy - conv.pad >= oh {
+                            continue;
+                        }
+                        for kx in 0..conv.k {
+                            let ox = x * conv.stride + kx;
+                            if ox < conv.pad || ox - conv.pad >= ow {
+                                continue;
+                            }
+                            acc += d[(oy - conv.pad) * ow + ox - conv.pad]
+                                * wb[oc * conv.k * conv.k + ky * conv.k + kx];
+                        }
+                    }
+                    dst[y * w + x] += acc;
+                }
+            }
+        }
+    }
+    Ok(din)
+}
+
 /// `max(x, 0)`.
 pub fn relu(x: &mut Tensor<f32>) {
     for v in &mut x.data {

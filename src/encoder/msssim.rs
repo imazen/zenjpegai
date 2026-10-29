@@ -212,6 +212,244 @@ pub fn ms_ssim(eng: &Engine, x: &Tensor<f32>, y: &Tensor<f32>) -> Result<f32> {
     Ok(ms * ssim_last.powf(WEIGHTS[4]))
 }
 
+// --- VJP (input gradient, RDLR) --------------------------------------------
+
+/// `conv_rows`'s / `conv_cols`'s input gradient for the separable Gaussian:
+/// the forward is `out[j] = Σ_k win[k]·in[j+k]` (valid, `n → n-10`), so the
+/// backward scatters `d_in[j+k] += win[k]·d_out[j]`.
+fn conv_rows_backward(
+    d: &[f32],
+    h: usize,
+    w: usize,
+    win: &[f32; WIN],
+    oh: usize,
+    ow: usize,
+) -> Vec<f32> {
+    // d is [oh][ow] (the output grad); result is [h][w] (the input grad).
+    let _ = (h, w);
+    let mut din = vec![0.0f32; (oh + WIN - 1) * ow];
+    for y in 0..oh {
+        for x in 0..ow {
+            let g = d[y * ow + x];
+            if g == 0.0 {
+                continue;
+            }
+            for k in 0..WIN {
+                din[(y + k) * ow + x] += win[k] * g;
+            }
+        }
+    }
+    din
+}
+
+fn conv_cols_backward(d: &[f32], oh: usize, ow: usize, win: &[f32; WIN]) -> Vec<f32> {
+    let mut din = vec![0.0f32; oh * (ow + WIN - 1)];
+    for y in 0..oh {
+        for x in 0..ow {
+            let g = d[y * ow + x];
+            if g == 0.0 {
+                continue;
+            }
+            for k in 0..WIN {
+                din[y * (ow + WIN - 1) + x + k] += win[k] * g;
+            }
+        }
+    }
+    din
+}
+
+/// `gaussian_filter`'s input gradient: the output grad at `h-10 × w-10` → the
+/// input grad at `h × w`. `gaussian_filter = conv_cols∘conv_rows` (valid), so
+/// the backward is `conv_rows_backward∘conv_cols_backward`.
+fn gaussian_backward(d: &[f32], h: usize, w: usize, win: &[f32; WIN]) -> Vec<f32> {
+    let d2 = conv_cols_backward(d, h - (WIN - 1), w - (WIN - 1), win);
+    conv_rows_backward(&d2, 0, 0, win, h - (WIN - 1), w)
+}
+
+/// `avg_pool2`'s input gradient: each 2x2 window's output grad spreads over its
+/// four samples (`count_include_pad` — the padded sample takes no grad).
+fn avg_pool2_backward(d: &[f32], h: usize, w: usize) -> Vec<f32> {
+    let (ph, pw) = (h.div_ceil(2), w.div_ceil(2));
+    let mut din = vec![0.0f32; h * w];
+    for y in 0..ph {
+        for x in 0..pw {
+            let g = d[y * pw + x] / 4.0;
+            for dy in 0..2 {
+                for dx in 0..2 {
+                    let (sy, sx) = (2 * y + dy, 2 * x + dx);
+                    if sy < h && sx < w {
+                        din[sy * w + sx] += g;
+                    }
+                }
+            }
+        }
+    }
+    din
+}
+
+/// Per-level forward intermediates for `ms_ssim_vjp`.
+struct SsimLevel {
+    x: Vec<f32>,
+    y: Vec<f32>,
+    mu1: Vec<f32>,
+    mu2: Vec<f32>,
+    vx: Vec<f32>,
+    vy: Vec<f32>,
+    cxy: Vec<f32>,
+    spc: f32,
+    cs: f32,
+    h: usize,
+    w: usize,
+}
+
+/// `ms_ssim`'s input gradient (RDLR VJP): given `d` = `dL/d(msssim)`, the
+/// gradients on `x` and `y` at the input's resolution.
+pub fn ms_ssim_vjp(
+    eng: &Engine,
+    x: &Tensor<f32>,
+    y: &Tensor<f32>,
+    d: f32,
+) -> Result<(Tensor<f32>, Tensor<f32>)> {
+    let win = gaussian_window();
+    // Forward: per-level intermediates.
+    let (mut h, mut w) = (x.h, x.w);
+    let (mut xb, mut yb) = (x.data.clone(), y.data.clone());
+    let mut levels: Vec<SsimLevel> = Vec::with_capacity(WEIGHTS.len());
+    for i in 0..WEIGHTS.len() {
+        let (ih, iw) = (h, w);
+        let sq = |p: &[f32]| p.iter().map(|&v| v * v).collect::<Vec<f32>>();
+        let prod: Vec<f32> = xb.iter().zip(&yb).map(|(&a, &b)| a * b).collect();
+        let (mu1, h2, w2) = gaussian_filter(eng, &xb, ih, iw, &win);
+        let (mu2, ..) = gaussian_filter(eng, &yb, ih, iw, &win);
+        let (vx, ..) = gaussian_filter(eng, &sq(&xb), ih, iw, &win);
+        let (vy, ..) = gaussian_filter(eng, &sq(&yb), ih, iw, &win);
+        let (cxy, ..) = gaussian_filter(eng, &prod, ih, iw, &win);
+        let n = h2 * w2;
+        let (mut ssum, mut csum) = (0.0f64, 0.0f64);
+        for k in 0..n {
+            let (m1, m2) = (mu1[k], mu2[k]);
+            let (s1, s2, s12) = (vx[k] - m1 * m1, vy[k] - m2 * m2, cxy[k] - m1 * m2);
+            let cs = (2.0 * s12 + C2) / (s1 + s2 + C2);
+            let sm = ((2.0 * m1 * m2 + C1) / (m1 * m1 + m2 * m2 + C1)) * cs;
+            ssum += sm as f64;
+            csum += cs as f64;
+        }
+        let n64 = n as f64;
+        let spc = (ssum / n64) as f32;
+        let cs = (csum / n64) as f32;
+        levels.push(SsimLevel {
+            x: xb,
+            y: yb,
+            mu1,
+            mu2,
+            vx,
+            vy,
+            cxy,
+            spc,
+            cs,
+            h,
+            w,
+        });
+        if i + 1 == WEIGHTS.len() {
+            break;
+        }
+        let (px, nh, nw) = avg_pool2(&levels[i].x, h, w);
+        let (py, ..) = avg_pool2(&levels[i].y, h, w);
+        (xb, yb, h, w) = (px, py, nh, nw);
+    }
+    // Top: ms = Π relu(cs_i)^w_i · relu(ssim_5)^w_4 — scalar grads per level.
+    let mut mcs = [0.0f32; 4];
+    for i in 0..4 {
+        mcs[i] = relu(levels[i].cs);
+    }
+    let ssim_last = relu(levels[4].spc);
+    let mut ms = 1.0f32;
+    for (i, &v) in mcs.iter().enumerate() {
+        ms *= v.powf(WEIGHTS[i]);
+    }
+    ms *= ssim_last.powf(WEIGHTS[4]);
+    // d_spc / d_cs scalars per level (relu backward gates on the mean's sign).
+    let mut d_spc = [0.0f32; 5];
+    let mut d_cs = [0.0f32; 5];
+    for i in 0..4 {
+        if levels[i].cs > 0.0 {
+            d_cs[i] = d * ms * WEIGHTS[i] / levels[i].cs;
+        }
+    }
+    if levels[4].spc > 0.0 {
+        d_spc[4] = d * ms * WEIGHTS[4] / levels[4].spc;
+    }
+    // Walk levels deepest→shallowest: level i's own SSIM backprop plus the
+    // deeper levels' contribution through `x_{i+1} = avg_pool2(x_i)`.
+    let (mut carry_x, mut carry_y) = (Vec::<f32>::new(), Vec::<f32>::new());
+    let (mut d_x, mut d_y) = (Vec::<f32>::new(), Vec::<f32>::new());
+    for (i, lv) in levels.iter().enumerate().rev() {
+        let (gh, gw) = (lv.h - (WIN - 1), lv.w - (WIN - 1));
+        let n = (gh * gw) as f64;
+        let mut dm1 = vec![0.0f32; gh * gw];
+        let mut dm2 = vec![0.0f32; gh * gw];
+        let mut dvx = vec![0.0f32; gh * gw];
+        let mut dvy = vec![0.0f32; gh * gw];
+        let mut dcxy = vec![0.0f32; gh * gw];
+        for k in 0..gh * gw {
+            let (m1, m2) = (lv.mu1[k], lv.mu2[k]);
+            let (m1sq, m2sq, m1m2) = (m1 * m1, m2 * m2, m1 * m2);
+            let (s1, s2, s12) = (lv.vx[k] - m1sq, lv.vy[k] - m2sq, lv.cxy[k] - m1m2);
+            let cs = (2.0 * s12 + C2) / (s1 + s2 + C2);
+            let core = (2.0 * m1m2 + C1) / (m1sq + m2sq + C1);
+            // d(sm) = d_spc/n; d(cs) = d_cs/n + d(sm)·core.
+            let d_sm = (d_spc[i] as f64 / n) as f32;
+            let d_cs_k = (d_cs[i] as f64 / n) as f32 + d_sm * core;
+            let d_core = d_sm * cs;
+            let den1 = m1sq + m2sq + C1;
+            let num1 = 2.0 * m1m2 + C1;
+            let d_num1 = d_core / den1;
+            let d_den1 = -d_core * num1 / (den1 * den1);
+            dm1[k] += d_num1 * 2.0 * m2 + d_den1 * 2.0 * m1;
+            dm2[k] += d_num1 * 2.0 * m1 + d_den1 * 2.0 * m2;
+            let den2 = s1 + s2 + C2;
+            let num2 = 2.0 * s12 + C2;
+            let d_num2 = d_cs_k / den2;
+            let d_den2 = -d_cs_k * num2 / (den2 * den2);
+            dcxy[k] += 2.0 * d_num2;
+            dvx[k] += d_den2;
+            dvy[k] += d_den2;
+            dm1[k] -= d_den2 * 2.0 * m1 + 2.0 * d_num2 * m2;
+            dm2[k] -= d_den2 * 2.0 * m2 + 2.0 * d_num2 * m1;
+        }
+        // The five gaussian convolutions' backwards → level-input grads.
+        let g = |p: &Vec<f32>| gaussian_backward(p, lv.h, lv.w, &win);
+        let (gxm, gym) = (g(&dm1), g(&dm2));
+        let (gxv, gyv, gxyv) = (g(&dvx), g(&dvy), g(&dcxy));
+        let mut dx = vec![0.0f32; lv.h * lv.w];
+        let mut dy = vec![0.0f32; lv.h * lv.w];
+        for k in 0..lv.h * lv.w {
+            dx[k] = gxm[k] + 2.0 * lv.x[k] * gxv[k] + lv.y[k] * gxyv[k];
+            dy[k] = gym[k] + 2.0 * lv.y[k] * gyv[k] + lv.x[k] * gxyv[k];
+        }
+        // Add the deeper levels' contribution (level i+1's grad, scattered up).
+        if !carry_x.is_empty() {
+            for k in 0..dx.len() {
+                dx[k] += carry_x[k];
+                dy[k] += carry_y[k];
+            }
+        }
+        if i > 0 {
+            // `x_i = avg_pool2(x_{i-1})` at level i-1's dims — scatter down.
+            let (ph, pw) = (levels[i - 1].h, levels[i - 1].w);
+            carry_x = avg_pool2_backward(&dx, ph, pw);
+            carry_y = avg_pool2_backward(&dy, ph, pw);
+        } else {
+            d_x = dx;
+            d_y = dy;
+        }
+    }
+    Ok((
+        Tensor::from_vec(1, x.h, x.w, d_x)?,
+        Tensor::from_vec(1, y.h, y.w, d_y)?,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
