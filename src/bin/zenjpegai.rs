@@ -120,6 +120,7 @@ struct Args {
     tools_on: bool,
     ans_threads: u8,
     regions: Option<zenjpegai::encoder::RegionMode>,
+    rdlr: bool,
     num_chs: Option<(u16, u16)>,
     quality_map: Option<PathBuf>,
     single_thread: bool,
@@ -161,6 +162,7 @@ fn parse_args() -> Result<Args, String> {
         tools_on: false,
         ans_threads: 1,
         regions: None,
+        rdlr: false,
         num_chs: None,
         quality_map: None,
         single_thread: false,
@@ -214,6 +216,7 @@ fn parse_args() -> Result<Args, String> {
                 });
             }
             "--quality-map" => a.quality_map = Some(PathBuf::from(value("--quality-map")?)),
+            "--rdlr" => a.rdlr = true,
             "--rvs" => a.rvs = true,
             "--grfs" => a.grfs = true,
             "--lsbs" => a.lsbs = true,
@@ -478,6 +481,7 @@ fn run() -> Result<(), String> {
             params.num_threads_z = args.ans_threads;
             params.num_threads_r = args.ans_threads;
             params.regions = args.regions;
+            params.rdlr |= args.rdlr;
             params.c_ver = args.c_ver;
             params.c_hor = args.c_hor;
             params.diff_display = args.diff_display;

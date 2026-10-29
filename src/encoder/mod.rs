@@ -149,6 +149,10 @@ pub struct EncodeParams {
     /// decode truncates to `num_decode_chs` at playback). Clamped to the model's channel
     /// count (160 luma / 96 chroma); 0 codes no residual at all.
     pub num_chs: [u16; 2],
+    /// Rate-Distortion Latent Refinement (`rdlr`/`process_y`): Adagrad+StepLR iterations on the
+    /// luma latent toward a better rate/distortion point, then the residual is re-derived for
+    /// the refined latent. Single-tile / whole-picture only (no overlap handling yet).
+    pub rdlr: bool,
 }
 
 /// How a region's residual reaches the codestream
@@ -203,6 +207,7 @@ impl Default for EncodeParams {
             efe_nonlinear: false,
             eicci: None,
             num_chs: LATENT_CHANNELS.map(|c| c as u16),
+            rdlr: false,
         }
     }
 }
@@ -614,6 +619,7 @@ impl Encoder {
                 true,
                 None,
                 None,
+                None,
             )
             .map_err(|e| at!(e))?;
         Self::trace(stream, components, quality_map).map_err(|e| at!(e))
@@ -663,6 +669,11 @@ impl Encoder {
             .is_some()
             .then(|| filters::icci::org_planes(src, &meta))
             .transpose()?;
+        // RDLR's distortion metric reads the source luma (`org_img_i`), the same
+        // planes EFE uses — reuse them when the post-filters already built them.
+        let rdlr_planes = (params.rdlr && efe_org.is_none())
+            .then(|| efe_source_planes(src, &meta))
+            .transpose()?;
         self.encode_from_latents(
             [&ys[0], &ys[1]],
             Some(z),
@@ -675,6 +686,7 @@ impl Encoder {
             keep_trace,
             efe_org.as_ref(),
             icci_org.as_ref(),
+            rdlr_planes.as_ref().or(efe_org.as_ref()).map(|p| &p.y),
         )
     }
 
@@ -739,6 +751,10 @@ impl Encoder {
             .is_some()
             .then(|| filters::icci::org_planes(src, &meta))
             .transpose()?;
+        let rdlr_planes = base_params
+            .rdlr
+            .then(|| efe_source_planes(src, &meta))
+            .transpose()?;
         // One model's analysis pass: the luma and chroma transforms run concurrently (the
         // chroma path reads only its own plane and checkpoints).
         let analyse_model = |ccs_model: usize| -> Result<ModelLatents> {
@@ -773,6 +789,7 @@ impl Encoder {
                 efe_linear: final_run && base_params.efe_linear,
                 efe_nonlinear: final_run && base_params.efe_nonlinear,
                 eicci: if final_run { base_params.eicci } else { None },
+                rdlr: final_run && base_params.rdlr,
                 ..base_params
             };
             let (stream, components) = self.encode_from_latents(
@@ -789,6 +806,11 @@ impl Encoder {
                 params.rate_estimate == RateEstimate::Likelihood,
                 efe_org.as_ref().filter(|_| final_run),
                 icci_org.as_ref().filter(|_| final_run),
+                rdlr_planes
+                    .as_ref()
+                    .or(efe_org.as_ref())
+                    .map(|p| &p.y)
+                    .filter(|_| final_run),
             )?;
             let bpp = match params.rate_estimate {
                 RateEstimate::Likelihood => {
@@ -1057,6 +1079,7 @@ impl Encoder {
         keep_trace: bool,
         efe_org: Option<&crate::decoder::reconstruct::Planes>,
         icci_org: Option<&crate::decoder::reconstruct::Planes>,
+        rdlr_org: Option<&Tensor<f32>>,
     ) -> Result<(Vec<u8>, Vec<Component>)> {
         let set = self.model_set(self.check_params(w, h, params)?, params.op)?;
         let eng = &self.engine;
@@ -1134,6 +1157,7 @@ impl Encoder {
                 post_filters,
                 keep_trace,
                 stop,
+                (ccs == 0).then_some(rdlr_org).flatten(),
             )
         };
         #[cfg(feature = "parallel")]
@@ -1372,6 +1396,7 @@ impl Encoder {
         post_filters: bool,
         keep_trace: bool,
         stop: &dyn enough::Stop,
+        rdlr_org: Option<&Tensor<f32>>,
     ) -> Result<ComponentPass> {
         stop.check()?;
         let model = &set.common[ccs];
@@ -1403,6 +1428,42 @@ impl Encoder {
             quality_map,
         };
         let num_chs = hdr.components[ccs].num_chs as usize;
+        // RDLR (`rdlr/process_y`): refine the luma latent through `numIteYLuma`
+        // Adagrad iterations toward a better rate/distortion point, then quantise
+        // the refined latent's residual as usual.
+        let refined;
+        let latent = if ccs == 0 && params.rdlr && hdr.regions.is_none() {
+            let source = rdlr_org.ok_or_else(|| {
+                Error::InvalidArgument("RDLR: the encode needs the source planes".into())
+            })?;
+            let synth_op = hdr
+                .synthesis_transforms
+                .first()
+                .copied()
+                .unwrap_or(params.op);
+            refined = rdlr::luma(
+                eng,
+                &*self.models,
+                params.model_id,
+                synth_op,
+                hdr,
+                model,
+                &set.lh[ccs],
+                latent,
+                z_hat,
+                &scales.scale_log,
+                &mask,
+                &q,
+                num_chs,
+                source,
+                (source.w * source.h) as f64,
+                rdlr::NUM_ITE_Y,
+                stop,
+            )?;
+            &refined
+        } else {
+            latent
+        };
         let out = stage!(
             "compress",
             compress_regions(

@@ -458,6 +458,113 @@ pub(crate) fn optimize_y(
     Ok((best, best_loss))
 }
 
+/// `cfg/tools/RDLR.json`'s `numIteYLuma` — the luma Adagrad iteration count.
+/// (`numIteYChroma = 0` in the shipped config; chroma RDLR is a later item.)
+pub(crate) const NUM_ITE_Y: usize = 8;
+
+/// `__calc_lr` — the per-resolution learning rate (`LearningRateYAutomaticPerResolution`).
+fn calc_lr(num_samples: f64) -> f32 {
+    if num_samples >= (3840.0 * 2160.0) {
+        0.02
+    } else if num_samples >= (832.0 * 480.0) {
+        0.03
+    } else {
+        0.05
+    }
+}
+
+/// The operating-point BD-curve tangents (`slope_psnr`, `slope_msssim`) —
+/// `atan(Δdistortion / Δlog bpp)` probed by a small latent scale (a direction the
+/// optimiser itself can move: more latent energy costs rate and buys distortion,
+/// the local rate/distortion tangent). One extra rate point.
+#[allow(clippy::too_many_arguments)]
+fn estimate_slopes(
+    eng: &Engine,
+    hdr: &crate::header::PictureHeader,
+    model: &crate::model::common::CommonModel,
+    synthesis: &SynthesisPrimary,
+    lh: &lh::Likelihood,
+    y: &Tensor<f32>,
+    z_hat: &Tensor<i8>,
+    scale_log: &Tensor<i32>,
+    mask: &Tensor<bool>,
+    q: &impl mcm::Quantiser,
+    num_chs: usize,
+    original: &Tensor<f32>,
+    area: Area,
+    pixels: f64,
+    stop: &dyn enough::Stop,
+) -> Result<(f64, f64)> {
+    let r0 = rate_point_y(
+        eng, hdr, model, synthesis, lh, y, z_hat, scale_log, mask, q, num_chs, original,
+        area, pixels, stop,
+    )?;
+    let mut yp = y.clone();
+    for v in &mut yp.data {
+        *v *= 1.02;
+    }
+    let r1 = rate_point_y(
+        eng, hdr, model, synthesis, lh, &yp, z_hat, scale_log, mask, q, num_chs, original,
+        area, pixels, stop,
+    )?;
+    let dl = r1.bpp.ln() - r0.bpp.ln();
+    if dl.abs() < 1e-9 {
+        return Ok((0.0, 0.0));
+    }
+    Ok((
+        ((r1.psnr - r0.psnr) / dl).atan(),
+        ((r1.msssim - r0.msssim) / dl).atan(),
+    ))
+}
+
+/// `process_y`'s whole-picture luma path for `EncodeParams::rdlr`: the source
+/// luma `original` `[1, h, w]` at 0..255, the same `scales`/`mask`/`q` the
+/// residual pass uses, `num_ite` Adagrad iterations. Returns the refined latent —
+/// `compress_regions` then re-derives its residual/cube-flag decisions.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn luma(
+    eng: &Engine,
+    models: &dyn crate::model::ModelSource,
+    model_id: u8,
+    synth_op: crate::header::OperatingPoint,
+    hdr: &crate::header::PictureHeader,
+    model: &crate::model::common::CommonModel,
+    lh: &lh::Likelihood,
+    latent: &Tensor<f32>,
+    z_hat: &Tensor<i8>,
+    scale_log: &Tensor<i32>,
+    mask: &Tensor<bool>,
+    q: &impl mcm::Quantiser,
+    num_chs: usize,
+    original: &Tensor<f32>,
+    pixels: f64,
+    num_ite: usize,
+    stop: &dyn enough::Stop,
+) -> Result<Tensor<f32>> {
+    let ctx = model
+        .context
+        .as_ref()
+        .ok_or_else(|| Error::Model("RDLR: no context model".into()))?;
+    let synthesis = crate::model::load_synthesis_primary(models, model_id as usize, synth_op, eng)?;
+    let area = Area::new(0, 0, original.w, original.h);
+    let refs = {
+        let r = rate_point_y(
+            eng, hdr, model, &synthesis, lh, latent, z_hat, scale_log, mask, q, num_chs,
+            original, area, pixels, stop,
+        )?;
+        (r.bpp, r.psnr, r.msssim)
+    };
+    let (sp, sm) = estimate_slopes(
+        eng, hdr, model, &synthesis, lh, latent, z_hat, scale_log, mask, q, num_chs,
+        original, area, pixels, stop,
+    )?;
+    let (best, _loss) = optimize_y(
+        eng, ctx, hdr, model, &synthesis, lh, latent, z_hat, scale_log, mask, q, num_chs,
+        original, area, pixels, num_ite, calc_lr(pixels), 0.7, refs, sp, sm, 0.8, stop,
+    )?;
+    Ok(best)
+}
+
 /// `d(rate_y)/d(resi)` at every position — `dL/d(resi)` with the upstream
 /// `dL/d(rate_y)` folded in. `rate_y = Σ -log2 l`; `dL/d(rate_y) = d_rate /
 /// pixels`.
