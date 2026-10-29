@@ -563,17 +563,17 @@ fn zero_pad(d: &Tensor<f32>, h: usize, w: usize) -> Result<Tensor<f32>> {
 /// The forward intermediates `LightPrimary`'s backward needs (RDLR VJP).
 pub struct SynthTape {
     /// `res_conv`'s output before the ReLU (the residual-block input path).
-    res_conv_out: BTensor,
+    pub(crate) res_conv_out: BTensor,
     /// Each `ResAu`'s `(x, mask)`.
-    act: [(BTensor, BTensor); 3],
+    pub(crate) act: [(BTensor, BTensor); 3],
     /// The picture before `denormalize` (for its clamp's backward).
-    pre_denorm: Tensor<f32>,
+    pub(crate) pre_denorm: Tensor<f32>,
     /// `act1`'s pre-crop dims (the `crop_par(8)` backward's pad target).
-    a1_dims: (usize, usize),
+    pub(crate) a1_dims: (usize, usize),
     /// The `crop_par(8)` output dims — `up2`'s input.
-    crop8_dims: (usize, usize),
+    pub(crate) crop8_dims: (usize, usize),
     /// `up2`'s pre-crop dims (the `crop_par(4)` backward's pad target).
-    up2_dims: (usize, usize),
+    pub(crate) up2_dims: (usize, usize),
 }
 
 /// Secondary (chroma) synthesis transform.

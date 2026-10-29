@@ -267,6 +267,26 @@ def main():
     def _hook_synth(tool):
         if not _synth_hooked[0]:
             tool.decoder.register_forward_hook(_rec_hook)
+            # Per-layer taps on the primary decoder — isolates which synthesis
+            # layer diverges from the Rust `LightPrimary` port.
+            dec = tool.decoder
+
+            def _mk(name):
+                def _h(mod, inputs, out):
+                    n = _rec_count[0]
+                    if isinstance(out, torch.Tensor):
+                        put(f"rdlr.layer.{n}.{name}", out)
+                return _h
+
+            for name in ("conv2_t", "iact2", "conv3", "iact3", "conv4"):
+                mod = getattr(dec, name, None)
+                if mod is not None:
+                    mod.register_forward_hook(_mk(name))
+            fs = getattr(dec, "first_stage", None)
+            if fs is not None:
+                fs.register_forward_hook(_mk("first_stage"))
+                for j, sub in enumerate(fs):
+                    sub.register_forward_hook(_mk(f"first_stage.{j}"))
             _synth_hooked[0] = True
 
     # The latent-domain optimized area (where the leaf sits inside the overlap

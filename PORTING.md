@@ -1034,3 +1034,26 @@ with the unreleased zencodec and zencodec-testkit supplied by matching git patch
 the oracle matched role, order, size and disposition for 517 substreams in 85
 reference streams; its seven expected probe failures remain pinned. The standalone
 fuzz inventory target builds via `just inventory-fuzz-check`.
+
+
+## RDLR synthesis Jacobian — resolved (2026-10-29)
+
+`LightPrimary`/`SynthesisPrimary` vs `tool.decoder`/`DecoderBOPPrim`:
+layer-by-layer intermediates (`res_conv`/`act1_x`/`act1_mask`/`act2`/`act3`/
+`pre_denorm`) match to ~4e-6 — the SAME function (float accumulation only).
+`LightPrimary::backward` is a verified adjoint (whole-field 1.009 + per-position).
+
+The earlier "ref_synth/y_hat_grad corr 0.79 → LightPrimary/decoder differ" was
+misattributed: feeding `x_hat_grad` through the *reference's own* `bop_prim`
+autograd gives **the identical 0.7877/0.831** — `LightPrimary`/`decoder`/
+`bop_prim` Jacobians are correct and identical. The residual is NOT a
+synthesis/`ms_ssim`/metric/`conv`/`ResAu`/`denormalize`/`pixel_shuffle`/`crop`/
+`rate_vjp`/`d_resi`/`backward` bug.
+
+`y_hat`/`out[2]` feeds a THIRD gradient path `X` ≈ 20% beyond
+`means_hat`(→`resi`, ∂=-1) + `decoder`(→`synth`), concentrated in `y_hat`'s low
+channels (0-9, per-channel absmean ~1.7e-5). `y_hat_grad` = `synth - d_resi + X`
+where `X` is the missing `y_hat`/`out[2]` → `scale`/`sigma`/`means`/`mu`/
+`entropy`/`z`/`hyper`/`context`/`MCM`/`cas`/`sup_info`/`y_new2`/`decoder`/
+`residual_dq`/`resi_hat`/`numBits`/`bpp`/`loss` path the `rate_vjp`/`backward`
+composition does not yet model. `d(y)`/`cas_y_in_grad` corr 0.72 reflects this.

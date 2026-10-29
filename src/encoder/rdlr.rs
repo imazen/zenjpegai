@@ -1191,6 +1191,108 @@ mod oracle {
                     e_xy / (e_xx.sqrt() * e_yy.sqrt()),
                     e_xy / e_yy,
                 );
+                // Per-position adjoint check on `LightPrimary::backward`: for
+                // the true adjoint `J^T`, `backward(v)[i]` equals the
+                // directional derivative `⟨fwd(y+εe_i)−fwd(y), v⟩/ε`. Probing
+                // ~40 positions localises any ~20% directional error the
+                // whole-field inner product averages out.
+                if i == 1 {
+                    let v = &want_dr;
+                    let bw = synthesis
+                        .backward(rp.synth_tape.as_ref().unwrap(), v)
+                        .unwrap();
+                    let eps = 1e-3f32;
+                    let n = want_yh1.data.len();
+                    let (ih, iw) = (want_rec.h, want_rec.w);
+                    let mut base = want_yh1.clone();
+                    let (base_rec, _) = synthesis
+                        .forward_tape(
+                            eng,
+                            &BTensor::from_planar(&base, eng.tier.block()).unwrap(),
+                            ih,
+                            iw,
+                            &enough::Unstoppable,
+                        )
+                        .unwrap();
+                    let mut worst = 0.0f64;
+                    let mut n_bad = 0usize;
+                    for p in 0..40usize {
+                        let idx = (p * 37 + 11) % n;
+                        base.data[idx] += eps;
+                        let (pf, _) = synthesis
+                            .forward_tape(
+                                eng,
+                                &BTensor::from_planar(&base, eng.tier.block()).unwrap(),
+                                ih,
+                                iw,
+                                &enough::Unstoppable,
+                            )
+                            .unwrap();
+                        base.data[idx] -= eps;
+                        let mut rhs = 0.0f64;
+                        for k in 0..base_rec.data.len().min(v.data.len()) {
+                            rhs += (pf.data[k] as f64 - base_rec.data[k] as f64)
+                                * v.data[k] as f64;
+                        }
+                        let lhs = bw.data[idx] as f64 * eps as f64;
+                        let rel = (lhs - rhs).abs() / rhs.abs().max(1e-9);
+                        worst = worst.max(rel);
+                        if rel > 0.05 {
+                            n_bad += 1;
+                        }
+                        if p < 6 {
+                            eprintln!(
+                                "    adjoint[{idx}] lhs {lhs:.5e} rhs {rhs:.5e} rel {rel:.3}"
+                            );
+                        }
+                    }
+                    eprintln!(
+                        "  LightPrimary::backward per-pos adjoint: worst rel {worst:.3} bad(>5%) {n_bad}/40"
+                    );
+                }
+                // Layer-by-layer `LightPrimary` vs reference `bop_prim`
+                // (dumped to `/home/lilith/tmp/bop_layers`): the tape's
+                // `act[i]`/`res_conv_out`/`pre_denorm` are the intermediates.
+                if i == 1 {
+                    let bop = load_dump(Path::new("/home/lilith/tmp/bop_layers"));
+                    let tape = match rp.synth_tape.as_ref().unwrap() {
+                        crate::model::synthesis::PrimaryTape::Light(t) => t,
+                        _ => panic!("not light"),
+                    };
+                    let cmp = |mine: &Tensor<f32>, want: &Tensor<f32>, tag: &str| {
+                        let mut md = 0.0f64;
+                        let mut ad = 0.0f64;
+                        for k in 0..mine.data.len().min(want.data.len()) {
+                            let d = (mine.data[k] - want.data[k]).abs() as f64;
+                            ad += d;
+                            md = md.max(d);
+                        }
+                        eprintln!(
+                            "  layer {tag}: absdiff {:.3e} max {:.3e} ({} vs {})",
+                            ad / want.data.len() as f64,
+                            md,
+                            mine.data.len(),
+                            want.data.len()
+                        );
+                    };
+                    let rc = tape.res_conv_out.to_planar().unwrap();
+                    cmp(&rc, &bop["bop.res_conv"].tensor_f32(), "res_conv");
+                    for (j, tag) in ["act1_x", "act2_x", "act3_x"].iter().enumerate() {
+                        let x = tape.act[j].0.to_planar().unwrap();
+                        let m = tape.act[j].1.to_planar().unwrap();
+                        cmp(&x, &bop[&format!("bop.{tag}")].tensor_f32(), tag);
+                        cmp(
+                            &m,
+                            &bop[&format!("bop.act{}_mask", j + 1)].tensor_f32(),
+                            &format!("act{}_mask", j + 1),
+                        );
+                    }
+                    cmp(
+                        &tape.pre_denorm,
+                        &bop["bop.ps"].tensor_f32(),
+                        "pre_denorm/ps",
+                    );
+                }
                 let my_dr = rec_grad(eng, &up, &rp.rec, &original, area).unwrap();
                 let (mut s_xy, mut s_xx, mut s_yy) = (0.0f64, 0.0f64, 0.0f64);
                 for k in 0..my_dr.data.len() {
