@@ -279,6 +279,21 @@ struct Component {
     num_chs: usize,
 }
 
+/// What one component's compress pass produced: the [`Component`] for the stream plus the
+/// per-component header fields and post-filter inputs, returned instead of written so the
+/// two components' passes can run concurrently (their header writes only ever touch the
+/// pass's own `hdr.components[ccs]` slot, applied in ccs order by the caller).
+struct ComponentPass {
+    component: Component,
+    payload: Vec<Vec<u8>>,
+    rvs_enabled: bool,
+    grfs_channel_flags: Option<Vec<bool>>,
+    cube_flags: Option<Vec<bool>>,
+    efe_residual: Option<Tensor<f32>>,
+    efe_likely: Option<Tensor<u16>>,
+    lef_channel: Option<u8>,
+}
+
 /// What one component committed to the codestream: exactly the tensors
 /// `scripts/ref_vectors/dump_encode.py` records, for parity tests and diagnostics.
 #[derive(Clone, Debug)]
@@ -1047,122 +1062,56 @@ impl Encoder {
         let mut components = Vec::with_capacity(2);
         let mut residual_payloads = Vec::with_capacity(2);
         let mut payloads_charge = crate::mem::Charge::EMPTY;
-        let mut lef_channel = None;
         // The post-filters decide on the decoded picture: keep the masked dequantised
         // residual (and the `likely` map for LSBS) so `reconstruct_latent` can rebuild
         // `y_hat`.
         let post_filters = params.efe_linear || params.efe_nonlinear || params.eicci.is_some();
-        let mut efe_residuals: Vec<Option<Tensor<f32>>> = Vec::with_capacity(2);
-        let mut efe_likely: Vec<Option<Tensor<u16>>> = Vec::with_capacity(2);
-        for (ccs, latent) in latents.into_iter().enumerate() {
-            stop.check()?;
-            let model = &set.common[ccs];
-            let z_hat = &z_hats[ccs];
-            let (lh, lw) = hdr.latent_size(ccs);
-            let (lh, lw) = (lh as usize, lw as usize);
-            if latent.h != lh || latent.w != lw || latent.c != model.chs {
-                return Err(Error::InvalidData("analysis transform: unexpected latent"));
-            }
-
-            // 4. Scales, exactly as the decoder derives them, and the threshold skip mask.
-            let scales = component_scales_with(
+        // The two components' compresses share nothing — the chroma residual derives from its
+        // own latent, `z_hat` and `psi` (luma's reconstruction only enters the chroma
+        // *synthesis* later, on the decode side) — so the luma pass's context model and ANS
+        // payload run concurrently with the whole chroma pass. Results come back in
+        // `ComponentPass`es; header fields are applied in ccs order afterwards, exactly the
+        // sequential values.
+        let pass = |ccs: usize| {
+            self.component_pass(
+                eng,
+                &set,
                 &hdr,
+                latents[ccs],
+                &z_hats[ccs],
+                &params,
+                quality_map,
                 ccs,
-                model,
-                z_hat,
-                quality_map,
-                params.rvs,
-                GrfsFlags::Derive(params.grfs),
-            )?;
-            let mask = skip_mask(&scales.skip_scale_log, None)?;
-
-            // 5. psi, then the residual quantisation with its cube-flag decision, region by
-            //    region (`compress`'s two `iter_colocated_grids` loops).
-            let q = EncoderQuantiser {
-                scales: &scales,
-                quality_map,
-            };
-            let num_chs = hdr.components[ccs].num_chs as usize;
-            let out = compress_regions(
-                eng, &hdr, ccs, model, z_hat, latent, &mask, &q, num_chs, lh, lw, stop,
-            )?;
-            let mcm::Compressed {
-                mut residual_q,
-                residual,
-                cube_flag,
-                psi,
-            } = out;
-
-            // 6. `encoder_skip_and_cubeflag_for_tiles`: the final mask is the threshold mask
-            //    widened by the cubes that must not be skipped; everything else is dropped.
-            let all_skippable = cube_flag.iter().all(|&f| f);
-            let cube_flags = (!all_skippable).then(|| cube_flag.clone());
-            let mask = skip_mask(&scales.skip_scale_log, cube_flags.as_deref())?;
-            for (q, &m) in residual_q.data.iter_mut().zip(&mask.data) {
-                if !m {
-                    *q = 0;
-                }
-            }
-            // Masked positions carry no residual symbol, so the decoder's dequantised
-            // residual is `dequantize(0) = 0` there — masking this tensor gives exactly it.
-            efe_residuals.push(if post_filters {
-                let mut residual = residual;
-                for (v, &m) in residual.data.iter_mut().zip(&mask.data) {
-                    if !m {
-                        *v = 0.0;
-                    }
-                }
-                Some(residual)
-            } else {
-                None
-            });
-            efe_likely.push((post_filters && params.lsbs).then(|| scales.likely.clone()));
-            hdr.components[ccs].rvs_enabled = params.rvs;
-            // `ResVarScale.encode_header` writes `cwgf[:num_chs]` — the derived flags keep
-            // their full length inside `scales` (`analyzeCWG` ranks all channels, so a flag
-            // can land on an uncoded channel and is then simply not written).
-            hdr.components[ccs].grfs_channel_flags = scales
-                .grfs_flags
-                .clone()
-                .map(|f| f[..num_chs.min(f.len())].to_vec());
-            hdr.components[ccs].cube_flags = cube_flags.clone();
-            let mut c = Component {
-                z_hat: z_hats[ccs].clone(),
-                psi,
-                scales,
-                residual_q,
-                mask,
-                _charge: crate::mem::Charge::of_vec(&cube_flag),
-                cube_flag,
-                num_chs,
-            };
-            // 7a. This component's residual payload is coded now so that the big tensors it is
-            //     built from can die here instead of after the other component's compress.
-            residual_payloads.push(self.encode_residual(&hdr, ccs, &c)?);
-            payloads_charge.resize(
-                residual_payloads
-                    .iter()
-                    .flatten()
-                    .map(crate::mem::vec_bytes)
-                    .sum(),
-            );
-            if ccs == 0 && params.lef {
-                // `LEF.compress` -> `analyze`: the channel of the luma scale map with the
-                // highest mean. Read it before the scale map is shed below.
-                lef_channel = Some(filters::lef::reference_channel(&c.scales.scale_log)?);
-            }
-            if !keep_trace {
-                c.psi = Tensor::zeros(0, 0, 0)?;
-                c.scales.skip_scale_log = Tensor::zeros(0, 0, 0)?;
-                c.scales.scale_log = Tensor::zeros(0, 0, 0)?;
-                c.scales.likely = Tensor::zeros(0, 0, 0)?;
-                c.residual_q = Tensor::zeros(0, 0, 0)?;
-                c.mask = Tensor::zeros(0, 0, 0)?;
-                c.cube_flag = Vec::new();
-                c._charge.resize(0);
-            }
-            components.push(c);
-        }
+                post_filters,
+                keep_trace,
+                stop,
+            )
+        };
+        #[cfg(feature = "parallel")]
+        let (a, b) = rayon::join(|| pass(0), || pass(1));
+        #[cfg(not(feature = "parallel"))]
+        let (a, b) = (pass(0), pass(1));
+        let (a, b) = (a?, b?);
+        hdr.components[0].rvs_enabled = a.rvs_enabled;
+        hdr.components[0].grfs_channel_flags = a.grfs_channel_flags;
+        hdr.components[0].cube_flags = a.cube_flags;
+        hdr.components[1].rvs_enabled = b.rvs_enabled;
+        hdr.components[1].grfs_channel_flags = b.grfs_channel_flags;
+        hdr.components[1].cube_flags = b.cube_flags;
+        let efe_residuals = vec![a.efe_residual, b.efe_residual];
+        let efe_likely = vec![a.efe_likely, b.efe_likely];
+        let lef_channel = a.lef_channel;
+        residual_payloads.push(a.payload);
+        residual_payloads.push(b.payload);
+        payloads_charge.resize(
+            residual_payloads
+                .iter()
+                .flatten()
+                .map(crate::mem::vec_bytes)
+                .sum(),
+        );
+        components.push(a.component);
+        components.push(b.component);
 
         // 7b. Entropy coding of `z`. The encoder runs the decoder's call order backwards, so
         //     the chroma `z` is written before the luma `z` into the one SOZ payload.
@@ -1354,6 +1303,131 @@ impl Encoder {
             out.substream(Marker::Soq, &m.encode(&self.tables, qh)?)?;
         }
         Ok((out.finish(), components))
+    }
+
+    /// Steps 4–7a of the encode for one component: scales, the threshold skip mask, the
+    /// residual quantisation with its cube-flag decision, the final mask, and the entropy
+    /// coding of the residual payload. Everything a parallel sibling pass could observe
+    /// stays in the returned `ComponentPass`.
+    #[allow(clippy::too_many_arguments)]
+    fn component_pass(
+        &self,
+        eng: &Engine,
+        set: &ModelSet,
+        hdr: &PictureHeader,
+        latent: &Tensor<f32>,
+        z_hat: &Tensor<i8>,
+        params: &EncodeParams,
+        quality_map: Option<&QualityMap>,
+        ccs: usize,
+        post_filters: bool,
+        keep_trace: bool,
+        stop: &dyn enough::Stop,
+    ) -> Result<ComponentPass> {
+        stop.check()?;
+        let model = &set.common[ccs];
+        let (lh, lw) = hdr.latent_size(ccs);
+        let (lh, lw) = (lh as usize, lw as usize);
+        if latent.h != lh || latent.w != lw || latent.c != model.chs {
+            return Err(Error::InvalidData("analysis transform: unexpected latent"));
+        }
+
+        // 4. Scales, exactly as the decoder derives them, and the threshold skip mask.
+        let scales = component_scales_with(
+            hdr,
+            ccs,
+            model,
+            z_hat,
+            quality_map,
+            params.rvs,
+            GrfsFlags::Derive(params.grfs),
+        )?;
+        let mask = skip_mask(&scales.skip_scale_log, None)?;
+
+        // 5. psi, then the residual quantisation with its cube-flag decision, region by
+        //    region (`compress`'s two `iter_colocated_grids` loops).
+        let q = EncoderQuantiser {
+            scales: &scales,
+            quality_map,
+        };
+        let num_chs = hdr.components[ccs].num_chs as usize;
+        let out = compress_regions(
+            eng, hdr, ccs, model, z_hat, latent, &mask, &q, num_chs, lh, lw, stop,
+        )?;
+        let mcm::Compressed {
+            mut residual_q,
+            residual,
+            cube_flag,
+            psi,
+        } = out;
+
+        // 6. `encoder_skip_and_cubeflag_for_tiles`: the final mask is the threshold mask
+        //    widened by the cubes that must not be skipped; everything else is dropped.
+        let all_skippable = cube_flag.iter().all(|&f| f);
+        let cube_flags = (!all_skippable).then(|| cube_flag.clone());
+        let mask = skip_mask(&scales.skip_scale_log, cube_flags.as_deref())?;
+        for (q, &m) in residual_q.data.iter_mut().zip(&mask.data) {
+            if !m {
+                *q = 0;
+            }
+        }
+        // Masked positions carry no residual symbol, so the decoder's dequantised
+        // residual is `dequantize(0) = 0` there — masking this tensor gives exactly it.
+        let efe_residual = if post_filters {
+            let mut residual = residual;
+            for (v, &m) in residual.data.iter_mut().zip(&mask.data) {
+                if !m {
+                    *v = 0.0;
+                }
+            }
+            Some(residual)
+        } else {
+            None
+        };
+        let efe_likely = (post_filters && params.lsbs).then(|| scales.likely.clone());
+        // `ResVarScale.encode_header` writes `cwgf[:num_chs]` — the derived flags keep
+        // their full length inside `scales` (`analyzeCWG` ranks all channels, so a flag
+        // can land on an uncoded channel and is then simply not written).
+        let grfs_channel_flags = scales
+            .grfs_flags
+            .clone()
+            .map(|f| f[..num_chs.min(f.len())].to_vec());
+        let mut c = Component {
+            z_hat: z_hat.clone(),
+            psi,
+            scales,
+            residual_q,
+            mask,
+            _charge: crate::mem::Charge::of_vec(&cube_flag),
+            cube_flag,
+            num_chs,
+        };
+        // 7a. This component's residual payload is coded now so that the big tensors it is
+        //     built from can die here instead of after the other component's compress.
+        let payload = self.encode_residual(hdr, ccs, &c)?;
+        let lef_channel = (ccs == 0 && params.lef)
+            .then(|| filters::lef::reference_channel(&c.scales.scale_log))
+            .transpose()?;
+        if !keep_trace {
+            c.psi = Tensor::zeros(0, 0, 0)?;
+            c.scales.skip_scale_log = Tensor::zeros(0, 0, 0)?;
+            c.scales.scale_log = Tensor::zeros(0, 0, 0)?;
+            c.scales.likely = Tensor::zeros(0, 0, 0)?;
+            c.residual_q = Tensor::zeros(0, 0, 0)?;
+            c.mask = Tensor::zeros(0, 0, 0)?;
+            c.cube_flag = Vec::new();
+            c._charge.resize(0);
+        }
+        Ok(ComponentPass {
+            component: c,
+            payload,
+            rvs_enabled: params.rvs,
+            grfs_channel_flags,
+            cube_flags,
+            efe_residual,
+            efe_likely,
+            lef_channel,
+        })
     }
 
     /// `encode_y` / `_ac_encode_y` for one component: one payload per region, each walking the

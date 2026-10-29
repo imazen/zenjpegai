@@ -778,33 +778,24 @@ fn encoder_end_to_end_matches_reference() {
 #[test]
 fn hop_post_filters_encode_end_to_end() {
     let cases: &[(&str, Tools)] = &[
-        (
-            "enc_img30_hop_m2_b0_eicci",
-            |p| EncodeParams {
-                eicci: Some(EicciConfig::default()),
-                ..p
-            },
-        ),
-        (
-            "enc_img30_hop_m2_b0_efelin",
-            |p| EncodeParams {
-                efe_linear: true,
-                ..p
-            },
-        ),
-        (
-            "enc_img30_hop_m2_b0_on",
-            |p| EncodeParams {
-                rvs: true,
-                grfs: true,
-                lsbs: true,
-                lef: true,
-                efe_linear: true,
-                efe_nonlinear: true,
-                eicci: Some(EicciConfig::default()),
-                ..p
-            },
-        ),
+        ("enc_img30_hop_m2_b0_eicci", |p| EncodeParams {
+            eicci: Some(EicciConfig::default()),
+            ..p
+        }),
+        ("enc_img30_hop_m2_b0_efelin", |p| EncodeParams {
+            efe_linear: true,
+            ..p
+        }),
+        ("enc_img30_hop_m2_b0_on", |p| EncodeParams {
+            rvs: true,
+            grfs: true,
+            lsbs: true,
+            lef: true,
+            efe_linear: true,
+            efe_nonlinear: true,
+            eicci: Some(EicciConfig::default()),
+            ..p
+        }),
     ];
     let picture = source(IMG30);
     let dec = zenjpegai::Decoder::new(ref_root().join("models"));
@@ -834,13 +825,19 @@ fn hop_post_filters_encode_end_to_end() {
             "{vector}: stream size differs from the reference by more than 0.5 %"
         );
         if vector == "enc_img30_hop_m2_b0_eicci" {
-            assert_eq!(stream, reference, "{vector}: HOP eICCI selection must match");
+            assert_eq!(
+                stream, reference,
+                "{vector}: HOP eICCI selection must match"
+            );
         }
         // Our stream must decode, and score at least the reference stream's PSNR on the
         // source (the documented deviation picks *better* filters, never worse).
         let ours = dec.decode(&stream).unwrap();
         let theirs = dec.decode(&reference).unwrap();
-        let (p_ours, p_ref) = (psnr_vs_source(&ours, &picture), psnr_vs_source(&theirs, &picture));
+        let (p_ours, p_ref) = (
+            psnr_vs_source(&ours, &picture),
+            psnr_vs_source(&theirs, &picture),
+        );
         println!("{vector}: PSNR vs source ours {p_ours:.4} dB, reference {p_ref:.4} dB");
         assert!(
             p_ours >= p_ref - 0.001,
