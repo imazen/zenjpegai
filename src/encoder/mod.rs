@@ -294,6 +294,18 @@ struct ComponentPass {
     lef_channel: Option<u8>,
 }
 
+/// Dev-only stage timing: set ZENJPEGAI_STAGE_TIMES=1 to print `name ms` on stderr.
+macro_rules! stage {
+    ($name:expr, $e:expr) => {{
+        let t0 = std::time::Instant::now();
+        let r = $e;
+        if std::env::var_os("ZENJPEGAI_STAGE_TIMES").is_some() {
+            eprintln!("{}	{:.1} ms", $name, t0.elapsed().as_secs_f64() * 1e3);
+        }
+        r
+    }};
+}
+
 /// What one component committed to the codestream: exactly the tensors
 /// `scripts/ref_vectors/dump_encode.py` records, for parity tests and diagnostics.
 #[derive(Clone, Debug)]
@@ -945,38 +957,61 @@ impl Encoder {
         let grid = tiles::analysis_tiles_with(ccs, ph, pw, lh, lw, hz, wz, regions)?;
         let mut y = Tensor::<f32>::zeros(chs, lh, lw)?;
         let mut z_hat = Tensor::<i8>::zeros(chs, hz, wz)?;
-        for t in &grid {
+        // The tiles are independent analyses on disjoint picture windows — their forwards and
+        // hyper encodes run in parallel; the merged assignments below stay in grid order.
+        let tile_pass = |t: &AnalysisTile| -> Result<(Tensor<f32>, Tensor<i8>)> {
             stop.check()?;
             let tile = if grid.len() == 1 {
                 plane.clone()
             } else {
                 plane.window(t.image.x, t.image.y, t.image.width, t.image.height)?
             };
-            let yt = match ccs {
-                0 => set.analysis_y.forward(eng, &tile, stop)?,
-                _ => set.analysis_uv.forward(eng, &tile, stop)?,
-            };
+            let yt = stage!(
+                "analysis",
+                match ccs {
+                    0 => set.analysis_y.forward(eng, &tile, stop)?,
+                    _ => set.analysis_uv.forward(eng, &tile, stop)?,
+                }
+            );
             stop.check()?;
-            let zt = set.hyper[ccs]
-                .forward(eng, &yt, t.image.height, t.image.width, d, stop)?
-                .to_planar()?;
+            let zt = stage!(
+                "hyper_enc",
+                set.hyper[ccs].forward(eng, &yt, t.image.height, t.image.width, d, stop)
+            )?
+            .to_planar()?;
             let yt = yt.to_planar()?;
             if (yt.h, yt.w) != (t.latent.height, t.latent.width)
                 || (zt.h, zt.w) != (t.hyper.height, t.hyper.width)
             {
                 return Err(Error::InvalidData("analysis tile: unexpected latent size"));
             }
-            assign(&mut y, t.latent_core, &yt, t.latent_core_offset);
             let max = (Z_OFFSET - 1) as f32;
-            let quantised = Tensor::from_vec(
-                zt.c,
-                zt.h,
-                zt.w,
-                zt.data
-                    .iter()
-                    .map(|&v| v.clamp(-(Z_OFFSET as f32), max).round_ties_even() as i8)
-                    .collect(),
-            )?;
+            Ok((
+                yt,
+                Tensor::from_vec(
+                    zt.c,
+                    zt.h,
+                    zt.w,
+                    zt.data
+                        .iter()
+                        .map(|&v| v.clamp(-(Z_OFFSET as f32), max).round_ties_even() as i8)
+                        .collect(),
+                )?,
+            ))
+        };
+        #[cfg(feature = "parallel")]
+        let outs: Vec<Result<(Tensor<f32>, Tensor<i8>)>> = {
+            use rayon::iter::{IntoParallelIterator, ParallelIterator};
+            (0..grid.len())
+                .into_par_iter()
+                .map(|i| tile_pass(&grid[i]))
+                .collect()
+        };
+        #[cfg(not(feature = "parallel"))]
+        let outs: Vec<Result<(Tensor<f32>, Tensor<i8>)>> = grid.iter().map(tile_pass).collect();
+        for (t, out) in grid.iter().zip(outs) {
+            let (yt, quantised) = out?;
+            assign(&mut y, t.latent_core, &yt, t.latent_core_offset);
             assign(&mut z_hat, t.hyper_core, &quantised, t.hyper_core_offset);
         }
         Ok((y, z_hat))
@@ -1345,14 +1380,17 @@ impl Encoder {
         }
 
         // 4. Scales, exactly as the decoder derives them, and the threshold skip mask.
-        let scales = component_scales_with(
-            hdr,
-            ccs,
-            model,
-            z_hat,
-            quality_map,
-            params.rvs,
-            GrfsFlags::Derive(params.grfs),
+        let scales = stage!(
+            "scales",
+            component_scales_with(
+                hdr,
+                ccs,
+                model,
+                z_hat,
+                quality_map,
+                params.rvs,
+                GrfsFlags::Derive(params.grfs),
+            )
         )?;
         let mask = skip_mask(&scales.skip_scale_log, None)?;
 
@@ -1363,8 +1401,11 @@ impl Encoder {
             quality_map,
         };
         let num_chs = hdr.components[ccs].num_chs as usize;
-        let out = compress_regions(
-            eng, hdr, ccs, model, z_hat, latent, &mask, &q, num_chs, lh, lw, stop,
+        let out = stage!(
+            "compress",
+            compress_regions(
+                eng, hdr, ccs, model, z_hat, latent, &mask, &q, num_chs, lh, lw, stop,
+            )
         )?;
         let mcm::Compressed {
             mut residual_q,
@@ -1416,7 +1457,7 @@ impl Encoder {
         };
         // 7a. This component's residual payload is coded now so that the big tensors it is
         //     built from can die here instead of after the other component's compress.
-        let payload = self.encode_residual(hdr, ccs, &c)?;
+        let payload = stage!("ans", self.encode_residual(hdr, ccs, &c))?;
         let lef_channel = (ccs == 0 && params.lef)
             .then(|| filters::lef::reference_channel(&c.scales.scale_log))
             .transpose()?;
