@@ -400,3 +400,107 @@ pub fn slice_channels(x: &Tensor<f32>, c0: usize, c1: usize) -> Result<Tensor<f3
     let n = x.plane_len();
     Tensor::from_vec(c1 - c0, x.h, x.w, x.data[c0 * n..c1 * n].to_vec())
 }
+
+#[cfg(test)]
+mod vjp_tests {
+    use super::*;
+
+    fn t(c: usize, h: usize, w: usize, seed: usize) -> Tensor<f32> {
+        Tensor::from_vec(
+            c,
+            h,
+            w,
+            (0..c * h * w)
+                .map(|i| ((i + seed) % 11) as f32 / 11.0 - 0.4)
+                .collect(),
+        )
+        .unwrap()
+    }
+    fn conv2d_test(in_ch: usize, out_ch: usize, k: usize, groups: usize) -> Conv2d {
+        let icg = in_ch / groups;
+        let weight = (0..out_ch * icg * k * k)
+            .map(|i| ((i % 7) as f32 / 7.0) - 0.3)
+            .collect();
+        Conv2d::new(
+            in_ch,
+            out_ch,
+            (k, k),
+            1,
+            (k / 2, k / 2),
+            groups,
+            weight,
+            None,
+        )
+        .unwrap()
+    }
+
+    /// `conv2d_backward` as the adjoint of `conv2d`: `⟨d_out, conv(x+εe) − conv(x)⟩/ε ≈ d_in[e]`.
+    #[test]
+    fn conv2d_backward_is_adjoint() {
+        for &(ic, oc, k, g) in &[(4, 4, 3, 1), (8, 8, 3, 4), (4, 8, 1, 1)] {
+            let conv = conv2d_test(ic, oc, k, g);
+            let x = t(ic, 9, 9, 1);
+            let dout = t(oc, 9, 9, 2);
+            let din = conv2d_backward(&dout, &conv, 9, 9).unwrap();
+            let base = conv2d(&conv, &x).unwrap();
+            let e = 1e-3;
+            let mut worst = 0.0f32;
+            for &pos in &[0usize, ic * 40, ic * 81 - 1] {
+                let mut xp = x.clone();
+                xp.data[pos] += e;
+                let op = conv2d(&conv, &xp).unwrap();
+                let fd: f32 = dout
+                    .data
+                    .iter()
+                    .zip(&op.data)
+                    .zip(&base.data)
+                    .map(|((&d, &a), &b)| d * (a - b))
+                    .sum::<f32>()
+                    / e;
+                let rel = (din.data[pos] - fd).abs() / fd.abs().max(1e-9);
+                worst = worst.max(rel);
+            }
+            assert!(worst < 0.02, "conv2d_backward g{g} rel {worst}");
+        }
+    }
+
+    /// `conv_transpose2d_backward` adjoint of `conv_transpose2d`.
+    #[test]
+    fn conv_transpose2d_backward_is_adjoint() {
+        let conv = ConvTranspose2d::new(
+            4,
+            6,
+            4,
+            2,
+            1,
+            0,
+            (0..4 * 6 * 16)
+                .map(|i| (i % 5) as f32 / 5.0 - 0.4)
+                .collect(),
+            None,
+        )
+        .unwrap();
+        let x = t(4, 7, 7, 3);
+        let base = conv_transpose2d(&conv, &x).unwrap();
+        let dout = t(6, base.h, base.w, 4);
+        let din = conv_transpose2d_backward(&dout, &conv, 7, 7).unwrap();
+        let e = 1e-3;
+        let mut worst = 0.0f32;
+        for &pos in &[0usize, 4 * 24, 4 * 49 - 1] {
+            let mut xp = x.clone();
+            xp.data[pos] += e;
+            let op = conv_transpose2d(&conv, &xp).unwrap();
+            let fd: f32 = dout
+                .data
+                .iter()
+                .zip(&op.data)
+                .zip(&base.data)
+                .map(|((&d, &a), &b)| d * (a - b))
+                .sum::<f32>()
+                / e;
+            let rel = (din.data[pos] - fd).abs() / fd.abs().max(1e-9);
+            worst = worst.max(rel);
+        }
+        assert!(worst < 0.02, "conv_transpose2d_backward rel {worst}");
+    }
+}

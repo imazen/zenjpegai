@@ -470,14 +470,21 @@ mod tests {
         let (dx, _dy) = ms_ssim_vjp(&eng, &x, &y0, 1.0).unwrap();
         let e = 1e-3f32;
         let mut worst = 0.0f32;
-        for &(px, py) in &[(5, 5), (40, 40), (100, 100), (150, 60), (199, 199), (77, 123)] {
+        for &(px, py) in &[
+            (5, 5),
+            (40, 40),
+            (100, 100),
+            (150, 60),
+            (199, 199),
+            (77, 123),
+        ] {
             let i = py * w + px;
             let mut xp = x.clone();
             xp.data[i] += e;
             let mut xm = x.clone();
             xm.data[i] -= e;
-            let fd = (ms_ssim(&eng, &xp, &y0).unwrap() - ms_ssim(&eng, &xm, &y0).unwrap())
-                / (2.0 * e);
+            let fd =
+                (ms_ssim(&eng, &xp, &y0).unwrap() - ms_ssim(&eng, &xm, &y0).unwrap()) / (2.0 * e);
             let got = dx.data[i];
             let err = (got - fd).abs();
             worst = worst.max(err / fd.abs().max(1e-9));

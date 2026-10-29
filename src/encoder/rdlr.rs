@@ -22,8 +22,8 @@
 
 use alloc::vec::Vec;
 
-use crate::error::{Error, Result};
 use crate::encoder::msssim;
+use crate::error::{Error, Result};
 use crate::model::common::SIGMA_PRECISION;
 use crate::model::mcm;
 use crate::model::synthesis::SynthesisPrimary;
@@ -174,12 +174,7 @@ pub(crate) fn rate_point_y(
 /// `PSNR`'s input gradient: `psnr = C - 10·log10(mse + eps)`, `mse =
 /// mean((a-b)²)` over `area` — `d(rec[i]) = d_psnr · (-10/(ln10·mse)) ·
 /// 2·(rec[i]-orig[i])/N` inside `area`, `0` outside.
-fn psnr_vjp(
-    d_psnr: f64,
-    rec: &Tensor<f32>,
-    original: &Tensor<f32>,
-    area: Area,
-) -> Tensor<f32> {
+fn psnr_vjp(d_psnr: f64, rec: &Tensor<f32>, original: &Tensor<f32>, area: Area) -> Tensor<f32> {
     let n = (area.width * area.height) as f64;
     let mse = rec
         .plane(0)
@@ -277,16 +272,19 @@ pub(crate) fn backward(
             .ok_or(Error::InvalidArgument("RDLR: no synthesis tape"))?,
         &d_rec,
     )?;
-    let mut d_out_yhat = d_yhat_synth;
+    let mut d_out_yhat = d_yhat_synth.clone();
     for (a, &b) in d_out_yhat.data.iter_mut().zip(&d_resi.data) {
         *a -= b;
     }
     if cfg!(debug_assertions) {
+        let am =
+            |t: &Tensor<f32>| t.data.iter().map(|v| v.abs()).sum::<f32>() / t.data.len() as f32;
         eprintln!(
-            "  d_rec am {:.3e}  d_yhat_synth am {:.3e}  d_out_yhat am {:.3e}",
-            d_rec.data.iter().map(|v| v.abs()).sum::<f32>() / d_rec.data.len() as f32,
-            0.0,
-            d_out_yhat.data.iter().map(|v| v.abs()).sum::<f32>() / d_out_yhat.data.len() as f32
+            "  d_resi {:.3e}  d_rec {:.3e}  d_yhat_synth {:.3e}  d_out_yhat {:.3e}",
+            am(&d_resi),
+            am(&d_rec),
+            am(&d_yhat_synth),
+            am(&d_out_yhat)
         );
     }
     // d(y) — the MCM's internal grad plus the resi term's direct +1.
@@ -844,30 +842,77 @@ mod oracle {
                 &enough::Unstoppable,
             )
             .unwrap();
+            // Isolate the MCM backward: feed the reference's OWN y_hat/resi_hat
+            // gradients (exact upstreams) — if d_y then matches cas_y_in_grad,
+            // the gap is in the synthesis backward, not the MCM.
+            if i == 0 {
+                let psi_b = BTensor::from_planar(&rp.psi, eng.tier.block()).unwrap();
+                let want_uh = dump[&format!("rdlr.{i}.y_hat_grad")].tensor_f32();
+                let want_ur = dump[&format!("rdlr.{i}.gm_resi_grad")].tensor_f32();
+                let ctx = set.common[0].context.as_ref().unwrap();
+                let d_y2 = ctx
+                    .compress_backward(
+                        eng,
+                        &y,
+                        &psi_b,
+                        &q,
+                        &mask,
+                        160,
+                        crate::encoder::SKIP_CUBE_THR,
+                        &want_uh,
+                        &want_ur,
+                        &enough::Unstoppable,
+                    )
+                    .unwrap();
+                let mut d_y2 = d_y2;
+                for (a, &b) in d_y2.data.iter_mut().zip(&want_ur.data) {
+                    *a += b;
+                }
+                let want = dump[&format!("rdlr.{i}.cas_y_in_grad")].tensor_f32();
+                let (mut md, mut am, mut s_xy, mut s_yy) = (0.0f32, 0.0f64, 0.0f64, 0.0f64);
+                for k in 0..d_y2.data.len() {
+                    let (a, b) = (d_y2.data[k] as f64, want.data[k] as f64);
+                    md = md.max((a - b) as f32 * ((a - b) as f32).signum());
+                    am += (a - b).abs();
+                    s_xy += a * b;
+                    s_yy += b * b;
+                }
+                eprintln!(
+                    "  MCM-only: diff {:.3e} corr {:.3} (d_out=ref upstreams)",
+                    am / d_y2.data.len() as f64,
+                    s_xy / (s_xy.abs().sqrt() * s_yy.sqrt().max(1e-30))
+                );
+            }
             let want_dy = dump[&format!("rdlr.{i}.cas_y_in_grad")].tensor_f32();
             let want_leaf = dump[&format!("rdlr.{i}.y_grad")].tensor_f32();
             for nm in ["x_hat_grad", "y_hat_grad"] {
                 if let Some(d) = dump.get(&format!("rdlr.{i}.{nm}")) {
                     let t = d.tensor_f32();
-                    let am =
-                        t.data.iter().map(|v| v.abs()).sum::<f32>() / t.data.len() as f32;
+                    let am = t.data.iter().map(|v| v.abs()).sum::<f32>() / t.data.len() as f32;
                     eprintln!("iter {i} ref {nm} absmean {am:.3e}");
                 }
             }
             let (mut md_y, mut md_leaf) = (0.0f32, 0.0f32);
             let (mut am_y, mut am_w) = (0.0f64, 0.0f64);
+            let (mut s_xy, mut s_xx, mut s_yy) = (0.0f64, 0.0f64, 0.0f64);
             for ch in 0..160 {
                 for k in 0..d_y.plane(ch).len() {
+                    let (a, b) = (d_y.plane(ch)[k] as f64, want_dy.plane(ch)[k] as f64);
                     md_y = md_y.max((d_y.plane(ch)[k] - want_dy.plane(ch)[k]).abs());
                     md_leaf = md_leaf.max((d_y.plane(ch)[k] - want_leaf.plane(ch)[k]).abs());
-                    am_y += (d_y.plane(ch)[k] - want_dy.plane(ch)[k]).abs() as f64;
-                    am_w += want_dy.plane(ch)[k].abs() as f64;
+                    am_y += (a - b).abs();
+                    am_w += b.abs();
+                    s_xy += a * b;
+                    s_xx += a * a;
+                    s_yy += b * b;
                 }
             }
+            let corr = s_xy / (s_xx.sqrt() * s_yy.sqrt());
             eprintln!(
-                "iter {i}: cas_y_in_grad max {md_y:.3e} leaf max {md_leaf:.3e} absmean diff {:.3e} want {:.3e}",
+                "iter {i}: cas max {md_y:.3e} leaf {md_leaf:.3e} diff {:.3e} want {:.3e} corr {corr:.4} scale {:.3}",
                 am_y / d_y.data.len() as f64,
-                am_w / d_y.data.len() as f64
+                am_w / d_y.data.len() as f64,
+                s_xy / s_yy
             );
             let want_rate = dump[&format!("rdlr.gcrp.{}.rate", i + 1)].f32s() as f64;
             let want_psnr = dump[&format!("rdlr.gcrp.{}.psnr", i + 1)].f32s() as f64;
@@ -893,6 +938,50 @@ mod oracle {
                 "iter {i}: msssim {} vs reference {want_msssim}",
                 rp.msssim
             );
+            // Adjoint check: `⟨d_rec, rec(y+εv) − rec(y)⟩/ε ≈ ⟨d_yhat, v⟩`.
+            if i == 0 {
+                let (rec_t, tape) = synthesis
+                    .forward_tape(
+                        eng,
+                        &BTensor::from_planar(&rp.y_hat, eng.tier.block()).unwrap(),
+                        original.h,
+                        original.w,
+                        &enough::Unstoppable,
+                    )
+                    .unwrap();
+                // A deterministic pseudo-random `d_rec` (not the real one — the
+                // adjoint identity holds for any upstream).
+                let mut d_rec = Tensor::<f32>::zeros(1, rec_t.h, rec_t.w).unwrap();
+                for (k, v) in d_rec.data.iter_mut().enumerate() {
+                    *v = ((k * 7919) % 977) as f32 / 977.0 - 0.5;
+                }
+                let d_yh = synthesis.backward(&tape, &d_rec).unwrap();
+                for &(ch, py, px) in &[(0, 10, 10), (80, 20, 20), (159, 40, 30)] {
+                    let mut yp = rp.y_hat.clone();
+                    let i = (ch * yp.h + py) * yp.w + px;
+                    let e = 1e-2f32;
+                    yp.data[i] += e;
+                    let rec_p = synthesis
+                        .forward_with(
+                            eng,
+                            &BTensor::from_planar(&yp, eng.tier.block()).unwrap(),
+                            original.h,
+                            original.w,
+                            &enough::Unstoppable,
+                        )
+                        .unwrap();
+                    let fd: f32 = d_rec
+                        .data
+                        .iter()
+                        .zip(&rec_p.data)
+                        .zip(&rec_t.data)
+                        .map(|((&d, &rp_), &rt)| d * (rp_ - rt))
+                        .sum::<f32>()
+                        / e;
+                    let got = d_yh.data[i];
+                    eprintln!("  adjoint ({ch},{py},{px}): bwd {got:.4e}  fd {fd:.4e}");
+                }
+            }
         }
     }
 }

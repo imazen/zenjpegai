@@ -773,9 +773,19 @@ measured numbers in the status table above when you close an item.
   exp(scale_log/2^7·log_k + ln 0.11)` — the GM's own `_index_to_scale` float-shift +
   `_likelihood`'s `/2^7`, not the plain table lookup; `rate_y` sums over all positions
   (no mask/num_chs); `test_numBits = ECLibLH z bits + rate_y`, `bpp` over source pixels.
-  Remaining: the VJP (input-gradient kernels through the MCM context, synthesis, GM
-  likelihood, PSNR/MS-SSIM — see below) and the Adagrad/StepLR driver + best-iterate
-  selection + the `_compress_y` decisions rewrite + stream emission.
+  VJP (input-gradient): the full `rdlr_y_iteration` backward is composed in
+  `rdlr::backward` and oracle-hooked per iteration — `loss_upstream` (slope-normal
+  scalars) → `rate_vjp` (GM `d resi`, exact vs `gm_resi_grad`) → `ms_ssim_vjp` +
+  `psnr_vjp` (`d rec`, exact vs `x_hat_grad` 3.02e-7) → `SynthesisPrimary::backward`
+  (`d y_hat`) → `ContextModel::compress_backward` (the 4-phase STE/context VJP, `d y`)
+  → `+resi`'s direct term. Verified 2026: `d(y)` correlates 0.72 with `cas_y_in_grad`
+  at right magnitude; feeding the reference's own upstreams drops the MCM-only diff
+  to 2.5e-6 (the MCM backward is correct); `conv2d`/`conv_transpose` backwards are
+  finite-diff-verified adjoints. Known gap: `LightPrimary::backward` under-produces
+  `d y_hat` ~17% (vs `y_hat_grad`) — likely accumulated conv/relu-boundary effects;
+  the resi_dq→resi_rq→diff STE path and the 255× ms-ssim domain scale were the two
+  bugs found and fixed. Remaining: exact `d y_hat` parity, then the Adagrad/StepLR
+  driver + best-iterate selection + `_compress_y` decisions rewrite + stream emission.
   Port cost: **input-gradient (VJP) kernels for every op in the reconstruct chain** —
   MCM's four phases, the synthesis decoder (convs, transposed conv, TAM/CAB, gates,
   layernorm, pixel shuffle, ResAU), `ms_ssim`, PSNR, the GM likelihood, the STE wrapper —
