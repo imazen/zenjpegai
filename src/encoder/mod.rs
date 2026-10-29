@@ -628,17 +628,16 @@ impl Encoder {
             .map(|(v, h)| (v as usize, h as usize));
         let input = preprocess(src, &meta)?;
         let planes = [&input.luma, &input.chroma];
-        let (mut ys, mut zs) = (Vec::with_capacity(2), Vec::with_capacity(2));
-        for (ccs, plane) in planes.into_iter().enumerate() {
-            let (y, z) = self.analyse_component(&set, ccs, plane, independent, stop)?;
-            ys.push(y);
-            zs.push(z);
-        }
-        let mut zs = zs.into_iter();
-        let z = [
-            zs.next().ok_or(Error::InvalidData("internal: luma z"))?,
-            zs.next().ok_or(Error::InvalidData("internal: chroma z"))?,
-        ];
+        // The two analyses are independent (the chroma transform reads its own plane and its
+        // own checkpoints); the luma and chroma passes run concurrently.
+        let analyse = |ccs| self.analyse_component(&set, ccs, planes[ccs], independent, stop);
+        #[cfg(feature = "parallel")]
+        let (a, b) = rayon::join(|| analyse(0), || analyse(1));
+        #[cfg(not(feature = "parallel"))]
+        let (a, b) = (analyse(0), analyse(1));
+        let ((y0, z0), (y1, z1)) = (a?, b?);
+        let ys = [y0, y1];
+        let z = [z0, z1];
         // `org_img_i` of the post-filters' `compress`: EFE linear reads the source's planes
         // in `[0, 255]` at its own subsampling, eICCI the same planes in its internal
         // `[0, 1]` range (`filters::icci::org_planes`).
