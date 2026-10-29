@@ -106,13 +106,22 @@ def main():
         self.coder_direction = 0
         self.ae_factory.max_compressed_size = [1 << 24] * 64
 
+    _term_count = [0]
+
     def _bs_encode_term(self):
         total = 0.0
-        for lst in self.ae_mems_dict.values():
+        per_stream = []
+        for mid, lst in self.ae_mems_dict.items():
             for mem in lst:
                 if mem is not None:
                     mem.encode_term()
-                    total += float(mem.ae.get_total_bits().item())
+                    b = float(mem.ae.get_total_bits().item())
+                    total += b
+                    per_stream.append((mid, b))
+        put(f"rdlr.bsterm.{_term_count[0]}", total)
+        for mid, b in per_stream:
+            put(f"rdlr.bsterm.{_term_count[0]}.stream{mid}", b)
+        _term_count[0] += 1
         return total
 
     BitstreamStructure.encode_init = _bs_encode_init
@@ -121,7 +130,10 @@ def main():
     calls = []
 
     def put(name, t):
-        t = t.detach().to(torch.float32).cpu().contiguous() if isinstance(t, torch.Tensor) \
+        # `.clone()`: `.detach()` alone shares storage — tensors RDLR mutates in
+        # place (the latent tile, the optimizer leaf) would all read as their
+        # final values at serialization time.
+        t = t.detach().clone().to(torch.float32).cpu().contiguous() if isinstance(t, torch.Tensor) \
             else torch.tensor(t, dtype=torch.float32)
         calls.append((name, t))
 
@@ -181,6 +193,45 @@ def main():
 
         _cls.get_current_rate_point = _gcrp
 
+    # Record `_compress_ar_scale`'s real outputs per call (the resi_hat /
+    # residual_dq / y_hat the rate point consumes — integer or STE, fresh or
+    # decisions-stored).
+    _cas_count = [0]
+    from src.codec.coding_tools.core_models.CCS_SGMM.common_modules import \
+        CommonEncDecModules  # noqa: E402
+    _orig_cas = CommonEncDecModules._compress_ar_scale
+
+    def _cas(self, y_hat, decisions):
+        out = _orig_cas(self, y_hat, decisions)
+        n = _cas_count[0]
+        _cas_count[0] += 1
+        put(f"rdlr.cas.{n}.y_in", y_hat)
+        put(f"rdlr.cas.{n}.resi_hat", out[0])
+        put(f"rdlr.cas.{n}.resi_dq", out[1])
+        put(f"rdlr.cas.{n}.y_hat", out[2])
+        return out
+
+    CommonEncDecModules._compress_ar_scale = _cas
+
+    # Record the GM likelihood model's actual inputs/outputs per call —
+    # `entropy(resi, scale_lin, zeros)` — the resi/scale/residual-rate ground truth.
+    from src.codec.components.entropy_coding.prob_models.gm import GMProbModel  # noqa: E402
+
+    _gm_count = [0]
+    _orig_gm_fwd = GMProbModel.forward
+
+    def _gm_fwd(self, input, scale, mean=None, training=None):
+        out = _orig_gm_fwd(self, input, scale, mean)
+        n = _gm_count[0]
+        _gm_count[0] += 1
+        if out.dim() == 4 and out.shape[1] > 3:
+            put(f"rdlr.gm.{n}.resi", input)
+            put(f"rdlr.gm.{n}.scale", scale)
+            put(f"rdlr.gm.{n}.rate_y", float((-torch.log2(out)).sum()))
+        return out
+
+    GMProbModel.forward = _gm_fwd
+
     # The latent-domain optimized area (where the leaf sits inside the overlap
     # tile) is a process_y local; capture it off `tiling.assign_data`.
     import src.codec.coding_tools.rdlr.rdlr_comp_base as _rcb  # noqa: E402
@@ -227,6 +278,21 @@ def main():
             put("rdlr.area", list(area))
         for j, tag in enumerate(("rate_ref", "psnr_ref", "msssim_ref")):
             put(f"rdlr.{i}.{tag}", float(ref[j]))
+        # The loss's fixed coefficients: the R-D normal angles and the PSNR/MS-SSIM
+        # mix, plus the per-iteration Adagrad lr for replaying the optimizer.
+        _sl = self.current_bpp_curve_slopes
+        for name in ("psnrY", "msssim_Torch"):
+            try:
+                v = _sl.get(name) if isinstance(_sl, dict) else getattr(_sl, name)
+                put(f"rdlr.slope.{name}", float(v))
+            except (AttributeError, TypeError):
+                pass
+        try:
+            put("rdlr.ratio_psnr_msssim",
+                float(self.lossTypeBDcurveSlope_ratioPSNR_MSSSIM))
+        except AttributeError:
+            pass
+        put(f"rdlr.{i}.lr", float(optimizer.param_groups[0]["lr"]))
         # The differentiable leaf is the optimized-part tensor inside the
         # optimizer (process_y `assign_data`s it into the tile before each call,
         # keeping the graph). Capture its grad after the call's own

@@ -33,6 +33,7 @@ pub mod msssim;
 #[cfg(not(feature = "unstable-internals"))]
 pub(crate) mod msssim;
 mod rate;
+mod rdlr;
 mod tiles;
 
 pub use colour::{AnalysisInput, SourceImage, SourceMeta, preprocess, preprocess_rgb};

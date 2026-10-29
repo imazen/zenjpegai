@@ -111,6 +111,20 @@ impl Likelihood {
         Ok(Self { z_nbits })
     }
 
+    /// `bits()`'s factorized `z_hat` term on its own — RDLR's rate point takes
+    /// the `z` bits from this model but the residual's from the `GMProbModel`
+    /// likelihood of the continuous `y - means_hat`.
+    pub(crate) fn z_bits(&self, z_hat: &Tensor<i8>) -> f64 {
+        let mut bits = 0.0;
+        for ch in 0..z_hat.c {
+            let lut = &self.z_nbits[ch];
+            for &z in z_hat.plane(ch) {
+                bits += lut[(z as i32 + Z_OFFSET).clamp(0, MAX_Z as i32 - 1) as usize];
+            }
+        }
+        bits
+    }
+
     /// `ECLibLH.total_bits` of one component: the factorized estimate of `z_hat` plus the
     /// Gaussian estimate of the (already masked) `residual_q`. `num_chs` truncates the
     /// residual only — `z` is coded over all channels whatever the residual's channel count
