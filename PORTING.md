@@ -225,6 +225,14 @@ Whole-process wall time, one encode, checkpoints read from `.pth`: **0.13 s** ag
 reference's **1.5 s** at 560x888. The reference pins torch to one thread by default and gets
 *slower* when allowed more on this box, so its one-thread column is the fair comparison.
 
+2026-10-29, i270 (Core Ultra 7 265K, 20 threads): the two components' analysis transforms
+and the whole residual-compress passes run concurrently (they share nothing — the chroma
+path reads only its own plane, `z_hat` and `psi`), the rate matcher's four-model sweep runs
+under `par_iter`, and the eICCI bank evaluates its candidates in parallel (streams stay
+byte-identical; the selection still reduces in map order). Steady-state of four runs,
+`encode_ms`: 560x888 SOP 65.9, BOP 77.0, HOP 382.8 (was ~580 the day before), 0.50 bpp
+rate-matched 319.9 (was ~1100), HOP --eicci 785.2, HOP --tools-on 1072.1 (was ~1140).
+
 With every tool on (`tools_on`; `benchmarks/encode_tools_on_2026-09-18.{tsv,meta}`) the
 reference's post-filter searches dominate its encode — its rate-matched `tools_on` encode of
 the 2096x1400 picture takes ~35 s. Best of three, `encode_ms`:
