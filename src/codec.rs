@@ -429,6 +429,11 @@ impl<'a> DecodeJob<'a> for JpegAiDecodeJob {
         self
     }
 
+    fn with_pulse(mut self, pulse: zencodec::SharedPulse) -> Self {
+        self.stop = Some(zencodec::StopToken::new(pulse));
+        self
+    }
+
     fn with_limits(mut self, limits: ResourceLimits) -> Self {
         self.job_limits = Some(limits_from_resource_limits(&limits));
         self
@@ -821,6 +826,11 @@ impl EncodeJob for JpegAiEncodeJob {
 
     fn with_stop(mut self, stop: zencodec::StopToken) -> Self {
         self.stop = Some(stop);
+        self
+    }
+
+    fn with_pulse(mut self, pulse: zencodec::SharedPulse) -> Self {
+        self.stop = Some(zencodec::StopToken::new(pulse));
         self
     }
 

@@ -227,7 +227,9 @@ fn stop_token_cancels_encode() {
     let (img, rgb) = decoded_rgb8();
     let err = JpegAiEncoderConfig::new(models(), Engine::new())
         .job()
-        .with_stop(zencodec::StopToken::new(Cancelled))
+        .with_pulse(zencodec::SharedPulse::new(
+            zencodec::how_far::StopOnly::new(Cancelled),
+        ))
         .encoder()
         .unwrap()
         .encode(rgb8_slice(&img, &rgb))

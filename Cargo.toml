@@ -62,11 +62,11 @@ magetypes = { version = "0.9.29" }
 rayon = { version = "1.12.0", optional = true }
 libm = "0.2.16"
 whereat = { version = "0.1.5", default-features = false }
-zenpng = { version = "0.1.4", optional = true }
+zenpng = { version = "0.2.0", optional = true }
 imgref = { version = "1.12.3", optional = true }
 rgb = { version = "0.8.53", optional = true }
 enough = { version = "0.4.4", default-features = false }
-zencodec = { version = "0.1.26", optional = true }
+zencodec = { version = "0.2.0", optional = true }
 zenpixels = { version = "0.2.16", optional = true }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
@@ -214,3 +214,9 @@ opt-level = "z"
 [patch.crates-io]
 zencodec = { git = "https://github.com/imazen/zencodec", branch = "main" }
 zencodec-testkit = { git = "https://github.com/imazen/zencodec", branch = "main" }
+# zencodec main needs zenpixels >=0.2.17 (0.3.0 is yanked); its own manifest patches to this rev.
+zenpixels = { git = "https://github.com/imazen/zenpixels", rev = "283655c5424e0ad7ebc6d2acd94670fac1e29158" }
+zenpixels-convert = { git = "https://github.com/imazen/zenpixels", rev = "283655c5424e0ad7ebc6d2acd94670fac1e29158" }
+# crates.io zenpng 0.1.4 needs zencodec 0.1.x, which no longer compiles against patched
+# zenpixels; zenpng 0.2.0 accepts the zencodec 0.2 family.
+zenpng = { git = "https://github.com/imazen/zenpng", rev = "a5f2a58834d41cbace94368ca19eeb374f6b9873" }
