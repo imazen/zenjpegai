@@ -781,10 +781,17 @@ measured numbers in the status table above when you close an item.
   → `+resi`'s direct term. Verified 2026: `d(y)` correlates 0.72 with `cas_y_in_grad`
   at right magnitude; feeding the reference's own upstreams drops the MCM-only diff
   to 2.5e-6 (the MCM backward is correct); `conv2d`/`conv_transpose` backwards are
-  finite-diff-verified adjoints. Known gap: `LightPrimary::backward` under-produces
-  `d y_hat` ~17% (vs `y_hat_grad`) — likely accumulated conv/relu-boundary effects;
-  the resi_dq→resi_rq→diff STE path and the 255× ms-ssim domain scale were the two
-  bugs found and fixed. Remaining: exact `d y_hat` parity, then the Adagrad/StepLR
+  finite-diff-verified adjoints. `ms_ssim`/`ssim`/`gaussian`/`avg_pool2` verified
+  identical to pytorch_msssim 0.2.1 (valid conv, `avg_pool2d(X,2,padding=[h%2])`,
+  per-channel means, product-of-relu'd-means) — scalar to 1.2e-7; `ms_ssim_vjp` is
+  a whole-field finite-diff-verified adjoint; `rp.rec == x_hat` (3.5e-5),
+  `rp.y_hat == y_hat` (1.6e-7), `x_hat` feeds metrics only. The resi_dq→resi_rq→diff
+  STE path and the 255× ms-ssim domain scale were the two bugs found and fixed.
+  **Remaining gap — NOT `d_rec`**: feeding the reference's own `x_hat_grad` through
+  `SynthesisPrimary::backward` still yields `d_out_yhat` only ~0.79-correlated with
+  `y_hat_grad`, so the residual is a scalar-matching-but-Jacobian-different
+  `LightPrimary`/decoder (or a `d_out_yhat` composition subtlety), not the metric
+  gradient, pooling, or MCM. Remaining: exact `d y_hat` parity, then the Adagrad/StepLR
   driver + best-iterate selection + `_compress_y` decisions rewrite + stream emission.
   Driver semantics (`process_y` / `rdlr_y_iteration` / `rdlr_tool`): the leaf is the
   *tile-core* latent (`tiling.get_data(lat_tile, optimized_part_of_lattile_rel_to_overlap)`;

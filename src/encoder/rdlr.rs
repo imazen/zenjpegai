@@ -233,38 +233,7 @@ pub(crate) fn backward(
     let d_resi = rate_vjp(up.d_rate / pixels, y, &rp.y_hat, &rp.residual_q, scale_log);
     // d(rec) — psnr + ms-ssim (ms-ssim on the [0,1]-scaled `area` crop, as
     // `distortion` builds it).
-    let (dx, _dy) = {
-        const INV: f32 = 1.0 / 255.0;
-        let (ah, aw) = (area.height, area.width);
-        let (mut a, mut b) = (Vec::with_capacity(ah * aw), Vec::with_capacity(ah * aw));
-        for row in 0..ah {
-            for x in 0..aw {
-                a.push(original.plane(0)[(area.y + row) * original.w + area.x + x] * INV);
-                b.push(rp.rec.plane(0)[(area.y + row) * rp.rec.w + area.x + x] * INV);
-            }
-        }
-        // `ms_ssim` runs on 1/255-scaled inputs, so `dx` is d/d(rec/255) — the
-        // rec-domain gradient is smaller by a further 1/255: fold that into the
-        // upstream scalar.
-        msssim::ms_ssim_vjp(
-            eng,
-            &Tensor::from_vec(1, ah, aw, b)?,
-            &Tensor::from_vec(1, ah, aw, a)?,
-            up.d_msssim as f32 * INV,
-        )?
-    };
-    // The ms-ssim grad lives on the `area` crop — scatter it into the picture grid.
-    let mut d_rec = Tensor::<f32>::zeros(1, rp.rec.h, rp.rec.w)?;
-    for row in 0..area.height {
-        for x in 0..area.width {
-            d_rec.plane_mut(0)[(area.y + row) * rp.rec.w + area.x + x] =
-                dx.data[row * area.width + x];
-        }
-    }
-    let d_psnr_map = psnr_vjp(up.d_psnr, &rp.rec, original, area);
-    for (a, &b) in d_rec.data.iter_mut().zip(&d_psnr_map.data) {
-        *a += b;
-    }
+    let d_rec = rec_grad(eng, up, &rp.rec, original, area)?;
     // d(y_hat) — synthesis backward minus the resi term's -means_hat.
     let d_yhat_synth = synthesis.backward(
         rp.synth_tape
@@ -437,13 +406,13 @@ pub(crate) fn optimize_y(
     let mut best_loss = f64::INFINITY;
     for _ in 0..num_ite {
         let rp = rate_point_y(
-            eng, hdr, model, synthesis, lh, &leaf, z_hat, scale_log, mask, q, num_chs,
-            original, area, pixels, stop,
+            eng, hdr, model, synthesis, lh, &leaf, z_hat, scale_log, mask, q, num_chs, original,
+            area, pixels, stop,
         )?;
         let up = loss_upstream(&rp, refs.0, refs.1, refs.2, slope_psnr, slope_msssim, ratio);
         let d_y = backward(
-            eng, ctx, synthesis, &up, &rp, &leaf, z_hat, scale_log, mask, q, num_chs,
-            original, area, pixels, stop,
+            eng, ctx, synthesis, &up, &rp, &leaf, z_hat, scale_log, mask, q, num_chs, original,
+            area, pixels, stop,
         )?;
         for (i, (&g, acc)) in d_y.data.iter().zip(&mut sum_sq).enumerate() {
             *acc += g * g;
@@ -496,16 +465,16 @@ fn estimate_slopes(
     stop: &dyn enough::Stop,
 ) -> Result<(f64, f64)> {
     let r0 = rate_point_y(
-        eng, hdr, model, synthesis, lh, y, z_hat, scale_log, mask, q, num_chs, original,
-        area, pixels, stop,
+        eng, hdr, model, synthesis, lh, y, z_hat, scale_log, mask, q, num_chs, original, area,
+        pixels, stop,
     )?;
     let mut yp = y.clone();
     for v in &mut yp.data {
         *v *= 1.02;
     }
     let r1 = rate_point_y(
-        eng, hdr, model, synthesis, lh, &yp, z_hat, scale_log, mask, q, num_chs, original,
-        area, pixels, stop,
+        eng, hdr, model, synthesis, lh, &yp, z_hat, scale_log, mask, q, num_chs, original, area,
+        pixels, stop,
     )?;
     let dl = r1.bpp.ln() - r0.bpp.ln();
     if dl.abs() < 1e-9 {
@@ -549,20 +518,84 @@ pub(crate) fn luma(
     let area = Area::new(0, 0, original.w, original.h);
     let refs = {
         let r = rate_point_y(
-            eng, hdr, model, &synthesis, lh, latent, z_hat, scale_log, mask, q, num_chs,
-            original, area, pixels, stop,
+            eng, hdr, model, &synthesis, lh, latent, z_hat, scale_log, mask, q, num_chs, original,
+            area, pixels, stop,
         )?;
         (r.bpp, r.psnr, r.msssim)
     };
     let (sp, sm) = estimate_slopes(
-        eng, hdr, model, &synthesis, lh, latent, z_hat, scale_log, mask, q, num_chs,
-        original, area, pixels, stop,
+        eng, hdr, model, &synthesis, lh, latent, z_hat, scale_log, mask, q, num_chs, original,
+        area, pixels, stop,
     )?;
     let (best, _loss) = optimize_y(
-        eng, ctx, hdr, model, &synthesis, lh, latent, z_hat, scale_log, mask, q, num_chs,
-        original, area, pixels, num_ite, calc_lr(pixels), 0.7, refs, sp, sm, 0.8, stop,
+        eng,
+        ctx,
+        hdr,
+        model,
+        &synthesis,
+        lh,
+        latent,
+        z_hat,
+        scale_log,
+        mask,
+        q,
+        num_chs,
+        original,
+        area,
+        pixels,
+        num_ite,
+        calc_lr(pixels),
+        0.7,
+        refs,
+        sp,
+        sm,
+        0.8,
+        stop,
     )?;
     Ok(best)
+}
+
+/// `d(rec)` on the whole reconstruction plane — `ms_ssim_vjp` (on the
+/// `[0,1]`-scaled `area` crop, scattered back to the picture grid) plus
+/// `psnr_vjp`. This is `x_hat_grad`'s analogue.
+pub(crate) fn rec_grad(
+    eng: &Engine,
+    up: &LossUpstream,
+    rec: &Tensor<f32>,
+    original: &Tensor<f32>,
+    area: Area,
+) -> Result<Tensor<f32>> {
+    let (dx, _dy) = {
+        const INV: f32 = 1.0 / 255.0;
+        let (ah, aw) = (area.height, area.width);
+        let (mut a, mut b) = (Vec::with_capacity(ah * aw), Vec::with_capacity(ah * aw));
+        for row in 0..ah {
+            for x in 0..aw {
+                a.push(original.plane(0)[(area.y + row) * original.w + area.x + x] * INV);
+                b.push(rec.plane(0)[(area.y + row) * rec.w + area.x + x] * INV);
+            }
+        }
+        // `ms_ssim` runs on 1/255-scaled inputs, so `dx` is d/d(rec/255) — the
+        // rec-domain gradient is smaller by a further 1/255: fold that into the
+        // upstream scalar.
+        msssim::ms_ssim_vjp(
+            eng,
+            &Tensor::from_vec(1, ah, aw, b)?,
+            &Tensor::from_vec(1, ah, aw, a)?,
+            up.d_msssim as f32 * INV,
+        )?
+    };
+    let mut d_rec = Tensor::<f32>::zeros(1, rec.h, rec.w)?;
+    for row in 0..area.height {
+        for x in 0..area.width {
+            d_rec.plane_mut(0)[(area.y + row) * rec.w + area.x + x] = dx.data[row * area.width + x];
+        }
+    }
+    let d_psnr_map = psnr_vjp(up.d_psnr, rec, original, area);
+    for (a, &b) in d_rec.data.iter_mut().zip(&d_psnr_map.data) {
+        *a += b;
+    }
+    Ok(d_rec)
 }
 
 /// `d(rate_y)/d(resi)` at every position — `dL/d(resi)` with the upstream
@@ -1055,6 +1088,141 @@ mod oracle {
                     s_xy / (s_xy.abs().sqrt() * s_yy.sqrt().max(1e-30))
                 );
             }
+            if i == 1 {
+                let am = |t: &Tensor<f32>| {
+                    t.data.iter().map(|v| v.abs()).sum::<f32>() / t.data.len() as f32
+                };
+                // Is `rp.rec` the reference's `x_hat`/`rec_Y_in`? `d_rec` is
+                // computed on `rp.rec`; `x_hat_grad` on `x_hat` — a rec
+                // mismatch misdirects the metric Jacobian.
+                // `rec.{n}` numbers decoder calls: rec.0 is the baseline ref
+                // point, rec.{i+1} is iteration `i`'s rec_Y_in — so iter `i`'s
+                // rec is `rec.{i+1}`, not `rec.{i}`.
+                let want_rec = dump[&format!("rdlr.rec.{}.x_hat", i + 1)].tensor_f32();
+                let mut recd = 0.0f64;
+                let mut reca = 0.0f64;
+                for k in 0..rp.rec.data.len().min(want_rec.data.len()) {
+                    recd += (rp.rec.data[k] - want_rec.data[k]).abs() as f64;
+                    reca += want_rec.data[k].abs() as f64;
+                }
+                eprintln!(
+                    "  rec vs x_hat: absdiff {:.3e} ref absmean {:.3e}",
+                    recd / want_rec.data.len() as f64,
+                    reca / want_rec.data.len() as f64
+                );
+                // `rp.y_hat` vs the reference `y_hat` — a systematic shift
+                // changes the synth_tape activation pattern → ref_synth off.
+                let want_yh1 = dump[&format!("rdlr.cas.{}.y_hat", i + 3)].tensor_f32();
+                let mut yhd = 0.0f64;
+                for k in 0..rp.y_hat.data.len().min(want_yh1.data.len()) {
+                    yhd += (rp.y_hat.data[k] - want_yh1.data[k]).abs() as f64;
+                }
+                eprintln!(
+                    "  y_hat vs cas.{}.y_hat: absdiff {:.3e}",
+                    i + 3,
+                    yhd / want_yh1.data.len() as f64
+                );
+                let want_dr = dump[&format!("rdlr.{i}.x_hat_grad")].tensor_f32();
+                // Feed the reference's own `x_hat_grad` through the synthesis
+                // backward — if downstream is right, `synth - d_resi` should
+                // then equal `y_hat_grad` (isolating `d_rec` as the sole gap).
+                let ref_synth = synthesis
+                    .backward(rp.synth_tape.as_ref().unwrap(), &want_dr)
+                    .unwrap();
+                let want_dyh = dump[&format!("rdlr.{i}.y_hat_grad")].tensor_f32();
+                let (mut e_xy, mut e_xx, mut e_yy) = (0.0f64, 0.0f64, 0.0f64);
+                for k in 0..ref_synth.data.len().min(want_dyh.data.len()) {
+                    let a = ref_synth.data[k] as f64 - want_dresi.data[k] as f64;
+                    let b = want_dyh.data[k] as f64;
+                    e_xy += a * b;
+                    e_xx += a * a;
+                    e_yy += b * b;
+                }
+                eprintln!(
+                    "  [ref x_hat_grad] synth-resi vs y_hat_grad: corr {:.4} scale {:.3}",
+                    e_xy / (e_xx.sqrt() * e_yy.sqrt()),
+                    e_xy / e_yy,
+                );
+                let my_dr = rec_grad(eng, &up, &rp.rec, &original, area).unwrap();
+                let (mut s_xy, mut s_xx, mut s_yy) = (0.0f64, 0.0f64, 0.0f64);
+                for k in 0..my_dr.data.len() {
+                    let (a, b) = (my_dr.data[k] as f64, want_dr.data[k] as f64);
+                    s_xy += a * b;
+                    s_xx += a * a;
+                    s_yy += b * b;
+                }
+                // Edge-vs-interior: if the reference conv pads (same-size maps),
+                // `x_hat_grad` is non-trivial in the outer 5px while the
+                // valid-conv backward leaves it ~0.
+                let (h, w) = (my_dr.h, my_dr.w);
+                let (mut em, mut ew, mut im, mut iw) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+                for y in 0..h {
+                    for x in 0..w {
+                        let edge = y < 5 || x < 5 || y + 5 >= h || x + 5 >= w;
+                        let (a, b) = (my_dr.data[y * w + x], want_dr.data[y * w + x]);
+                        if edge {
+                            em += a.abs() as f64;
+                            ew += b.abs() as f64;
+                        } else {
+                            im += a.abs() as f64;
+                            iw += b.abs() as f64;
+                        }
+                    }
+                }
+                eprintln!(
+                    "  d_rec edge mine {em:.4e} ref {ew:.4e} | interior mine {im:.4e} ref {iw:.4e}"
+                );
+                // Fit `x_hat_grad = c1·ms_grad + c2·psnr_grad` by least squares.
+                // If the Jacobians are right, `c2/c1` should equal the
+                // reference's `d_psnr/d_msssim` upstream ratio — isolating a
+                // scalar-mixing error from a Jacobian error.
+                {
+                    let u = |m: f64, p: f64| LossUpstream {
+                        d_msssim: m,
+                        d_psnr: p,
+                        d_rate: 0.0,
+                        loss: 0.0,
+                    };
+                    let mg = rec_grad(eng, &u(1.0, 0.0), &rp.rec, &original, area).unwrap();
+                    let pg = rec_grad(eng, &u(0.0, 1.0), &rp.rec, &original, area).unwrap();
+                    let (mut mm, mut pp, mut mp, mut mw, mut pw) =
+                        (0.0f64, 0.0f64, 0.0f64, 0.0f64, 0.0f64);
+                    for k in 0..mg.data.len() {
+                        let (m, p, w) =
+                            (mg.data[k] as f64, pg.data[k] as f64, want_dr.data[k] as f64);
+                        mm += m * m;
+                        pp += p * p;
+                        mp += m * p;
+                        mw += m * w;
+                        pw += p * w;
+                    }
+                    let det = mm * pp - mp * mp;
+                    let (c1, c2) = ((mw * pp - pw * mp) / det, (pw * mm - mw * mp) / det);
+                    // Residual R² of the two-Jacobian model on `x_hat_grad`.
+                    let (mut res, mut tot) = (0.0f64, 0.0f64);
+                    for k in 0..mg.data.len() {
+                        let fit = c1 * mg.data[k] as f64 + c2 * pg.data[k] as f64;
+                        res += (want_dr.data[k] as f64 - fit).powi(2);
+                        tot += (want_dr.data[k] as f64).powi(2);
+                    }
+                    eprintln!(
+                        "  upstream fit: c1 {:.4e} c2 {:.4e} R² {:.4} | mine d_ms {:.3e} d_psnr {:.3e}",
+                        c1,
+                        c2,
+                        1.0 - res / tot,
+                        up.d_msssim,
+                        up.d_psnr,
+                    );
+                }
+                eprintln!(
+                    "  d_rec vs x_hat_grad: corr {:.4} scale {:.3} | gm_resi {:.3e} resi_hat {:.3e} y_hat {:.3e}",
+                    s_xy / (s_xx.sqrt() * s_yy.sqrt()),
+                    s_xy / s_yy,
+                    am(&want_dresi),
+                    am(&dump[&format!("rdlr.{i}.resi_hat_grad")].tensor_f32()),
+                    am(&dump[&format!("rdlr.{i}.y_hat_grad")].tensor_f32()),
+                );
+            }
             let want_dy = dump[&format!("rdlr.{i}.cas_y_in_grad")].tensor_f32();
             let want_leaf = dump[&format!("rdlr.{i}.y_grad")].tensor_f32();
             for nm in ["x_hat_grad", "y_hat_grad"] {
@@ -1090,6 +1258,14 @@ mod oracle {
             let want_psnr = dump[&format!("rdlr.gcrp.{}.psnr", i + 1)].f32s() as f64;
             let want_msssim = dump[&format!("rdlr.gcrp.{}.msssim", i + 1)].f32s() as f64;
             let want_ry = dump[&format!("rdlr.gm.{}.rate_y", i + 1)].f32s() as f64;
+            if i == 0 {
+                eprintln!(
+                    "  msssim mine {:.7} ref {:.7} (diff {:.2e})",
+                    rp.msssim,
+                    want_msssim,
+                    rp.msssim - want_msssim
+                );
+            }
             assert!(
                 (rp.rate_y - want_ry).abs() < want_ry * 0.002,
                 "iter {i}: rate_y {} vs reference {want_ry}",
@@ -1128,31 +1304,44 @@ mod oracle {
                     *v = ((k * 7919) % 977) as f32 / 977.0 - 0.5;
                 }
                 let d_yh = synthesis.backward(&tape, &d_rec).unwrap();
-                for &(ch, py, px) in &[(0, 10, 10), (80, 20, 20), (159, 40, 30)] {
-                    let mut yp = rp.y_hat.clone();
-                    let i = (ch * yp.h + py) * yp.w + px;
-                    let e = 1e-2f32;
-                    yp.data[i] += e;
-                    let rec_p = synthesis
-                        .forward_with(
-                            eng,
-                            &BTensor::from_planar(&yp, eng.tier.block()).unwrap(),
-                            original.h,
-                            original.w,
-                            &enough::Unstoppable,
-                        )
-                        .unwrap();
-                    let fd: f32 = d_rec
-                        .data
-                        .iter()
-                        .zip(&rec_p.data)
-                        .zip(&rec_t.data)
-                        .map(|((&d, &rp_), &rt)| d * (rp_ - rt))
-                        .sum::<f32>()
-                        / e;
-                    let got = d_yh.data[i];
-                    eprintln!("  adjoint ({ch},{py},{px}): bwd {got:.4e}  fd {fd:.4e}");
+                // Full inner-product adjoint: a single random `v` verifies the
+                // whole backward — ⟨d_yh, v⟩ must equal ⟨d_rec, rec(y+εv)−rec(y)⟩/ε.
+                let mut v = rp.y_hat.clone();
+                for (k, x) in v.data.iter_mut().enumerate() {
+                    *x = ((k * 2654435761usize) % 997) as f32 / 997.0 - 0.5;
                 }
+                let lhs: f64 = d_yh
+                    .data
+                    .iter()
+                    .zip(&v.data)
+                    .map(|(&a, &b)| a as f64 * b as f64)
+                    .sum();
+                let mut yp = rp.y_hat.clone();
+                let e = 1e-2f32;
+                for (x, &b) in yp.data.iter_mut().zip(&v.data) {
+                    *x += e * b;
+                }
+                let rec_p = synthesis
+                    .forward_with(
+                        eng,
+                        &BTensor::from_planar(&yp, eng.tier.block()).unwrap(),
+                        original.h,
+                        original.w,
+                        &enough::Unstoppable,
+                    )
+                    .unwrap();
+                let rhs: f64 = d_rec
+                    .data
+                    .iter()
+                    .zip(&rec_p.data)
+                    .zip(&rec_t.data)
+                    .map(|((&d, &rp_), &rt)| d as f64 * (rp_ - rt) as f64)
+                    .sum::<f64>()
+                    / e as f64;
+                eprintln!(
+                    "  synthesis adjoint: bwd {lhs:.4e}  fd {rhs:.4e}  ratio {:.3}",
+                    lhs / rhs
+                );
             }
         }
         // End-to-end driver smoke: `optimize_y` on the reference's own
@@ -1197,7 +1386,10 @@ mod oracle {
                 "optimize_y: best_loss {best_loss:.4} (ref iter-7 {ref_last_loss:.4}), best y absmean {:.4}",
                 best.data.iter().map(|v| v.abs()).sum::<f32>() / best.data.len() as f32
             );
-            assert!(best_loss.is_finite() && best_loss < 0.0, "optimize_y best_loss {best_loss}");
+            assert!(
+                best_loss.is_finite() && best_loss < 0.0,
+                "optimize_y best_loss {best_loss}"
+            );
         }
     }
 }

@@ -99,23 +99,24 @@ fn gaussian_filter(
     (buf, h, w)
 }
 
-/// `avg_pool2d(x, kernel_size = 2, stride = 2, padding = [h % 2, w % 2])`: zero pad of `p`
-/// samples on *every* side (the pad rows at the bottom/right are never inside a window),
-/// each output the sum of its 2x2 window over 4 (`count_include_pad` is on). For odd `h` /
-/// `w` the first row / column is therefore averaged at half weight.
+/// `avg_pool2d(x, kernel_size = 2, stride = 2, padding = [h % 2, w % 2])` —
+/// non-overlapping 2x2 windows with the input's odd side zero-padded at the
+/// top / left (pytorch `avg_pool2d` pads `padding` on both sides, but the
+/// trailing pad lies beyond the last window, so the effective offset is the
+/// leading one). The divisor stays 4; an odd side yields ceil dims.
 fn avg_pool2(src: &[f32], h: usize, w: usize) -> (Vec<f32>, usize, usize) {
     let (ph, pw) = (h % 2, w % 2);
-    let (oh, ow) = ((h + 2 * ph - 2) / 2 + 1, (w + 2 * pw - 2) / 2 + 1);
+    let (oh, ow) = ((h + 1) / 2, (w + 1) / 2);
     let mut out = alloc::vec![0.0f32; oh * ow];
     for oy in 0..oh {
         for ox in 0..ow {
             let mut acc = 0.0f64;
             for dy in 0..2 {
-                let Some(sy) = (2 * oy + dy).checked_sub(ph).filter(|&y| y < h) else {
-                    continue;
-                };
                 for dx in 0..2 {
-                    if let Some(sx) = (2 * ox + dx).checked_sub(pw).filter(|&x| x < w) {
+                    if let (Some(sy), Some(sx)) = (
+                        (2 * oy + dy).checked_sub(ph).filter(|&v| v < h),
+                        (2 * ox + dx).checked_sub(pw).filter(|&v| v < w),
+                    ) {
                         acc += src[sy * w + sx] as f64;
                     }
                 }
@@ -266,18 +267,21 @@ fn gaussian_backward(d: &[f32], h: usize, w: usize, win: &[f32; WIN]) -> Vec<f32
     conv_rows_backward(&d2, 0, 0, win, h - (WIN - 1), w)
 }
 
-/// `avg_pool2`'s input gradient: each 2x2 window's output grad spreads over its
-/// four samples (`count_include_pad` — the padded sample takes no grad).
+/// `avg_pool2`'s input gradient: each 2x2 window's output grad spreads over
+/// its four samples at the forward's `h % 2` / `w % 2` leading offset.
 fn avg_pool2_backward(d: &[f32], h: usize, w: usize) -> Vec<f32> {
-    let (ph, pw) = (h.div_ceil(2), w.div_ceil(2));
+    let (ph, pw) = (h % 2, w % 2);
+    let (oh, ow) = ((h + 1) / 2, (w + 1) / 2);
     let mut din = vec![0.0f32; h * w];
-    for y in 0..ph {
-        for x in 0..pw {
-            let g = d[y * pw + x] / 4.0;
+    for y in 0..oh {
+        for x in 0..ow {
+            let g = d[y * ow + x] / 4.0;
             for dy in 0..2 {
                 for dx in 0..2 {
-                    let (sy, sx) = (2 * y + dy, 2 * x + dx);
-                    if sy < h && sx < w {
+                    if let (Some(sy), Some(sx)) = (
+                        (2 * y + dy).checked_sub(ph).filter(|&v| v < h),
+                        (2 * x + dx).checked_sub(pw).filter(|&v| v < w),
+                    ) {
                         din[sy * w + sx] += g;
                     }
                 }
@@ -459,38 +463,60 @@ mod tests {
         Tensor::from_vec(1, h, w, data).unwrap()
     }
 
-    /// `ms_ssim_vjp`'s input gradient against central finite differences of
-    /// `ms_ssim` — `d·(f(x+e) − f(x−e))/(2e)` per position.
+    /// `ms_ssim_vjp`'s input gradient against a directional finite difference of
+    /// `ms_ssim` — `⟨vjp, v⟩` vs `(f(x+εv) − f(x−εv))/(2ε)` for a random `v`. The
+    /// inner product tests the whole field at once and averages out the f32
+    /// output quantization (~1e-7 ulp on a ~1.0 score) that swamps per-position
+    /// differences at small gradient magnitudes.
     #[test]
     fn vjp_matches_finite_differences() {
         let eng = Engine::new();
         let (h, w) = (200, 200);
         let x = plane(h, w, |y, x| ((x * 37 + y * 91) % 251) as f32 / 251.0);
         let y0 = plane(h, w, |y, x| ((x * 53 + y * 17 + 11) % 241) as f32 / 241.0);
-        let (dx, _dy) = ms_ssim_vjp(&eng, &x, &y0, 1.0).unwrap();
-        let e = 1e-3f32;
-        let mut worst = 0.0f32;
-        for &(px, py) in &[
-            (5, 5),
-            (40, 40),
-            (100, 100),
-            (150, 60),
-            (199, 199),
-            (77, 123),
-        ] {
-            let i = py * w + px;
-            let mut xp = x.clone();
-            xp.data[i] += e;
-            let mut xm = x.clone();
-            xm.data[i] -= e;
-            let fd =
-                (ms_ssim(&eng, &xp, &y0).unwrap() - ms_ssim(&eng, &xm, &y0).unwrap()) / (2.0 * e);
-            let got = dx.data[i];
-            let err = (got - fd).abs();
-            worst = worst.max(err / fd.abs().max(1e-9));
-            eprintln!("pos ({px},{py}): vjp {got:.4e}  fd {fd:.4e}  rel {err:.3e}");
+        let (dx, dy) = ms_ssim_vjp(&eng, &x, &y0, 1.0).unwrap();
+        let mut v = x.clone();
+        for (i, p) in v.data.iter_mut().enumerate() {
+            *p = ((i * 2_654_435_761usize) % 997) as f32 / 997.0 - 0.5;
         }
-        assert!(worst < 0.05, "vjp/fd relative error {worst}");
+        let lhs: f64 = dx
+            .data
+            .iter()
+            .zip(&v.data)
+            .map(|(&a, &b)| a as f64 * b as f64)
+            .sum();
+        let e = 1e-2f32;
+        let mut xp = x.clone();
+        let mut xm = x.clone();
+        for ((p, m), &b) in xp.data.iter_mut().zip(&mut xm.data).zip(&v.data) {
+            *p += e * b;
+            *m -= e * b;
+        }
+        let rhs = (ms_ssim(&eng, &xp, &y0).unwrap() - ms_ssim(&eng, &xm, &y0).unwrap()) / (2.0 * e);
+        eprintln!(
+            "x-dir: vjp {lhs:.6e}  fd {rhs:.6e}  rel {:.3e}",
+            (lhs - rhs as f64).abs() / (rhs as f64).abs()
+        );
+        assert!((lhs - rhs as f64).abs() < 0.02 * (rhs as f64).abs());
+        // And the y (reconstruction-side) gradient the same way.
+        let lhs: f64 = dy
+            .data
+            .iter()
+            .zip(&v.data)
+            .map(|(&a, &b)| a as f64 * b as f64)
+            .sum();
+        let mut yp = y0.clone();
+        let mut ym = y0.clone();
+        for ((p, m), &b) in yp.data.iter_mut().zip(&mut ym.data).zip(&v.data) {
+            *p += e * b;
+            *m -= e * b;
+        }
+        let rhs = (ms_ssim(&eng, &x, &yp).unwrap() - ms_ssim(&eng, &x, &ym).unwrap()) / (2.0 * e);
+        eprintln!(
+            "y-dir: vjp {lhs:.6e}  fd {rhs:.6e}  rel {:.3e}",
+            (lhs - rhs as f64).abs() / (rhs as f64).abs()
+        );
+        assert!((lhs - rhs as f64).abs() < 0.02 * (rhs as f64).abs());
     }
 
     #[test]
@@ -523,8 +549,8 @@ mod tests {
         assert_eq!(ms_ssim(&eng, &a, &a).unwrap(), 1.0);
     }
 
-    /// `avg_pool2d(2, 2, padding = [h % 2, w % 2])` on an odd-sized plane: the first row and
-    /// column carry half weight, the divisor stays 4.
+    /// `avg_pool2d(x, 2, padding = [h % 2, w % 2])` on an odd-sized plane: the
+    /// leading pad gives (0,0) only input (0,0), the divisor stays 4.
     #[test]
     fn odd_size_pool_pads_at_the_start() {
         let (out, oh, ow) = avg_pool2(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0], 3, 3);
@@ -532,6 +558,18 @@ mod tests {
         // (0,0): rows -1,0 x cols -1,0 -> only (0,0)=1 -> 1/4; (0,1): row 0, cols 1,2 -> 5/4;
         // (1,0): rows 1,2 col 0 -> (4+7)/4; (1,1): rows 1,2 cols 1,2 -> (5+6+8+9)/4.
         assert_eq!(out, [0.25, 1.25, 2.75, 7.0]);
+    }
+
+    /// `avg_pool2_backward` must mirror the forward's odd-side pad offset:
+    /// on a 3x3 input, output (0,0) covers only input (0,0), so d 4.0 -> 1.0
+    /// there and nothing elsewhere in its window.
+    #[test]
+    fn odd_size_pool_backward_shifts_windows() {
+        let d = avg_pool2_backward(&[4.0, 0.0, 0.0, 0.0], 3, 3);
+        assert_eq!(d, [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        // Output (1,1) covers inputs (1,1),(1,2),(2,1),(2,2) at quarter weight.
+        let d = avg_pool2_backward(&[0.0, 0.0, 0.0, 8.0], 3, 3);
+        assert_eq!(d, [0.0, 0.0, 0.0, 0.0, 2.0, 2.0, 0.0, 2.0, 2.0]);
     }
 
     #[test]
