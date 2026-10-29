@@ -248,11 +248,14 @@ pub(crate) fn backward(
                 b.push(rp.rec.plane(0)[(area.y + row) * rp.rec.w + area.x + x] * INV);
             }
         }
+        // `ms_ssim` runs on 1/255-scaled inputs, so `dx` is d/d(rec/255) — the
+        // rec-domain gradient is smaller by a further 1/255: fold that into the
+        // upstream scalar.
         msssim::ms_ssim_vjp(
             eng,
             &Tensor::from_vec(1, ah, aw, b)?,
             &Tensor::from_vec(1, ah, aw, a)?,
-            up.d_msssim as f32,
+            up.d_msssim as f32 * INV,
         )?
     };
     // The ms-ssim grad lives on the `area` crop — scatter it into the picture grid.
@@ -277,6 +280,14 @@ pub(crate) fn backward(
     let mut d_out_yhat = d_yhat_synth;
     for (a, &b) in d_out_yhat.data.iter_mut().zip(&d_resi.data) {
         *a -= b;
+    }
+    if cfg!(debug_assertions) {
+        eprintln!(
+            "  d_rec am {:.3e}  d_yhat_synth am {:.3e}  d_out_yhat am {:.3e}",
+            d_rec.data.iter().map(|v| v.abs()).sum::<f32>() / d_rec.data.len() as f32,
+            0.0,
+            d_out_yhat.data.iter().map(|v| v.abs()).sum::<f32>() / d_out_yhat.data.len() as f32
+        );
     }
     // d(y) — the MCM's internal grad plus the resi term's direct +1.
     let mut d_y = ctx.compress_backward(
@@ -835,6 +846,14 @@ mod oracle {
             .unwrap();
             let want_dy = dump[&format!("rdlr.{i}.cas_y_in_grad")].tensor_f32();
             let want_leaf = dump[&format!("rdlr.{i}.y_grad")].tensor_f32();
+            for nm in ["x_hat_grad", "y_hat_grad"] {
+                if let Some(d) = dump.get(&format!("rdlr.{i}.{nm}")) {
+                    let t = d.tensor_f32();
+                    let am =
+                        t.data.iter().map(|v| v.abs()).sum::<f32>() / t.data.len() as f32;
+                    eprintln!("iter {i} ref {nm} absmean {am:.3e}");
+                }
+            }
             let (mut md_y, mut md_leaf) = (0.0f32, 0.0f32);
             let (mut am_y, mut am_w) = (0.0f64, 0.0f64);
             for ch in 0..160 {

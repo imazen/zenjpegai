@@ -261,6 +261,9 @@ pub trait Quantiser {
     /// multiplicative (gain · quality-map · RVS), so its derivative is the product
     /// `quantize_resi(1.0)` evaluated at the position.
     fn ste_gain(&self, ch: usize, index: usize) -> f32;
+    /// `d(dequantize_resi(x))/dx` at `(ch, index)` — `dequantize_resi` is likewise
+    /// multiplicative, so the derivative is `dequantize_resi(1.0)` at the position.
+    fn deq_gain(&self, ch: usize, index: usize) -> f32;
 }
 
 /// The gain unit alone: `round_ties_even(clamp(x * scaler))`, then `q / (scaler + 1e-9)`.
@@ -283,6 +286,10 @@ impl Quantiser for GainQuantiser<'_> {
     #[inline]
     fn ste_gain(&self, ch: usize, _index: usize) -> f32 {
         self.scaler[ch]
+    }
+    #[inline]
+    fn deq_gain(&self, ch: usize, _index: usize) -> f32 {
+        1.0 / (self.scaler[ch] + 1e-9f32)
     }
 }
 
@@ -611,9 +618,12 @@ impl ContextModel {
                         } else {
                             0.0
                         };
-                        // STE: d(diff) = d(resi_hat)·quantize_gain·coded.
+                        // STE: `resi_rq` gets `d_out_resihat` (the resi term) plus
+                        // `d(resi_dq)·deq_gain` (the dequantize path from y_hat);
+                        // `d(diff) = d(resi_rq)·ste_gain`, gated by the code mask.
                         let dd = if inside && tape.coded[i] && ch < num_chs {
-                            d_out_resihat.data[gi] * q.ste_gain(ch, sy * w + sx)
+                            q.ste_gain(ch, sy * w + sx)
+                                * (d_out_resihat.data[gi] + dyh * q.deq_gain(ch, sy * w + sx))
                         } else {
                             0.0
                         };

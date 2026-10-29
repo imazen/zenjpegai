@@ -459,6 +459,33 @@ mod tests {
         Tensor::from_vec(1, h, w, data).unwrap()
     }
 
+    /// `ms_ssim_vjp`'s input gradient against central finite differences of
+    /// `ms_ssim` — `d·(f(x+e) − f(x−e))/(2e)` per position.
+    #[test]
+    fn vjp_matches_finite_differences() {
+        let eng = Engine::new();
+        let (h, w) = (200, 200);
+        let x = plane(h, w, |y, x| ((x * 37 + y * 91) % 251) as f32 / 251.0);
+        let y0 = plane(h, w, |y, x| ((x * 53 + y * 17 + 11) % 241) as f32 / 241.0);
+        let (dx, _dy) = ms_ssim_vjp(&eng, &x, &y0, 1.0).unwrap();
+        let e = 1e-3f32;
+        let mut worst = 0.0f32;
+        for &(px, py) in &[(5, 5), (40, 40), (100, 100), (150, 60), (199, 199), (77, 123)] {
+            let i = py * w + px;
+            let mut xp = x.clone();
+            xp.data[i] += e;
+            let mut xm = x.clone();
+            xm.data[i] -= e;
+            let fd = (ms_ssim(&eng, &xp, &y0).unwrap() - ms_ssim(&eng, &xm, &y0).unwrap())
+                / (2.0 * e);
+            let got = dx.data[i];
+            let err = (got - fd).abs();
+            worst = worst.max(err / fd.abs().max(1e-9));
+            eprintln!("pos ({px},{py}): vjp {got:.4e}  fd {fd:.4e}  rel {err:.3e}");
+        }
+        assert!(worst < 0.05, "vjp/fd relative error {worst}");
+    }
+
     #[test]
     fn kernel_is_the_reference_window() {
         // `_fspecial_gauss_1d(11, 1.5)` as the installed pytorch_msssim computes it in f32.

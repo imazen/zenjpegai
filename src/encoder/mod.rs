@@ -1792,6 +1792,12 @@ impl mcm::Quantiser for EncoderQuantiser<'_> {
     fn ste_gain(&self, ch: usize, index: usize) -> f32 {
         self.scales.quantize(self.quality_map, ch, index, 1.0)
     }
+
+    /// `d(dequantize_resi(x))/dx` — `dequantize_resi(1.0)` at the position.
+    #[inline]
+    fn deq_gain(&self, ch: usize, index: usize) -> f32 {
+        self.scales.dequantize(self.quality_map, ch, index, 1.0)
+    }
 }
 
 /// `tiling.get_data` + `tiling.assign_data`: copy `src[:, oy.., ox..]` into `dst` at `core`,
