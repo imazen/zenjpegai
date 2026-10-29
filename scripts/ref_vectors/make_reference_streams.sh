@@ -411,6 +411,24 @@ if [ "$SET" = numchs ] || [ "$SET" = all ]; then
   enc_fixed enc_img01_bop_m1_b0_y80u40 $IMG01 1 0 cfg/tools_off.json cfg/profiles/base.json \
       $P.model_y.common_modules.num_chs 80 $P.model_uv.common_modules.num_chs 40
 fi
+if [ "$SET" = hoptools ] || [ "$SET" = all ]; then
+  # HOP encodes with the coding tools on: the encoder set covers only tools-off HOP, so the
+  # tool paths under the high profile (incl. the eICCI HOP network bank, never selected by a
+  # BOP stream) had no oracle. Gate: byte-identical stream or same-length one-step moves, as
+  # in tests/encode_ref.rs.
+  enc_fixed enc_img30_hop_m2_b0_rvs $IMG30 2 0 cfg/tools_off.json cfg/tools/ResVarScale.json cfg/profiles/high.json
+  enc_fixed enc_img30_hop_m2_b0_rvsonly $IMG30 2 0 cfg/tools_off.json "$HERE/cfg/rvs_only.json" cfg/profiles/high.json
+  enc_fixed enc_img30_hop_m2_b0_grfsonly $IMG30 2 0 cfg/tools_off.json "$HERE/cfg/grfs_only.json" cfg/profiles/high.json
+  enc_fixed enc_img30_hop_m2_b0_lsbs $IMG30 2 0 cfg/tools_off.json cfg/tools/LSBS.json cfg/profiles/high.json
+  enc_fixed enc_img30_hop_m2_b0_lef $IMG30 2 0 cfg/tools_off.json cfg/tools/LEF.json cfg/profiles/high.json
+  enc_fixed enc_img30_hop_m2_b0_threads8 $IMG30 2 0 cfg/tools_off.json cfg/tools/ECThread8.json cfg/profiles/high.json
+  enc_fixed enc_img30_hop_m2_b0_eicci $IMG30 2 0 cfg/tools_off.json cfg/tools/eICCI.json cfg/profiles/high.json
+  enc_fixed enc_img30_hop_m2_b0_efelin $IMG30 2 0 cfg/tools_off.json cfg/tools/EFElinear.json cfg/profiles/high.json
+  enc_fixed enc_img30_hop_m2_b0_on $IMG30 2 0 cfg/tools_on.json cfg/profiles/high.json
+  # 2096x1400: the tiled HOP analysis path, and independent regions under HOP.
+  enc_fixed enc_img01_hop_m2_b0 $IMG01 2 0 cfg/tools_off.json cfg/profiles/high.json
+  enc_fixed enc_img01_hop_m2_b0_indregions $IMG01 2 0 cfg/tools_off.json cfg/tools/IndependentRegions.json cfg/profiles/high.json
+fi
 if [ "$SET" = cubeflags ] || [ "$SET" = all ]; then
   # Decoder-side dumps for the encoder set's use_cube_flags = 1 streams (beta -1069; the
   # streams themselves come from `make_reference_streams.sh encoder`). Non-region, so the

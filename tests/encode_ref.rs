@@ -230,6 +230,14 @@ const VECTORS_BASE: &[(&str, &str, u8, OperatingPoint, i32)] = &[
         OperatingPoint::Bop,
         0,
     ),
+    // 2096x1400 under the high profile: the tiled HOP analysis path (`hoptools` set).
+    (
+        "enc_img01_hop_m2_b0",
+        "00001_TE_2096x1400_8bit_sRGB.png",
+        2,
+        OperatingPoint::Hop,
+        0,
+    ),
 ];
 
 const IMG30: &str = "00030_TE_560x888_8bit_sRGB.png";
@@ -329,6 +337,76 @@ const VECTORS_TOOLS: &[ToolVector] = &[
         IMG01,
         1,
         OperatingPoint::Bop,
+        0,
+        |p| EncodeParams {
+            regions: Some(RegionMode::Independent),
+            ..p
+        },
+    ),
+    // The same tool matrix under the high profile (`hoptools` set): RVS/GRFS, LSBS, LEF, eight
+    // ANS threads, the eICCI HOP network bank, EFE linear, the whole `tools_on` set, and
+    // independent regions on the tiled 2096x1400 picture.
+    (
+        "enc_img30_hop_m2_b0_rvs",
+        IMG30,
+        2,
+        OperatingPoint::Hop,
+        0,
+        |p| EncodeParams {
+            rvs: true,
+            grfs: true,
+            ..p
+        },
+    ),
+    (
+        "enc_img30_hop_m2_b0_rvsonly",
+        IMG30,
+        2,
+        OperatingPoint::Hop,
+        0,
+        |p| EncodeParams { rvs: true, ..p },
+    ),
+    (
+        "enc_img30_hop_m2_b0_grfsonly",
+        IMG30,
+        2,
+        OperatingPoint::Hop,
+        0,
+        |p| EncodeParams { grfs: true, ..p },
+    ),
+    (
+        "enc_img30_hop_m2_b0_lsbs",
+        IMG30,
+        2,
+        OperatingPoint::Hop,
+        0,
+        |p| EncodeParams { lsbs: true, ..p },
+    ),
+    (
+        "enc_img30_hop_m2_b0_lef",
+        IMG30,
+        2,
+        OperatingPoint::Hop,
+        0,
+        |p| EncodeParams { lef: true, ..p },
+    ),
+    (
+        "enc_img30_hop_m2_b0_threads8",
+        IMG30,
+        2,
+        OperatingPoint::Hop,
+        0,
+        |p| EncodeParams {
+            num_threads_z: 8,
+            num_threads_r: 8,
+            ..p
+        },
+    ),
+    (
+        "enc_img01_hop_m2_b0_indregions",
+        IMG01,
+        2,
+        OperatingPoint::Hop,
         0,
         |p| EncodeParams {
             regions: Some(RegionMode::Independent),
@@ -687,6 +765,88 @@ fn encoder_end_to_end_matches_reference() {
             "   vs a decode of the reference stream: {differing} of {} samples differ, worst {worst}",
             ours.data.len()
         );
+    }
+}
+
+/// The post-filter coding tools under the high profile (`hoptools` set): eICCI picks its
+/// models from the HOP bank, EFE linear solves the same systems, `on` is the whole
+/// `tools_on` set. These cannot sit in the shared tables: `encode_latents` has no source
+/// planes to run the searches on, and the deterministic f64 solves legitimately pick
+/// different filters than the reference's nondeterministic f32 `lstsq` draw, so
+/// byte-identity is only demanded where the decisions can still coincide (eICCI — its
+/// selection is a search over the shipped bank, not a least-squares solve).
+#[test]
+fn hop_post_filters_encode_end_to_end() {
+    let cases: &[(&str, Tools)] = &[
+        (
+            "enc_img30_hop_m2_b0_eicci",
+            |p| EncodeParams {
+                eicci: Some(EicciConfig::default()),
+                ..p
+            },
+        ),
+        (
+            "enc_img30_hop_m2_b0_efelin",
+            |p| EncodeParams {
+                efe_linear: true,
+                ..p
+            },
+        ),
+        (
+            "enc_img30_hop_m2_b0_on",
+            |p| EncodeParams {
+                rvs: true,
+                grfs: true,
+                lsbs: true,
+                lef: true,
+                efe_linear: true,
+                efe_nonlinear: true,
+                eicci: Some(EicciConfig::default()),
+                ..p
+            },
+        ),
+    ];
+    let picture = source(IMG30);
+    let dec = zenjpegai::Decoder::new(ref_root().join("models"));
+    for &(vector, tools) in cases {
+        let params = tools(EncodeParams {
+            model_id: 2,
+            beta_displacement_log: [0, 0],
+            op: OperatingPoint::Hop,
+            ..Default::default()
+        });
+        let enc = Encoder::new(ref_root().join("models"));
+        let (stream, traces) = enc
+            .encode_traced_with(picture.clone(), params, None)
+            .unwrap();
+        let reference = std::fs::read(vector_dir(vector).join("stream.bits")).unwrap();
+        let ratio = stream.len() as f64 / reference.len() as f64;
+        println!(
+            "{vector}: {} bytes, reference {} ({:+.3} %)",
+            stream.len(),
+            reference.len(),
+            (ratio - 1.0) * 100.0,
+        );
+        // The tools' own TON overhead can only grow (better filters are bigger); the
+        // entropy payload must stay within the usual 0.5 % of the reference's total.
+        assert!(
+            (ratio - 1.0).abs() < 0.005,
+            "{vector}: stream size differs from the reference by more than 0.5 %"
+        );
+        if vector == "enc_img30_hop_m2_b0_eicci" {
+            assert_eq!(stream, reference, "{vector}: HOP eICCI selection must match");
+        }
+        // Our stream must decode, and score at least the reference stream's PSNR on the
+        // source (the documented deviation picks *better* filters, never worse).
+        let ours = dec.decode(&stream).unwrap();
+        let theirs = dec.decode(&reference).unwrap();
+        let (p_ours, p_ref) = (psnr_vs_source(&ours, &picture), psnr_vs_source(&theirs, &picture));
+        println!("{vector}: PSNR vs source ours {p_ours:.4} dB, reference {p_ref:.4} dB");
+        assert!(
+            p_ours >= p_ref - 0.001,
+            "{vector}: our decisions score {p_ours:.4} dB vs the reference's {p_ref:.4} dB"
+        );
+        let _ = traces;
     }
 }
 
