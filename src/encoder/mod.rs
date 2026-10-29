@@ -714,11 +714,6 @@ impl Encoder {
             .flatten()
             .map(|(v, h)| (v as usize, h as usize));
         let mut trials = 0usize;
-        // One analysis per model; every displacement re-codes from its latents. The second
-        // return is the rate the search compares against: the coded size, or the `ECLibLH`
-        // likelihood estimate when `params.rate_estimate` asks for it.
-        let mut latents: Vec<Option<ModelLatents>> =
-            (0..model::MODEL_BETAS.len()).map(|_| None).collect();
         // `org_img_i` of the post-filters' `compress`, computed once for the final encode;
         // the rate trials leave the tools off so their stream sizes never carry a tool
         // header.
@@ -730,34 +725,34 @@ impl Encoder {
             .is_some()
             .then(|| filters::icci::org_planes(src, &meta))
             .transpose()?;
-        let code = |ccs_model: usize,
-                    beta: i32,
-                    final_run: bool,
-                    latents: &mut [Option<ModelLatents>],
-                    trials: &mut usize|
+        // One model's analysis pass: the luma and chroma transforms run concurrently (the
+        // chroma path reads only its own plane and checkpoints).
+        let analyse_model = |ccs_model: usize| -> Result<ModelLatents> {
+            let set = self.model_set(ccs_model, op)?;
+            let analyse = |ccs| {
+                self.analyse_component(
+                    &set,
+                    ccs,
+                    [&input.luma, &input.chroma][ccs],
+                    independent,
+                    stop,
+                )
+            };
+            #[cfg(feature = "parallel")]
+            let (a, b) = rayon::join(|| analyse(0), || analyse(1));
+            #[cfg(not(feature = "parallel"))]
+            let (a, b) = (analyse(0), analyse(1));
+            let ((y0, z0), (y1, z1)) = (a?, b?);
+            Ok(([y0, y1], [z0, z1]))
+        };
+        // A trial encode on a model's already-computed latents.
+        let code_with = |ccs_model: usize,
+                         beta: i32,
+                         final_run: bool,
+                         lats: &ModelLatents|
          -> Result<(Vec<u8>, f64)> {
             let set = self.model_set(ccs_model, op)?;
-            if latents[ccs_model].is_none() {
-                let mut ys = Vec::with_capacity(2);
-                let mut zs = Vec::with_capacity(2);
-                for (ccs, plane) in [&input.luma, &input.chroma].into_iter().enumerate() {
-                    let (y, z) = self.analyse_component(&set, ccs, plane, independent, stop)?;
-                    ys.push(y);
-                    zs.push(z);
-                }
-                // Move, don't clone: `Tensor` clones are deep copies and these are the
-                // biggest tensors the rate loop holds.
-                fn pair<T>(v: Vec<T>) -> Result<[T; 2]> {
-                    let mut it = v.into_iter();
-                    Ok([
-                        it.next().ok_or(Error::InvalidData("internal: luma"))?,
-                        it.next().ok_or(Error::InvalidData("internal: chroma"))?,
-                    ])
-                }
-                latents[ccs_model] = Some((pair(ys)?, pair(zs)?));
-            }
-            let (y, z) = latents[ccs_model].as_ref().expect("just computed");
-            *trials += 1;
+            let (y, z) = lats;
             let params = EncodeParams {
                 model_id: ccs_model as u8,
                 beta_displacement_log: [beta; 2],
@@ -797,37 +792,54 @@ impl Encoder {
             Ok((stream, bpp))
         };
 
-        // `match_luma`: the model whose rate at displacement 0 is relatively closest. Latents
-        // of every model but the best-so-far are dropped as soon as they are known losers;
-        // keeping all four sets to the end of the loop would hold ~45 MB extra at 3 MP.
+        // `match_luma`: the model whose rate at displacement 0 is relatively closest. The
+        // trials are independent full encodes on different checkpoint sets, so the sweep
+        // runs in parallel; every trial's latents come back with it and the losers are
+        // dropped once the winner is known (the winner's are reused for the beta trials).
+        let trial = |id: usize| -> Result<(usize, ModelLatents, f64)> {
+            stop.check()?;
+            let l = analyse_model(id)?;
+            let (_stream, bpp) = code_with(id, 0, false, &l)?;
+            Ok((id, l, bpp))
+        };
+        #[cfg(feature = "parallel")]
+        let results: Vec<Result<(usize, ModelLatents, f64)>> = {
+            use rayon::iter::{IntoParallelIterator, ParallelIterator};
+            (0..model::MODEL_BETAS.len())
+                .into_par_iter()
+                .map(trial)
+                .collect()
+        };
+        #[cfg(not(feature = "parallel"))]
+        let results: Vec<Result<(usize, ModelLatents, f64)>> =
+            (0..model::MODEL_BETAS.len()).map(trial).collect();
+        trials += model::MODEL_BETAS.len();
         let mut best_model = 0usize;
         let mut best_diff = f64::INFINITY;
-        let mut base: Vec<Option<f64>> = alloc::vec![None; model::MODEL_BETAS.len()];
-        for id in 0..model::MODEL_BETAS.len() {
-            stop.check()?;
-            let bpp = code(id, 0, false, &mut latents, &mut trials)?.1;
-            base[id] = Some(bpp);
+        let mut base_bpp = 0.0;
+        let mut best_lats = None;
+        for r in results {
+            let (id, l, bpp) = r?;
             let diff = (bpp - target_bpp).abs() / bpp;
             if diff < best_diff {
                 best_diff = diff;
-                if best_model != id {
-                    latents[best_model] = None;
-                }
                 best_model = id;
-            } else {
-                latents[id] = None;
+                base_bpp = bpp;
+                best_lats = Some(l);
             }
         }
+        let best_lats = best_lats.expect("a winning model");
 
         let mut cache: std::collections::HashMap<i32, f64> = std::collections::HashMap::new();
-        cache.insert(0, base[best_model].expect("measured above"));
+        cache.insert(0, base_bpp);
         let beta = {
             let mut cached = |b: i32| -> Result<f64> {
                 if let Some(&v) = cache.get(&b) {
                     return Ok(v);
                 }
                 stop.check()?;
-                let bpp = code(best_model, b, false, &mut latents, &mut trials)?.1;
+                let bpp = code_with(best_model, b, false, &best_lats)?.1;
+                trials += 1;
                 cache.insert(b, bpp);
                 Ok(bpp)
             };
@@ -846,7 +858,8 @@ impl Encoder {
                 &mut cached,
             )?
         };
-        let (stream, estimate) = code(best_model, beta, true, &mut latents, &mut trials)?;
+        let (stream, estimate) = code_with(best_model, beta, true, &best_lats)?;
+        trials += 1;
         let bpp = stream.len() as f64 * 8.0 / pixels;
         Ok((
             stream,
