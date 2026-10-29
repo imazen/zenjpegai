@@ -786,6 +786,17 @@ measured numbers in the status table above when you close an item.
   the resi_dq→resi_rq→diff STE path and the 255× ms-ssim domain scale were the two
   bugs found and fixed. Remaining: exact `d y_hat` parity, then the Adagrad/StepLR
   driver + best-iterate selection + `_compress_y` decisions rewrite + stream emission.
+  Driver semantics (`process_y` / `rdlr_y_iteration` / `rdlr_tool`): the leaf is the
+  *tile-core* latent (`tiling.get_data(lat_tile, optimized_part_of_lattile_rel_to_overlap)`;
+  whole latent for a single tile); each iteration writes the leaf back into the tile at
+  the core (overlap held fixed), replays the rate point, `loss.backward`, Adagrad step
+  `leaf -= lr·grad/(sqrt(Σgrad²)+eps)` with `Σgrad²` accumulated, then StepLR
+  `lr *= LearningRateYDecay`; `best_y_tile` = the core of the lowest-loss iterate.
+  Constants: `numIteYLuma` (oracle used 8; param default 40), `LearningRateYDecay = 0.7`,
+  `LearningRateYAutomaticPerResolution = 1` → `__calc_lr` (num_samples≥8.3M→0.02,
+  ≥399,360→0.03, else 0.05; this image 560·888=497,280 → **0.03**),
+  `lossTypeBDcurveSlope_ratioPSNR_MSSSIM` (param default 0.8). `_compress_y` then
+  re-derives residual/cube-flag decisions for `best_decisions['y']` before emit.
   Port cost: **input-gradient (VJP) kernels for every op in the reconstruct chain** —
   MCM's four phases, the synthesis decoder (convs, transposed conv, TAM/CAB, gates,
   layernorm, pixel shuffle, ResAU), `ms_ssim`, PSNR, the GM likelihood, the STE wrapper —

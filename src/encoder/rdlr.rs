@@ -393,6 +393,71 @@ pub(crate) fn loss_upstream(
     }
 }
 
+/// `process_y`'s luma driver: `num_ite` Adagrad + StepLR iterations on the
+/// tile-core latent, tracking the lowest-loss iterate. The leaf is the whole
+/// `y` here (single tile; a core crop for tiled RDLR — a later item). `refs`
+/// is `get_ref_rate_data`'s un-optimised rate point (rate, psnr, msssim);
+/// `lr0`/`lr_decay`/`ratio`/`slopes` come from `__calc_lr` /
+/// `lossTypeBDcurveSlope` / `_get_slopes_parameters`.
+///
+/// Adagrad (`eps = 1e-10` like `torch.optim.Adagrad`): `sum_sq += g²`,
+/// `leaf -= lr·g/(sqrt(sum_sq)+eps)`; StepLR `lr *= lr_decay` per iteration.
+/// `best` is the lowest-loss iterate's `y` — `_compress_y` then re-derives its
+/// residual/cube-flag decisions.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn optimize_y(
+    eng: &Engine,
+    ctx: &mcm::ContextModel,
+    hdr: &crate::header::PictureHeader,
+    model: &crate::model::common::CommonModel,
+    synthesis: &SynthesisPrimary,
+    lh: &lh::Likelihood,
+    y: &Tensor<f32>,
+    z_hat: &Tensor<i8>,
+    scale_log: &Tensor<i32>,
+    mask: &Tensor<bool>,
+    q: &impl mcm::Quantiser,
+    num_chs: usize,
+    original: &Tensor<f32>,
+    area: Area,
+    pixels: f64,
+    num_ite: usize,
+    lr0: f32,
+    lr_decay: f32,
+    refs: (f64, f64, f64),
+    slope_psnr: f64,
+    slope_msssim: f64,
+    ratio: f64,
+    stop: &dyn enough::Stop,
+) -> Result<(Tensor<f32>, f64)> {
+    let mut leaf = y.clone();
+    let mut sum_sq = vec![0.0f32; leaf.data.len()];
+    let mut lr = lr0;
+    let mut best = leaf.clone();
+    let mut best_loss = f64::INFINITY;
+    for _ in 0..num_ite {
+        let rp = rate_point_y(
+            eng, hdr, model, synthesis, lh, &leaf, z_hat, scale_log, mask, q, num_chs,
+            original, area, pixels, stop,
+        )?;
+        let up = loss_upstream(&rp, refs.0, refs.1, refs.2, slope_psnr, slope_msssim, ratio);
+        let d_y = backward(
+            eng, ctx, synthesis, &up, &rp, &leaf, z_hat, scale_log, mask, q, num_chs,
+            original, area, pixels, stop,
+        )?;
+        for (i, (&g, acc)) in d_y.data.iter().zip(&mut sum_sq).enumerate() {
+            *acc += g * g;
+            leaf.data[i] -= lr * g / (acc.sqrt() + 1e-10);
+        }
+        lr *= lr_decay;
+        if up.loss < best_loss {
+            best.clone_from(&leaf);
+            best_loss = up.loss;
+        }
+    }
+    Ok((best, best_loss))
+}
+
 /// `d(rate_y)/d(resi)` at every position — `dL/d(resi)` with the upstream
 /// `dL/d(rate_y)` folded in. `rate_y = Σ -log2 l`; `dL/d(rate_y) = d_rate /
 /// pixels`.
@@ -982,6 +1047,50 @@ mod oracle {
                     eprintln!("  adjoint ({ch},{py},{px}): bwd {got:.4e}  fd {fd:.4e}");
                 }
             }
+        }
+        // End-to-end driver smoke: `optimize_y` on the reference's own
+        // constants — the loss trajectory should improve (the gradient is
+        // ~0.72-correlated, so the path differs but descends).
+        {
+            let y0 = dump["rdlr.0.y"].tensor_f32();
+            let ctx = set.common[0].context.as_ref().unwrap();
+            let refs = (
+                dump["rdlr.gcrp.0.rate"].f32s() as f64,
+                dump["rdlr.gcrp.0.psnr"].f32s() as f64,
+                dump["rdlr.gcrp.0.msssim"].f32s() as f64,
+            );
+            let (best, best_loss) = optimize_y(
+                eng,
+                ctx,
+                &hdr,
+                &set.common[0],
+                &synthesis,
+                lh,
+                &y0,
+                &z_hat,
+                &scales.scale_log,
+                &mask,
+                &q,
+                160,
+                &original,
+                area,
+                pixels,
+                8,
+                0.03,
+                0.7,
+                refs,
+                dump["rdlr.slope.psnrY"].f32s() as f64,
+                dump["rdlr.slope.msssim_Torch"].f32s() as f64,
+                dump["rdlr.ratio_psnr_msssim"].f32s() as f64,
+                &enough::Unstoppable,
+            )
+            .unwrap();
+            let ref_last_loss = dump["rdlr.7.loss"].f32s() as f64;
+            eprintln!(
+                "optimize_y: best_loss {best_loss:.4} (ref iter-7 {ref_last_loss:.4}), best y absmean {:.4}",
+                best.data.iter().map(|v| v.abs()).sum::<f32>() / best.data.len() as f32
+            );
+            assert!(best_loss.is_finite() && best_loss < 0.0, "optimize_y best_loss {best_loss}");
         }
     }
 }
