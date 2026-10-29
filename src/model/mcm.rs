@@ -607,7 +607,7 @@ impl ContextModel {
                         let i = (ch * hh + yy) * hw + xx;
                         let gi = if inside { (ch * h + sy) * w + sx } else { 0 };
                         let dyh = if inside {
-                            d_out_yhat.data[gi] + d_yhat_s[ch].data[i]
+                            d_out_yhat.data[gi] + d_yhat_s[s].data[i]
                         } else {
                             0.0
                         };

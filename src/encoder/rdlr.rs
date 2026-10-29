@@ -23,6 +23,7 @@
 use alloc::vec::Vec;
 
 use crate::error::{Error, Result};
+use crate::encoder::msssim;
 use crate::model::common::SIGMA_PRECISION;
 use crate::model::mcm;
 use crate::model::synthesis::SynthesisPrimary;
@@ -66,6 +67,8 @@ pub(crate) struct RatePoint {
     pub rate_y: f64,
     /// Factorized `z_hat` bit count (the `bs.encode_term()` term).
     pub z_bits: f64,
+    /// The synthesis's VJP tape (present when `rate_point_y` built `rec`).
+    pub synth_tape: Option<crate::model::synthesis::PrimaryTape>,
 }
 
 /// `RDLRCompY.get_current_rate_point` for one luma latent tile: the rate point
@@ -142,7 +145,7 @@ pub(crate) fn rate_point_y(
 
     // `tool.decoder(y_new2, h, w)` — the luma synthesis on the reconstructed
     // latent.
-    let rec = synthesis.forward_with(
+    let (rec, tape) = synthesis.forward_tape(
         eng,
         &BTensor::from_planar(&y_hat, eng.tier.block())?,
         original.h,
@@ -162,9 +165,136 @@ pub(crate) fn rate_point_y(
         psi,
         y_hat,
         rec,
+        synth_tape: Some(tape),
         rate_y,
         z_bits,
     })
+}
+
+/// `PSNR`'s input gradient: `psnr = C - 10·log10(mse + eps)`, `mse =
+/// mean((a-b)²)` over `area` — `d(rec[i]) = d_psnr · (-10/(ln10·mse)) ·
+/// 2·(rec[i]-orig[i])/N` inside `area`, `0` outside.
+fn psnr_vjp(
+    d_psnr: f64,
+    rec: &Tensor<f32>,
+    original: &Tensor<f32>,
+    area: Area,
+) -> Tensor<f32> {
+    let n = (area.width * area.height) as f64;
+    let mse = rec
+        .plane(0)
+        .iter()
+        .zip(original.plane(0))
+        .enumerate()
+        .filter(|(i, _)| {
+            let (x, y) = (i % rec.w, i / rec.w);
+            (area.x..area.x + area.width).contains(&x)
+                && (area.y..area.y + area.height).contains(&y)
+        })
+        .map(|(_, (&a, &b))| ((a - b) as f64).powi(2))
+        .sum::<f64>()
+        / n;
+    let mut out = Tensor::<f32>::zeros(1, rec.h, rec.w).unwrap();
+    let k = d_psnr * (-10.0 / (core::f64::consts::LN_10 * (mse + 1e-10))) * (2.0 / n);
+    for y in 0..rec.h {
+        for x in 0..rec.w {
+            if (area.x..area.x + area.width).contains(&x)
+                && (area.y..area.y + area.height).contains(&y)
+            {
+                let i = y * rec.w + x;
+                out.plane_mut(0)[i] = (k * (rec.plane(0)[i] - original.plane(0)[i]) as f64) as f32;
+            }
+        }
+    }
+    out
+}
+
+/// `rdlr_y_iteration`'s backward: the full `d(y)` — the leaf gradient — for one
+/// iteration's rate point and upstream scalars.
+///
+/// The chain (see the module docs): `d(resi)` from the GM likelihood + `d(rec)`
+/// from the two metrics → `d(y_hat)` through the synthesis → `d(y)` through the
+/// MCM's STE/context VJP — then the direct `resi = y - means_hat` `+1` term.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn backward(
+    eng: &Engine,
+    ctx: &mcm::ContextModel,
+    synthesis: &SynthesisPrimary,
+    up: &LossUpstream,
+    rp: &RatePoint,
+    y: &Tensor<f32>,
+    z_hat: &Tensor<i8>,
+    scale_log: &Tensor<i32>,
+    mask: &Tensor<bool>,
+    q: &impl mcm::Quantiser,
+    num_chs: usize,
+    original: &Tensor<f32>,
+    area: Area,
+    pixels: f64,
+    stop: &dyn enough::Stop,
+) -> Result<Tensor<f32>> {
+    let psi_b = BTensor::from_planar(&rp.psi, eng.tier.block())?;
+    // d(resi) — the GM rate term.
+    let d_resi = rate_vjp(up.d_rate / pixels, y, &rp.y_hat, &rp.residual_q, scale_log);
+    // d(rec) — psnr + ms-ssim (ms-ssim on the [0,1]-scaled `area` crop, as
+    // `distortion` builds it).
+    let (dx, _dy) = {
+        const INV: f32 = 1.0 / 255.0;
+        let (ah, aw) = (area.height, area.width);
+        let (mut a, mut b) = (Vec::with_capacity(ah * aw), Vec::with_capacity(ah * aw));
+        for row in 0..ah {
+            for x in 0..aw {
+                a.push(original.plane(0)[(area.y + row) * original.w + area.x + x] * INV);
+                b.push(rp.rec.plane(0)[(area.y + row) * rp.rec.w + area.x + x] * INV);
+            }
+        }
+        msssim::ms_ssim_vjp(
+            eng,
+            &Tensor::from_vec(1, ah, aw, b)?,
+            &Tensor::from_vec(1, ah, aw, a)?,
+            up.d_msssim as f32,
+        )?
+    };
+    // The ms-ssim grad lives on the `area` crop — scatter it into the picture grid.
+    let mut d_rec = Tensor::<f32>::zeros(1, rp.rec.h, rp.rec.w)?;
+    for row in 0..area.height {
+        for x in 0..area.width {
+            d_rec.plane_mut(0)[(area.y + row) * rp.rec.w + area.x + x] =
+                dx.data[row * area.width + x];
+        }
+    }
+    let d_psnr_map = psnr_vjp(up.d_psnr, &rp.rec, original, area);
+    for (a, &b) in d_rec.data.iter_mut().zip(&d_psnr_map.data) {
+        *a += b;
+    }
+    // d(y_hat) — synthesis backward minus the resi term's -means_hat.
+    let d_yhat_synth = synthesis.backward(
+        rp.synth_tape
+            .as_ref()
+            .ok_or(Error::InvalidArgument("RDLR: no synthesis tape"))?,
+        &d_rec,
+    )?;
+    let mut d_out_yhat = d_yhat_synth;
+    for (a, &b) in d_out_yhat.data.iter_mut().zip(&d_resi.data) {
+        *a -= b;
+    }
+    // d(y) — the MCM's internal grad plus the resi term's direct +1.
+    let mut d_y = ctx.compress_backward(
+        eng,
+        y,
+        &psi_b,
+        q,
+        mask,
+        num_chs,
+        crate::encoder::SKIP_CUBE_THR,
+        &d_out_yhat,
+        &d_resi,
+        stop,
+    )?;
+    for (a, &b) in d_y.data.iter_mut().zip(&d_resi.data) {
+        *a += b;
+    }
+    Ok(d_y)
 }
 
 /// `GMProbModel._likelihood` of a continuous residual with `means = 0`, as
@@ -321,7 +451,7 @@ fn elu_backward(dout: &Tensor<f32>, x: &Tensor<f32>) -> Tensor<f32> {
 /// Returns `(d_y_direct, d_y_hat, d_resi_hat)` — the y_hat/resi_hat gradients
 /// before downstream synthesis/MCM accumulation.
 fn resi_vjp(d_resi: &Tensor<f32>) -> (Tensor<f32>, Tensor<f32>, Tensor<f32>) {
-    let mut d_y = d_resi.clone();
+    let d_y = d_resi.clone();
     let mut d_yhat = d_resi.clone();
     for v in d_yhat.data.iter_mut() {
         *v = -*v;
@@ -683,6 +813,43 @@ mod oracle {
                 md = md.max((d_resi.data[k] - want_dresi.data[k]).abs());
             }
             assert!(md < 0.02, "iter {i}: gm_resi_grad diff {md}");
+            // The full backward: `d(y)` vs `cas_y_in_grad`, `d(leaf)` vs `y_grad`.
+            let ctx = set.common[0].context.as_ref().unwrap();
+            let d_y = backward(
+                eng,
+                ctx,
+                &synthesis,
+                &up,
+                &rp,
+                &y,
+                &z_hat,
+                &scales.scale_log,
+                &mask,
+                &q,
+                160,
+                &original,
+                area,
+                pixels,
+                &enough::Unstoppable,
+            )
+            .unwrap();
+            let want_dy = dump[&format!("rdlr.{i}.cas_y_in_grad")].tensor_f32();
+            let want_leaf = dump[&format!("rdlr.{i}.y_grad")].tensor_f32();
+            let (mut md_y, mut md_leaf) = (0.0f32, 0.0f32);
+            let (mut am_y, mut am_w) = (0.0f64, 0.0f64);
+            for ch in 0..160 {
+                for k in 0..d_y.plane(ch).len() {
+                    md_y = md_y.max((d_y.plane(ch)[k] - want_dy.plane(ch)[k]).abs());
+                    md_leaf = md_leaf.max((d_y.plane(ch)[k] - want_leaf.plane(ch)[k]).abs());
+                    am_y += (d_y.plane(ch)[k] - want_dy.plane(ch)[k]).abs() as f64;
+                    am_w += want_dy.plane(ch)[k].abs() as f64;
+                }
+            }
+            eprintln!(
+                "iter {i}: cas_y_in_grad max {md_y:.3e} leaf max {md_leaf:.3e} absmean diff {:.3e} want {:.3e}",
+                am_y / d_y.data.len() as f64,
+                am_w / d_y.data.len() as f64
+            );
             let want_rate = dump[&format!("rdlr.gcrp.{}.rate", i + 1)].f32s() as f64;
             let want_psnr = dump[&format!("rdlr.gcrp.{}.psnr", i + 1)].f32s() as f64;
             let want_msssim = dump[&format!("rdlr.gcrp.{}.msssim", i + 1)].f32s() as f64;
