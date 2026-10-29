@@ -305,6 +305,7 @@ macro_rules! stage {
         r
     }};
 }
+pub(crate) use stage;
 
 /// What one component committed to the codestream: exactly the tensors
 /// `scripts/ref_vectors/dump_encode.py` records, for parity tests and diagnostics.

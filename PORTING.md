@@ -231,7 +231,12 @@ path reads only its own plane, `z_hat` and `psi`), the rate matcher's four-model
 under `par_iter`, and the eICCI bank evaluates its candidates in parallel (streams stay
 byte-identical; the selection still reduces in map order). Steady-state of four runs,
 `encode_ms`: 560x888 SOP 65.9, BOP 77.0, HOP 382.8 (was ~580 the day before), 0.50 bpp
-rate-matched 319.9 (was ~1100), HOP --eicci 785.2, HOP --tools-on 1072.1 (was ~1140).
+rate-matched 319.9 (was ~1100), HOP --eicci 785.2, HOP --tools-on 1072.1 (was ~1140),
+2096x1400 HOP ~2270 (was ~4000 before the analysis tiles ran under `par_iter`). Stage
+profile at 560x888 (`ZENJPEGAI_STAGE_TIMES=1`): the luma TAM is ~70 % of the encode
+(~255 ms of ~380); the CAB ~50 ms, the conv stages ~50 ms, hyper-encoder ~7 ms, the whole
+residual stage (scales + MCM compress + ANS) ~20 ms — the remaining wall is the attention
+kernels themselves, already the tuned `nn::fast`/`math` path.
 
 With every tool on (`tools_on`; `benchmarks/encode_tools_on_2026-09-18.{tsv,meta}`) the
 reference's post-filter searches dominate its encode — its rate-matched `tools_on` encode of

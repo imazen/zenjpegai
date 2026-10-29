@@ -146,23 +146,31 @@ impl Trunk {
         if x.h != h || x.w != w {
             return Err(Error::InvalidArgument("analysis transform: input size"));
         }
-        let x = BTensor::from_planar_par(eng, &normalize(x)?, eng.tier.block())?;
-        let x = pad_for(x, h, w, 1)?;
-        let x = self.act1.forward(eng, self.conv1.forward(eng, &x)?)?;
+        let x = crate::encoder::stage!(
+            "  norm+conv1+act1",
+            self.act1
+                .forward(eng, self.conv1.forward(eng, &pad_for(BTensor::from_planar_par(eng, &normalize(x)?, eng.tier.block())?, h, w, 1)?)?)
+        )?;
         stop.check()?;
         let mut x = pad_for(x, h, w, 2)?;
         if let Some(tam) = &self.tam {
-            x = tam.forward(eng, x)?;
+            x = crate::encoder::stage!("  tam", tam.forward(eng, x))?;
             stop.check()?;
         }
-        let x = self.act2.forward(eng, self.conv2.forward(eng, &x)?)?;
+        let x = crate::encoder::stage!(
+            "  conv2+act2",
+            self.act2.forward(eng, self.conv2.forward(eng, &x)?)
+        )?;
         stop.check()?;
         let mut x = pad_for(x, h, w, 4)?;
         if let Some(cab) = &self.cab {
-            x = cab.forward(eng, &x)?;
+            x = crate::encoder::stage!("  cab", cab.forward(eng, &x))?;
             stop.check()?;
         }
-        let x = self.act3.forward(eng, self.conv3.forward(eng, &x)?)?;
+        let x = crate::encoder::stage!(
+            "  conv3+act3",
+            self.act3.forward(eng, self.conv3.forward(eng, &x)?)
+        )?;
         stop.check()?;
         Ok(x)
     }
