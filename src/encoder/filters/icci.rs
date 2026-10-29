@@ -314,17 +314,28 @@ pub fn select(
         let mut gain_index = 0usize;
         let mut selection = [0u8; 3];
 
-        for (&my, &muv) in map_y.iter().zip(map_uv) {
+        // The bank's nets are loaded up front so the candidate evaluations share only
+        // read-only state (the DWT input and the org/rec planes) and run in parallel; the
+        // selection itself reduces in map order below, keeping the sequential
+        // first-strictly-better semantics.
+        let nets_y: Vec<_> = map_y
+            .iter()
+            .map(|&m| cache.get(models, op, m as usize, eng))
+            .collect::<Result<Vec<_>>>()?;
+        let nets_uv: Vec<_> = map_uv
+            .iter()
+            .map(|&m| cache.get(models, op, m as usize, eng))
+            .collect::<Result<Vec<_>>>()?;
+        let eval = |i: usize| -> Result<(f32, [f32; 3])> {
             // `compress_tile`: with `skip_luma` the luma answer is the unfiltered plane, so
             // the candidate's luma error equals the initial one and can never win Y.
             let enh_y = if cfg.skip_luma() {
                 tile_rec[0].clone()
             } else {
-                let net = cache.get(models, op, my as usize, eng)?;
-                let corr = net.luma_correction(eng, &input)?;
+                let corr = nets_y[i].luma_correction(eng, &input)?;
                 crop_clamp(&icci::tile_output(eng, &input, 0, &corr)?, th, tw)?
             };
-            let net_uv = cache.get(models, op, muv as usize, eng)?;
+            let net_uv = &nets_uv[i];
             let [cu, cv] = net_uv.chroma_corrections(eng, &input, [true, true])?;
             let enh = [
                 enh_y,
@@ -349,7 +360,17 @@ pub fn select(
                     tw,
                 )?,
             ];
-            let (cur_y, cur_uv) = current_error(eng, cfg, &tile_org, &enh)?;
+            current_error(eng, cfg, &tile_org, &enh)
+        };
+        #[cfg(feature = "parallel")]
+        let evals: Vec<Result<(f32, [f32; 3])>> = {
+            use rayon::iter::{IntoParallelIterator, ParallelIterator};
+            (0..map_y.len()).into_par_iter().map(eval).collect()
+        };
+        #[cfg(not(feature = "parallel"))]
+        let evals: Vec<Result<(f32, [f32; 3])>> = (0..map_y.len()).map(eval).collect();
+        for (r, (&my, &muv)) in evals.into_iter().zip(map_y.iter().zip(map_uv)) {
+            let (cur_y, cur_uv) = r?;
             if cur_y < running_y {
                 running_y = cur_y;
                 selection[0] = my + 1;
