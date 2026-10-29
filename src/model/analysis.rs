@@ -148,8 +148,18 @@ impl Trunk {
         }
         let x = crate::encoder::stage!(
             "  norm+conv1+act1",
-            self.act1
-                .forward(eng, self.conv1.forward(eng, &pad_for(BTensor::from_planar_par(eng, &normalize(x)?, eng.tier.block())?, h, w, 1)?)?)
+            self.act1.forward(
+                eng,
+                self.conv1.forward(
+                    eng,
+                    &pad_for(
+                        BTensor::from_planar_par(eng, &normalize(x)?, eng.tier.block())?,
+                        h,
+                        w,
+                        1
+                    )?
+                )?
+            )
         )?;
         stop.check()?;
         let mut x = pad_for(x, h, w, 2)?;

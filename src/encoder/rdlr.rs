@@ -616,7 +616,15 @@ mod oracle {
             let slope_psnr = dump["rdlr.slope.psnrY"].f32s() as f64;
             let slope_msssim = dump["rdlr.slope.msssim_Torch"].f32s() as f64;
             let ratio = dump["rdlr.ratio_psnr_msssim"].f32s() as f64;
-            let up = loss_upstream(&rp, ref_rate, ref_psnr, ref_msssim, slope_psnr, slope_msssim, ratio);
+            let up = loss_upstream(
+                &rp,
+                ref_rate,
+                ref_psnr,
+                ref_msssim,
+                slope_psnr,
+                slope_msssim,
+                ratio,
+            );
             let want_loss = dump[&format!("rdlr.{i}.loss")].f32s() as f64;
             assert!(
                 (up.loss - want_loss).abs() < 1e-4,
