@@ -19,6 +19,15 @@
   commits after it on `feat/inventory`)
 
 #### Encoder
+- Encoder parity coverage under the high profile (`hoptools` reference-vector set):
+  the whole coding-tool matrix on HOP — RVS/GRFS, LSBS, LEF, 8 ANS threads, eICCI (the
+  HOP network bank, previously unexercised), EFE linear, `tools_on`, and the tiled
+  2096x1400 picture with and without independent regions. Seven of the nine 560x888
+  streams are byte-identical to the reference encoder's (eICCI included); the rest
+  move only one-step rounding-boundary symbols at the same length, except the
+  post-filter solves, which keep the documented deterministic-f64-vs-MKL deviation
+  at better PSNR (+0.015 / +0.023 dB, +0.19 / +0.42 % size). Gate:
+  `tests/encode_ref.rs` shared tables + `hop_post_filters_encode_end_to_end`.
 - Encoder: `num_chs` below the model's channel count (`E10`) — `EncodeParams::num_chs` /
   CLI `--num-chs y,uv` port the reference's
   `-model.CCS_SGMM.tools_common.model_{y,uv}.common_modules.num_chs`: the picture header

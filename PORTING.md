@@ -97,7 +97,7 @@ maxima; the other numbers were read off `examples/dbg_recon`.
 The differences come from convolution summation order (PyTorch/oneDNN vs this crate's fixed
 order); they land on 8-bit rounding boundaries in about 0.005 % of samples.
 
-## Encoder parity (measured 2026-09-17, 560x888 test image 00030, eighteen fixed-model encodes; `num_chs` added 2026-09-20)
+## Encoder parity (measured 2026-09-17, 560x888 test image 00030, eighteen fixed-model encodes; `num_chs` added 2026-09-20, `hoptools` 2026-10-29)
 
 Vectors `enc_img30_{bop_m1_b0, hop_m2_b0, bop_m1_bm300, sop_m0_bm300, bop_m3_b400,
 bop_m0_bm1069, hop_m3_bm1069}`, `enc_img01_bop_m1_b0` (2096x1400, 6 analysis tiles),
@@ -105,6 +105,16 @@ bop_m0_bm1069, hop_m3_bm1069}`, `enc_img01_bop_m1_b0` (2096x1400, 6 analysis til
 `enc_img01_bop_m1_b0_{depregions, indregions}` (`make_reference_streams.sh encoder`), plus
 the reduced-channel vectors `enc_img30_bop_m1_{b0_y64u32, bm300_y96u48, b0_y96u48_rvs,
 b0_uv0}` and `enc_img01_bop_m1_b0_y80u40` (the `numchs` set).
+
+The `hoptools` set (2026-10-29) repeats the tool matrix under the high profile:
+`enc_img30_hop_m2_b0_{rvs, rvsonly, grfsonly, lsbs, lef, threads8, eicci, efelin, on}` and
+`enc_img01_hop_m2_b0{,_indregions}` (`make_reference_streams.sh hoptools`). Results: seven of
+the 560x888 streams byte-identical — including eICCI, which is the first coverage of the HOP
+network bank (`eicci_hop_*`); `rvs`, `grfsonly`, `enc_img01_hop_m2_b0` and its `indregions`
+sibling move only one-step rounding-boundary symbols at the reference's length; `efelin`
+(+0.19 %) and `on` (+0.42 %) are the documented deterministic-f64 vs MKL-f32 solver deviation
+and score *better* PSNR than the reference's draws (+0.015 / +0.023 dB). Gate:
+`tests/encode_ref.rs` shared tables plus `hop_post_filters_encode_end_to_end`.
 
 | what | result |
 | --- | --- |
@@ -716,7 +726,37 @@ measured numbers in the status table above when you close an item.
   ported — unreachable in b9e573f**: it needs the `hyperopt` package (commented out of
   `requirements.txt`, absent from the venv — the forced encode dies with
   `ModuleNotFoundError`) and an `MSSSIM` the module never imports. See "Reference dead code:
-  the rate matcher's UV hyperopt search". What remains unported on the encoder: nothing.
+  the rate matcher's UV hyperopt search".
+- **E11 RDLR (`cfg/tools/RDLR.json`, `tool_ena/RDLR.json`).** The reference's only remaining
+  encoder R-D enhancement, never in the porting queue because no CTC config enables it.
+  `src/codec/coding_tools/rdlr/` (1,284 lines): a postproc tool (`coding_engine.py:89`)
+  that runs inside `Composite.compress` right after `tv.compress`, when the picture is
+  below `numSamples` (4.2 MP). Shipped settings: `numIteYLuma = 8`, `numIte{ZLuma,ZChroma,
+  YChroma} = 0` — only the luma latent is refined, z and chroma loops are off.
+  `rdlr_comp_base.py::process_y`: per image tile (its own TileManager, min tile 176+overlap
+  for MS-SSIM) it Adagrad-optimises only the tile *core* of the continuous latent `y` for
+  `numIteY` iterations, keeping the best-scoring iterate. `rdlr_comp_Y.py::rdlr_y_iteration`
+  loss = `-n · [log(rate/rate_ref), metric − metric_ref]` — the projection of the (rate,
+  metric) move onto the measured R-D slope normals (`_get_slopes_parameters`, per-bpp tables
+  of PSNR-Y/PSNR-U/PSNR-V/MS-SSIM-Y angles, `lossTypeBDcurveSlope_*`), mixed by
+  `lossTypeBDcurveSlope_ratioPSNR_MSSSIM`. `get_current_rate_point` rebuilds the whole
+  reconstruction per step: `_compress_ar_scale` (MCM context, STE rounding at
+  `data_q - (data_q - data_q.round()).detach()`), `tool.decoder` synthesis (distortion input),
+  `entropy(resi, scale_lin, 0)` GM likelihood (rate numerator), `encode_z` into ECLibLH
+  (rate denominator), PSNR + `pytorch_msssim` on the tile core. The UV pass feeds the luma
+  `y_hat[::2,::2]` as `sup_info` and adds the luma tile's rate via `calc_additional_rate`.
+  Port cost: **input-gradient (VJP) kernels for every op in the reconstruct chain** —
+  MCM's four phases, the synthesis decoder (convs, transposed conv, TAM/CAB, gates,
+  layernorm, pixel shuffle, ResAU), `ms_ssim`, PSNR, the GM likelihood, the STE wrapper —
+  plus Adagrad + StepLR. Model parameters are frozen so only dL/dx is needed, never dL/dw.
+  Gradients must be bit-identical across SIMD tiers (same fixed op-order/FMA rule as the
+  forward path) and measured against PyTorch autograd dumps (new additive dumps in
+  `dump_encode.py`, e.g. `--rdlr`: per-op input/output/grad at 560x888). Gate: our stream
+  carries the same decisions as the reference's run on a `hoptools`-style RDLR vector at
+  the usual tolerance — same length or one-step moves; full byte-identity is not reachable
+  through a gradient descent any more than it is through the f64 solves. Owning files (new,
+  minimal-touch): `src/encoder/rdlr/` (+ `nn::fast` VJP kernels), `src/model/*` backward
+  entry points, `EncodeParams::rdlr`, CLI `--rdlr`, `tests/encode_ref.rs`.
 
 ### Browser and GPU
 
