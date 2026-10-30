@@ -815,7 +815,13 @@ measured numbers in the status table above when you close an item.
   clamped to `[0,34]`, fraction preserved, then `exp(idx·log_k + ln σ_min)` —
   identical to `rate_point_y`'s forward sigma, reproducing `rate_y` to 0.08
   bits — plus the `/2` Gaussian exponent and `LowerBound`'s unstick
-  (`x>=bound | grad<0`) pass-through. Driver semantics (`process_y` / `rdlr_y_iteration` / `rdlr_tool`): the leaf is the
+  (`x>=bound | grad<0`) pass-through. **Not ported: the HOP synthesis VJP** —
+  `Primary::forward_tape`/`backward` cover `Light` (BOP/SOP) only, so
+  `--rdlr --op hop` errors `HOP synthesis backward not yet implemented` instead
+  of running; RDLR on HOP needs a `PrimaryTape::Hop` and the TAM/CAB backwards,
+  plus a `rdlr_img30_hop_*` oracle dump to verify against (the reference's
+  `dump_rdlr.py` works on any op but needs the reference venv).
+  Driver semantics (`process_y` / `rdlr_y_iteration` / `rdlr_tool`): the leaf is the
   *tile-core* latent (`tiling.get_data(lat_tile, optimized_part_of_lattile_rel_to_overlap)`;
   whole latent for a single tile); each iteration writes the leaf back into the tile at
   the core (overlap held fixed), replays the rate point, `loss.backward`, Adagrad step
