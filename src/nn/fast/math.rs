@@ -263,6 +263,166 @@ pub fn channel_attention(
     Ok(out)
 }
 
+/// [`channel_attention`] that also returns the `attn` weights — the tape
+/// `channel_attention_backward` needs (RDLR HOP VJP).
+#[allow(dead_code)]
+pub fn channel_attention_tape(
+    eng: &Engine,
+    qkv: &Tensor<f32>,
+    heads: usize,
+    temperature: &[f32],
+) -> Result<(Tensor<f32>, Vec<f32>)> {
+    let out = channel_attention(eng, qkv, heads, temperature)?;
+    // Rebuild `attn` exactly as `channel_attention` did (the softmax weights are
+    // cheap relative to storing a second forward of the QK products).
+    let dim = qkv.c / 3;
+    let c = dim / heads;
+    let n = qkv.h * qkv.w;
+    let mut qk = qkv.data[..2 * dim * n].to_vec();
+    for_each_row(eng, &mut qk, n, |_, row| {
+        let norm = dot8(row, row).sqrt() as f32;
+        div_slice(row, norm.max(1e-12));
+    });
+    let (q, k) = qk.split_at(dim * n);
+    let mut attn = alloc::vec![0.0f32; dim * c];
+    for_each_row(eng, &mut attn, c, |row_idx, row| {
+        let head = row_idx / c;
+        let qi = &q[row_idx * n..][..n];
+        let mut max = f32::NEG_INFINITY;
+        for (j, a) in row.iter_mut().enumerate() {
+            let kj = &k[(head * c + j) * n..][..n];
+            *a = dot8(qi, kj) as f32 * temperature[head];
+            max = max.max(*a);
+        }
+        let mut sum = 0.0f64;
+        for a in row.iter_mut() {
+            *a = exp(*a - max);
+            sum += *a as f64;
+        }
+        let sum = sum as f32;
+        for a in row.iter_mut() {
+            *a /= sum;
+        }
+    });
+    Ok((out, attn))
+}
+
+/// The input gradient through [`channel_attention`] (RDLR HOP VJP): `d_out`
+/// `[dim, h, w]` → `d(qkv)` `[3·dim, h, w]`. `attn` is the forward's softmax
+/// weights (from [`channel_attention_tape`]). `d_attn = d_out·v^T`, softmax
+/// VJP, `dq = T·d·k`, `dk = T·d^T·q`, `dv = attn^T·d_out`, then the L2-norm
+/// backward on q,k — all sums in `dot8` order for tier bit-identity.
+#[allow(dead_code)]
+pub fn channel_attention_backward(
+    eng: &Engine,
+    qkv: &Tensor<f32>,
+    attn: &[f32],
+    d_out: &Tensor<f32>,
+    heads: usize,
+    temperature: &[f32],
+) -> Result<Tensor<f32>> {
+    if heads == 0 || temperature.len() != heads || !qkv.c.is_multiple_of(3 * heads) {
+        return Err(Error::InvalidArgument("attention: channel / head counts"));
+    }
+    let dim = qkv.c / 3;
+    let c = dim / heads;
+    let n = qkv.h * qkv.w;
+    // Re-normalise q,k and keep each row's norm for the L2-norm backward.
+    let mut qk = qkv.data[..2 * dim * n].to_vec();
+    let _qk_charge = crate::mem::Charge::of_vec(&qk);
+    let mut norms = alloc::vec![0.0f32; 2 * dim];
+    let _norms_charge = crate::mem::Charge::of_vec(&norms);
+    // Each row's clamped L2 norm, for the L2-norm backward (one slice each).
+    for_each_row(eng, &mut norms, 1, |i, slot| {
+        let r = &qk[i * n..][..n];
+        slot[0] = (dot8(r, r).sqrt() as f32).max(1e-12);
+    });
+    for_each_row(eng, &mut qk, n, |i, row| {
+        div_slice(row, norms[i]);
+    });
+    let (q, k) = qk.split_at(dim * n);
+    let v = &qkv.data[2 * dim * n..];
+    // `d_attn = d_out·v^T` then the row softmax VJP — `da` is the shared
+    // intermediate all three passes (dq, dk, dv) read, so it is computed once.
+    let mut da = alloc::vec![0.0f32; dim * c];
+    let _da_charge = crate::mem::Charge::of_vec(&da);
+    for_each_row(eng, &mut da, c, |row_idx, row| {
+        let head = row_idx / c;
+        let a_row = &attn[row_idx * c..][..c];
+        let d_out_row = &d_out.data[row_idx * n..][..n];
+        let mut sdot = 0.0f64;
+        for (j, a) in row.iter_mut().enumerate() {
+            let vj = &v[(head * c + j) * n..][..n];
+            *a = dot8(d_out_row, vj) as f32;
+            sdot += a_row[j] as f64 * *a as f64;
+        }
+        for (j, a) in row.iter_mut().enumerate() {
+            *a = a_row[j] * (*a - sdot as f32);
+        }
+    });
+    let mut dqkv = Tensor::<f32>::zeros(3 * dim, qkv.h, qkv.w)?;
+    for_each_row(eng, &mut dqkv.data, n, |row_idx, row| {
+        // Rows 0..dim of dqkv hold dq / dk / dv for the corresponding qkv row.
+        if row_idx < dim {
+            // dq_row[l] = T · Σ_j da_row[j]·k_j[l], then the L2-norm backward.
+            let head = row_idx / c;
+            let da_row = &da[row_idx * c..][..c];
+            let mut acc = alloc::vec![0.0f64; n];
+            for (j, &a) in da_row.iter().enumerate() {
+                let w = temperature[head] * a;
+                let kj = &k[(head * c + j) * n..][..n];
+                for (s, &kv) in acc.iter_mut().zip(kj) {
+                    *s += w as f64 * kv as f64;
+                }
+            }
+            let q_row = &q[row_idx * n..][..n];
+            let mut proj = 0.0f64;
+            for (&ql, &s) in q_row.iter().zip(&acc) {
+                proj += ql as f64 * s;
+            }
+            let inv = 1.0 / norms[row_idx] as f64;
+            for (o, (&ql, &s)) in row.iter_mut().zip(q_row.iter().zip(&acc)) {
+                *o = ((s - proj * ql as f64) * inv) as f32;
+            }
+        } else if row_idx < 2 * dim {
+            // dk_j[l] = T · Σ_i da_i[j]·q_i[l], then the L2-norm backward.
+            let (head, j) = ((row_idx - dim) / c, (row_idx - dim) % c);
+            let kj = &k[(head * c + j) * n..][..n];
+            let mut acc = alloc::vec![0.0f64; n];
+            for i in 0..c {
+                let w = temperature[head] * da[(head * c + i) * c + j];
+                let qi = &q[(head * c + i) * n..][..n];
+                for (s, &qv) in acc.iter_mut().zip(qi) {
+                    *s += w as f64 * qv as f64;
+                }
+            }
+            let mut proj = 0.0f64;
+            for (&kl, &s) in kj.iter().zip(&acc) {
+                proj += kl as f64 * s;
+            }
+            let inv = 1.0 / norms[dim + head * c + j] as f64;
+            for (o, (&kl, &s)) in row.iter_mut().zip(kj.iter().zip(&acc)) {
+                *o = ((s - proj * kl as f64) * inv) as f32;
+            }
+        } else {
+            // dv_j[l] = Σ_i attn[i][j]·d_out_i[l].
+            let (head, j) = ((row_idx - 2 * dim) / c, (row_idx - 2 * dim) % c);
+            let mut acc = alloc::vec![0.0f64; n];
+            for i in 0..c {
+                let a = attn[(head * c + i) * c + j] as f64;
+                let d_out_row = &d_out.data[(head * c + i) * n..][..n];
+                for (s, &dv) in acc.iter_mut().zip(d_out_row) {
+                    *s += a * dv as f64;
+                }
+            }
+            for (o, &s) in row.iter_mut().zip(&acc) {
+                *o = s as f32;
+            }
+        }
+    });
+    Ok(dqkv)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
