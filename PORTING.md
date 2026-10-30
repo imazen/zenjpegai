@@ -238,6 +238,18 @@ profile at 560x888 (`ZENJPEGAI_STAGE_TIMES=1`): the luma TAM is ~70 % of the enc
 residual stage (scales + MCM compress + ANS) ~20 ms — the remaining wall is the attention
 kernels themselves, already the tuned `nn::fast`/`math` path.
 
+`channel_attention` cost structure (`nn/fast/math.rs`): two `dim·c·n` f64 MAC
+passes — `attn[i][j] = dot8(q_i, k_j)·temp` (L2-normalised q,k) then `out_i =
+Σ_j attn[i][j]·v_j` — each output element keeps its own `index mod 8` f64
+accumulator chain (the bit-exactness contract: identical sum order on every
+tier). The headroom is **blocking across output elements, not the math**:
+`dot8(q_i, k_j)` reloads `k_j`/`q_i` per (i,j) pair, and `axpy64` reloads `v_j`
+per output row — restructuring so one `q_i` register row feeds a block of 8
+`k_j` outputs (one `v_j` row feeds 8 outputs) preserves each element's `l mod 8`
+accumulator order exactly while cutting memory traffic ~8× and widening the
+f64 SIMD. f32 accumulation is off the table — it changes the sum order and
+breaks tier bit-identity.
+
 With every tool on (`tools_on`; `benchmarks/encode_tools_on_2026-09-18.{tsv,meta}`) the
 reference's post-filter searches dominate its encode — its rate-matched `tools_on` encode of
 the 2096x1400 picture takes ~35 s. Best of three, `encode_ms`:
