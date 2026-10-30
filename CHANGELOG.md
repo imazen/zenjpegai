@@ -28,6 +28,15 @@
   post-filter solves, which keep the documented deterministic-f64-vs-MKL deviation
   at better PSNR (+0.015 / +0.023 dB, +0.19 / +0.42 % size). Gate:
   `tests/encode_ref.rs` shared tables + `hop_post_filters_encode_end_to_end`.
+- RDLR on the high profile: the HOP synthesis VJP (`Primary::forward_tape` /
+  `backward` now dispatch on `PrimaryTape::{Light,Hop}`), so `--rdlr --op hop`
+  runs the optimizer instead of erroring. The `HopPrimary` chain composes the
+  `ResidualBlock`, `Cab`, and TAM `TransformerBlock` adjoints — including the
+  channel-attention softmax VJP (`d_attn = d_out·v^T` → shared `da` → `dq/dk/dv`
+  with the L2-norm backward) — all `dot8`-order f64 accumulation for tier
+  bit-identity. `hop_primary_backward_is_adjoint` finite-differences the whole
+  chain (ratio 1.0006); the nested `TransformerBlock` residual means the
+  attention backward consumes `d_xmid = d_out + ffn^T(d_out)`.
 - Encoder: `num_chs` below the model's channel count (`E10`) — `EncodeParams::num_chs` /
   CLI `--num-chs y,uv` port the reference's
   `-model.CCS_SGMM.tools_common.model_{y,uv}.common_modules.num_chs`: the picture header
