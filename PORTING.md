@@ -778,30 +778,26 @@ measured numbers in the status table above when you close an item.
   scalars) → `rate_vjp` (GM `d resi`, exact vs `gm_resi_grad`) → `ms_ssim_vjp` +
   `psnr_vjp` (`d rec`, exact vs `x_hat_grad` 3.02e-7) → `SynthesisPrimary::backward`
   (`d y_hat`) → `ContextModel::compress_backward` (the 4-phase STE/context VJP, `d y`)
-  → `+resi`'s direct term. Verified 2026: `d(y)` correlates 0.72 with `cas_y_in_grad`
-  at right magnitude; feeding the reference's own upstreams drops the MCM-only diff
-  to 2.5e-6 (the MCM backward is correct); `conv2d`/`conv_transpose` backwards are
-  finite-diff-verified adjoints. `ms_ssim`/`ssim`/`gaussian`/`avg_pool2` verified
+  → `+resi`'s direct term. Verified 2026: `conv2d`/`conv_transpose` backwards are
+  finite-diff-verified adjoints; `ms_ssim`/`ssim`/`gaussian`/`avg_pool2` verified
   identical to pytorch_msssim 0.2.1 (valid conv, `avg_pool2d(X,2,padding=[h%2])`,
   per-channel means, product-of-relu'd-means) — scalar to 1.2e-7; `ms_ssim_vjp` is
   a whole-field finite-diff-verified adjoint; `rp.rec == x_hat` (3.5e-5),
   `rp.y_hat == y_hat` (1.6e-7), `x_hat` feeds metrics only. The resi_dq→resi_rq→diff
   STE path and the 255× ms-ssim domain scale were the two bugs found and fixed.
-  **Root cause — `LightPrimary`/`decoder` differ ~2.75e-5 forward**: running
-  `SynthesisPrimary` on the *exact* reference `y_hat` gives `rec` differing from
-  `x_hat`/`decoder` by 2.75e-5 (interior-concentrated: 2.63e-5, edge 1.2e-6,
-  clip ~0, max 5.6e-4). A systematic interior forward difference → the ~20%
-  Jacobian decorrelation (d_rec 0.80, ref_synth 0.79, d(y) 0.72 — all
-  consistent). Feeding the reference's own `x_hat_grad` through
-  `SynthesisPrimary::backward` gives `d_out_yhat` only ~0.79-correlated with
-  `y_hat_grad`, so the gap is `LightPrimary`/`decoder` itself, not `d_rec`,
-  pooling, or MCM. Decode tests verify 8-bit `pixels` (`assert_eq`), so a
-  sub-pixel (<0.5) continuous-rec difference is invisible there — `LightPrimary`
-  matches `decoder` in pixels but not in the continuous rec/Jacobian. The
-  ~20% gap is a real `LightPrimary`/`decoder` porting difference needing
-  layer-by-layer isolation against `tool.decoder` intermediates. Remaining: exact `d y_hat` parity, then the Adagrad/StepLR
-  driver + best-iterate selection + `_compress_y` decisions rewrite + stream emission.
-  Driver semantics (`process_y` / `rdlr_y_iteration` / `rdlr_tool`): the leaf is the
+  **Resolved (2026-10-30):** the "~20% LightPrimary/decoder gap" was a dump
+  indexing artifact — `rdlr.<i>.x_hat_grad` is the *decoder call* `rec.{i}`'s
+  grad (call 0 = ref point, call i+1 = iteration i), so the iteration upstream
+  was off by one. With `rdlr.{i+1}.x_hat_grad`, `synth − d_resi == y_hat_grad`
+  exactly and `LightPrimary::backward`/`rec_grad`/`loss_upstream` are exact.
+  `compress_backward` vs `cas_y_in_grad` is 0.9994 with reference upstreams,
+  and `cas_y_in + gm_resi == y_grad` holds to 7e-12 in the dump — the context
+  VJP needed no changes. The remaining leaf error is `rate_vjp`'s sigma: the
+  GM's `scales` is `_index_to_scale`'s float `>>` (`(scale_lin + 64)/128`
+  clamped to `[0,34]`, fraction preserved, then `exp(idx·log_k + ln σ_min)` —
+  identical to `rate_point_y`'s forward sigma, reproducing `rate_y` to 0.08
+  bits — plus the `/2` Gaussian exponent and `LowerBound`'s unstick
+  (`x>=bound | grad<0`) pass-through. Driver semantics (`process_y` / `rdlr_y_iteration` / `rdlr_tool`): the leaf is the
   *tile-core* latent (`tiling.get_data(lat_tile, optimized_part_of_lattile_rel_to_overlap)`;
   whole latent for a single tile); each iteration writes the leaf back into the tile at
   the core (overlap held fixed), replays the rate point, `loss.backward`, Adagrad step

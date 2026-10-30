@@ -616,12 +616,16 @@ pub(crate) fn rate_vjp(
         for i in 0..r.len() {
             let resi = yq[i] - yh[i] + r[i] as f32;
             let scale_lin = math::exp(s[i] as f32 * inv * log_k + LN_SIGMA_MIN);
-            // `GMProbModel._likelihood` divides the scale by
-            // `1 << scale_table_precision`: the dumped `rate_y` /
-            // `gm_resi_grad` match ~`scale_lin/15` (the sub-precision
-            // sigma index carried over the integer `scale_log`).
-            let sigma = (scale_lin / 15.0).max(SCALE_BOUND);
-            out.plane_mut(ch)[i] = (d_rate_y * gm_nbits_vjp(resi, sigma, d_rate_y > 0.0)) as f32;
+            // The same sigma the forward uses — `_index_to_scale`'s float
+            // `>>` (`(scale_lin + 2^6) / 2^7`, fraction preserved, then
+            // `exp(idx·log_k + ln σ_min)·2^7`) and `_likelihood`'s `/2^7`
+            // — reproduces the dumped `rate_y` to 0.08 bits.
+            let idx = (scale_lin + 64.0)
+                .mul_add(1.0 / 128.0, 0.0)
+                .clamp(0.0, 34.0);
+            let sigma = math::exp(idx * log_k + LN_SIGMA_MIN).max(SCALE_BOUND);
+            out.plane_mut(ch)[i] =
+                (d_rate_y * gm_nbits_vjp(resi, sigma, d_rate_y > 0.0)) as f32;
         }
     }
     out
