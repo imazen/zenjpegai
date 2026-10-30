@@ -624,8 +624,7 @@ pub(crate) fn rate_vjp(
                 .mul_add(1.0 / 128.0, 0.0)
                 .clamp(0.0, 34.0);
             let sigma = math::exp(idx * log_k + LN_SIGMA_MIN).max(SCALE_BOUND);
-            out.plane_mut(ch)[i] =
-                (d_rate_y * gm_nbits_vjp(resi, sigma, d_rate_y > 0.0)) as f32;
+            out.plane_mut(ch)[i] = (d_rate_y * gm_nbits_vjp(resi, sigma, d_rate_y > 0.0)) as f32;
         }
     }
     out
