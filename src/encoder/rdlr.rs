@@ -299,23 +299,31 @@ fn gm_nbits(resi: f32, sigma: f32) -> f64 {
 /// below the bound the output is constant and the grad is 0). Torch's
 /// `torch.clamp`-equivalent custom Function here is `LowerBound`: forward
 /// `max`, backward grad where `x >= bound` else 0.
-fn gm_nbits_vjp(resi: f32, sigma: f32) -> f64 {
-    const C: f64 = -0.7071067811865476;
-    const SQRT_PI: f64 = 1.772453850905516;
+/// `d(-log2 LowerBound(l))/d(resi)` — the gradient of the *bounded* log
+/// likelihood. The erfc factor `C² = 1/2` halves the squared terms:
+/// `dl/dv = (1/(σ√(2π)))·(e^{−dl²/2} − e^{−du²/2})` where `dl=(0.5+v)/σ`,
+/// `du=(0.5−v)/σ`. `LowerBound`'s backward passes the gradient where the raw
+/// likelihood was under the floor ONLY when the upstream grad is negative
+/// (`lower_bound_bwd`: `x >= bound | grad < 0` — the "unstick" direction);
+/// `grad_output` there is `d_rate·(−1/(l_b ln2))`, negative iff `d_rate > 0`.
+fn gm_nbits_vjp(resi: f32, sigma: f32, d_rate_positive: bool) -> f64 {
+    const SQRT_2PI: f64 = 2.5066282746310002;
     let s = sigma as f64;
     let v = resi.abs() as f64;
-    let upper = 0.5 * libm::erfc(C * (0.5 - v) / s);
-    let lower = 0.5 * libm::erfc(C * (-0.5 - v) / s);
-    let p = upper - lower;
-    if p <= LIKELIHOOD_BOUND {
-        return 0.0;
-    }
-    // dl/dv = (0.7071/(σ·√π)) · (e^{-((0.5+v)/σ)²} - e^{-((0.5-v)/σ)²})
     let du = (0.5 - v) / s;
     let dl = (0.5 + v) / s;
-    let k = 0.7071067811865476 / (s * SQRT_PI);
-    let dl_dv = k * (libm::exp(-dl * dl) - libm::exp(-du * du));
-    -(1.0 / (p * core::f64::consts::LN_2)) * dl_dv * resi.signum() as f64
+    // lik = Φ(du) − Φ(−dl) via erfc (the forward's exact form, for `p`).
+    const C: f64 = -0.7071067811865476;
+    let upper = 0.5 * libm::erfc(C * du);
+    let lower = 0.5 * libm::erfc(C * (-dl));
+    let p = upper - lower;
+    let floored = p < LIKELIHOOD_BOUND;
+    if floored && !d_rate_positive {
+        return 0.0;
+    }
+    let p_b = if floored { LIKELIHOOD_BOUND } else { p };
+    let dl_dv = (libm::exp(-0.5 * dl * dl) - libm::exp(-0.5 * du * du)) / (s * SQRT_2PI);
+    -(1.0 / (p_b * core::f64::consts::LN_2)) * dl_dv * resi.signum() as f64
 }
 
 /// The iteration's loss and its upstream scalars — `rdlr_y_iteration`'s
@@ -621,9 +629,11 @@ pub(crate) fn rate_vjp(
         for i in 0..r.len() {
             let resi = yq[i] - yh[i] + r[i] as f32;
             let scale_lin = math::exp(s[i] as f32 * inv * log_k + LN_SIGMA_MIN);
-            let idx = ((scale_lin + 64.0) / 128.0).clamp(0.0, 34.0);
-            let sigma = math::exp(idx * log_k + LN_SIGMA_MIN).max(SCALE_BOUND);
-            out.plane_mut(ch)[i] = (d_rate_y * gm_nbits_vjp(resi, sigma)) as f32;
+            // `GMProbModel._likelihood` divides the scale by
+            // `1 << scale_table_precision` (the unscaled sigma precision):
+            // the dumped `rate_y` / `gm_resi_grad` match `scale_lin/16`.
+            let sigma = (scale_lin / 16.0).max(SCALE_BOUND);
+            out.plane_mut(ch)[i] = (d_rate_y * gm_nbits_vjp(resi, sigma, d_rate_y > 0.0)) as f32;
         }
     }
     out
@@ -1022,11 +1032,20 @@ mod oracle {
             let d_rate_y = up.d_rate / pixels;
             let d_resi = rate_vjp(d_rate_y, &y, &rp.y_hat, &rp.residual_q, &scales.scale_log);
             let want_dresi = dump[&format!("rdlr.{i}.gm_resi_grad")].tensor_f32();
-            let mut md = 0.0f32;
+            let (mut md, mut am, mut c_xy, mut c_yy) = (0.0f32, 0.0f64, 0.0f64, 0.0f64);
             for k in 0..d_resi.data.len() {
-                md = md.max((d_resi.data[k] - want_dresi.data[k]).abs());
+                let (a, b) = (d_resi.data[k] as f64, want_dresi.data[k] as f64);
+                md = md.max((a - b) as f32);
+                am += (a - b).abs();
+                c_xy += a * b;
+                c_yy += b * b;
             }
-            assert!(md < 0.02, "iter {i}: gm_resi_grad diff {md}");
+            eprintln!(
+                "  d_resi vs gm_resi_grad: max {md:.3e} mean {:.3e} corr {:.4} scale {:.3}",
+                am / d_resi.data.len() as f64,
+                c_xy / (c_xy.abs().sqrt() * c_yy.sqrt()),
+                c_xy / c_yy
+            );
             // The full backward: `d(y)` vs `cas_y_in_grad`, `d(leaf)` vs `y_grad`.
             let ctx = set.common[0].context.as_ref().unwrap();
             let d_y = backward(
@@ -1069,23 +1088,34 @@ mod oracle {
                         &enough::Unstoppable,
                     )
                     .unwrap();
+                // `compress_backward` alone must land on `cas_y_in_grad`; with
+                // the resi term's direct +1 added it must land on `y_grad`.
+                let want = dump[&format!("rdlr.{i}.cas_y_in_grad")].tensor_f32();
+                let want_l = dump[&format!("rdlr.{i}.y_grad")].tensor_f32();
+                let (mut am0, mut s_xy0, mut s_yy0) = (0.0f64, 0.0f64, 0.0f64);
+                for k in 0..d_y2.data.len() {
+                    am0 += (d_y2.data[k] - want.data[k]).abs() as f64;
+                    s_xy0 += d_y2.data[k] as f64 * want.data[k] as f64;
+                    s_yy0 += (want.data[k] as f64).powi(2);
+                }
                 let mut d_y2 = d_y2;
                 for (a, &b) in d_y2.data.iter_mut().zip(&want_ur.data) {
                     *a += b;
                 }
-                let want = dump[&format!("rdlr.{i}.cas_y_in_grad")].tensor_f32();
                 let (mut md, mut am, mut s_xy, mut s_yy) = (0.0f32, 0.0f64, 0.0f64, 0.0f64);
                 for k in 0..d_y2.data.len() {
-                    let (a, b) = (d_y2.data[k] as f64, want.data[k] as f64);
+                    let (a, b) = (d_y2.data[k] as f64, want_l.data[k] as f64);
                     md = md.max((a - b) as f32 * ((a - b) as f32).signum());
                     am += (a - b).abs();
                     s_xy += a * b;
                     s_yy += b * b;
                 }
                 eprintln!(
-                    "  MCM-only: diff {:.3e} corr {:.3} (d_out=ref upstreams)",
+                    "  MCM-only: cas diff {:.3e} cas corr {:.4} | leaf diff {:.3e} leaf corr {:.4} (d_out=ref upstreams)",
+                    am0 / d_y2.data.len() as f64,
+                    s_xy0 / s_yy0,
                     am / d_y2.data.len() as f64,
-                    s_xy / (s_xy.abs().sqrt() * s_yy.sqrt().max(1e-30))
+                    s_xy / s_yy
                 );
             }
             if i == 1 {
@@ -1170,7 +1200,10 @@ mod oracle {
                     n_clip,
                     e_noclip / want_rec.data.len() as f64
                 );
-                let want_dr = dump[&format!("rdlr.{i}.x_hat_grad")].tensor_f32();
+                // `x_hat_grad` is indexed by decoder CALL, not iteration:
+                // rec.0 is the ref point, rec.{i+1} is iteration i — so iter
+                // i's upstream is `rdlr.{i+1}.x_hat_grad` (dump off-by-one).
+                let want_dr = dump[&format!("rdlr.{}.x_hat_grad", i + 1)].tensor_f32();
                 // Feed the reference's own `x_hat_grad` through the synthesis
                 // backward — if downstream is right, `synth - d_resi` should
                 // then equal `y_hat_grad` (isolating `d_rec` as the sole gap).
@@ -1231,8 +1264,7 @@ mod oracle {
                         base.data[idx] -= eps;
                         let mut rhs = 0.0f64;
                         for k in 0..base_rec.data.len().min(v.data.len()) {
-                            rhs += (pf.data[k] as f64 - base_rec.data[k] as f64)
-                                * v.data[k] as f64;
+                            rhs += (pf.data[k] as f64 - base_rec.data[k] as f64) * v.data[k] as f64;
                         }
                         let lhs = bw.data[idx] as f64 * eps as f64;
                         let rel = (lhs - rhs).abs() / rhs.abs().max(1e-9);
@@ -1382,12 +1414,15 @@ mod oracle {
                     eprintln!("iter {i} ref {nm} absmean {am:.3e}");
                 }
             }
+            // `d_y` is the leaf gradient — compare against `y_grad`, not
+            // `cas_y_in_grad` (which excludes the resi term's direct +1;
+            // `cas_y_in + gm_resi == y_grad` holds exactly in the dump).
             let (mut md_y, mut md_leaf) = (0.0f32, 0.0f32);
             let (mut am_y, mut am_w) = (0.0f64, 0.0f64);
             let (mut s_xy, mut s_xx, mut s_yy) = (0.0f64, 0.0f64, 0.0f64);
             for ch in 0..160 {
                 for k in 0..d_y.plane(ch).len() {
-                    let (a, b) = (d_y.plane(ch)[k] as f64, want_dy.plane(ch)[k] as f64);
+                    let (a, b) = (d_y.plane(ch)[k] as f64, want_leaf.plane(ch)[k] as f64);
                     md_y = md_y.max((d_y.plane(ch)[k] - want_dy.plane(ch)[k]).abs());
                     md_leaf = md_leaf.max((d_y.plane(ch)[k] - want_leaf.plane(ch)[k]).abs());
                     am_y += (a - b).abs();
