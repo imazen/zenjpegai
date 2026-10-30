@@ -826,8 +826,11 @@ measured numbers in the status table above when you close an item.
   consumes `d_xmid = d_out + ffn^T(d_out)`, not `d_out` — the subtle step that makes
   it the true adjoint. `hop_primary_backward_is_adjoint` verifies the whole chain
   against a finite difference (ratio 1.0006): no reference dump needed since a VJP
-  is mathematically determined by the forward. (Semantic parity of the *optimized*
-  HOP latent vs the reference is still unverified — needs a `rdlr_img30_hop_*` dump.)
+  is mathematically determined by the forward. End-to-end `--rdlr --op hop` encodes
+  and decodes a valid stream (256x256, 0.239 bpp; the 560x888 optimizer is
+  compute-bound on the `4·dim·c·n`-f64 attention backward). Semantic parity of the
+  *optimized* HOP latent vs the reference is still unverified — needs a
+  `rdlr_img30_hop_*` dump.
   Driver semantics (`process_y` / `rdlr_y_iteration` / `rdlr_tool`): the leaf is the
   *tile-core* latent (`tiling.get_data(lat_tile, optimized_part_of_lattile_rel_to_overlap)`;
   whole latent for a single tile); each iteration writes the leaf back into the tile at
