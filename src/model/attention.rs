@@ -45,7 +45,6 @@ impl ResidualBlock {
     /// [`Self::forward`] that also returns `conv1`'s output before the ReLU — the
     /// mask `backward` needs. `out = conv2(relu(conv1(x))) + x`. RDLR HOP VJP —
     /// used by `Cab`/`HopPrimary::forward_tape` (wired up next).
-    #[allow(dead_code)]
     pub fn forward_tape(&self, eng: &Engine, x: &BTensor) -> Result<(BTensor, BTensor)> {
         let mut t = self.conv1.forward(eng, x)?;
         let conv1_out = t.clone();
@@ -59,7 +58,6 @@ impl ResidualBlock {
     /// `d_out` (planar) → `d_x` (planar): the skip contributes `d_out` verbatim,
     /// the trunk `conv1^T(relu'(conv1_out) · conv2^T d_out)`. Same-size convs —
     /// `h,w` are the input's throughout. RDLR HOP VJP — used by `Cab::backward`.
-    #[allow(dead_code)]
     pub fn backward(&self, d_out: &Tensor<f32>, conv1_out: &BTensor) -> Result<Tensor<f32>> {
         let (h, w) = (conv1_out.h, conv1_out.w);
         let mut d = self.conv2.backward(d_out, h, w)?;
@@ -144,7 +142,6 @@ impl Cab {
     /// the post-sigmoid mask, each `ResidualBlock`'s `conv1` output, and the
     /// half-resolution mask input's dims. RDLR HOP VJP — used by
     /// `HopPrimary::forward_tape` (wired up next).
-    #[allow(dead_code)]
     #[allow(clippy::type_complexity)]
     pub fn forward_tape(&self, eng: &Engine, x: &BTensor) -> Result<(BTensor, CabTape)> {
         let (mut trunk, rb0_c1) = self.trunk[0].forward_tape(eng, x)?;
@@ -180,7 +177,6 @@ impl Cab {
     /// gets `d_out·sigmoid(m)`, the mask branch `d_out·trunk` through `σ'` and
     /// the mask chain back to full resolution, the skip `d_out` verbatim. RDLR
     /// HOP VJP — used by `HopPrimary::backward` (wired up next).
-    #[allow(dead_code)]
     pub fn backward(&self, d_out: &Tensor<f32>, tape: &CabTape) -> Result<Tensor<f32>> {
         let (h, w) = (tape.trunk_pre.h, tape.trunk_pre.w);
         let trunk = tape.trunk_pre.to_planar()?;
@@ -374,6 +370,130 @@ impl TransformerBlock {
         fast::add_assign(&mut x, &f)?;
         Ok(x)
     }
+
+    /// [`Self::forward`] recording the intermediates `backward` needs (RDLR HOP
+    /// VJP): the block input, the attention `qkv`/`attn`, the post-attention
+    /// input, and the feed-forward's pre-gating halves.
+    fn forward_tape(&self, eng: &Engine, mut x: BTensor) -> Result<(BTensor, TbTape)> {
+        let x_in = x.clone();
+        let mut t = self.prep_norm.forward(eng, &x)?;
+        t = self.prep_conv1.forward(eng, &t)?;
+        t = self.prep_conv2.forward(eng, &t)?;
+        let planar = t.to_planar()?;
+        drop(t);
+        let (a, attn) = math::channel_attention_tape(eng, &planar, HEADS, &self.temperature)?;
+        let blocked = BTensor::from_planar(&a, x.v)?;
+        drop(a);
+        let a = self.attn_out.forward(eng, &blocked)?;
+        drop(blocked);
+        fast::add_assign(&mut x, &a)?;
+        drop(a);
+        let x_mid = x.clone();
+
+        let mut t = self.ffn_norm.forward(eng, &x)?;
+        t = self.ffn_in.forward(eng, &t)?;
+        t = self.ffn_dw.forward(eng, &t)?;
+        let p = t.to_planar_par(eng)?;
+        drop(t);
+        let halves = p.clone();
+        let n = self.hidden * p.h * p.w;
+        let f = if self.hidden.is_multiple_of(x.v) {
+            // Two channel halves of the same blocked layout.
+            let mut tb = BTensor::from_planar_par(eng, &p, x.v)?;
+            let nblk = self.hidden / x.v * tb.h * tb.w * x.v;
+            let (x1, x2) = tb.data.split_at_mut(nblk);
+            math::elu_gate(eng, x1, x2)?;
+            tb.data.truncate(nblk);
+            tb.c = self.hidden;
+            self.ffn_out.forward(eng, &tb)?
+        } else {
+            let mut p = p;
+            let (x1, x2) = p.data.split_at_mut(n);
+            math::elu_gate(eng, x1, x2)?;
+            p.data.truncate(n);
+            p.c = self.hidden;
+            let b = BTensor::from_planar_par(eng, &p, x.v)?;
+            self.ffn_out.forward(eng, &b)?
+        };
+        fast::add_assign(&mut x, &f)?;
+        Ok((
+            x,
+            TbTape {
+                x_in: x_in.to_planar()?,
+                qkv: planar,
+                attn,
+                x_mid: x_mid.to_planar()?,
+                gate: halves,
+            },
+        ))
+    }
+
+    /// `d_out` (planar, block output) → `d_x`. `out = x_mid + ffn(x_mid)` with
+    /// `x_mid = x + attn(x)`, so `d_xmid = d_out + ffn^T(d_out)` and
+    /// `d_x = d_xmid + attn^T(d_xmid)` — the attention backward consumes
+    /// `d_xmid`, not `d_out`. RDLR HOP VJP.
+    fn backward(&self, eng: &Engine, d_out: &Tensor<f32>, tape: &TbTape) -> Result<Tensor<f32>> {
+        let (h, w) = (d_out.h, d_out.w);
+        // Feed-forward branch first: it adds to d_out to form d_xmid.
+        let df = self.ffn_out.backward(d_out, h, w)?;
+        let n = self.hidden * h * w;
+        let (x1, x2) = tape.gate.data.split_at(n);
+        let mut d1 = alloc::vec![0.0f32; n];
+        let mut d2 = alloc::vec![0.0f32; n];
+        math::elu_gate_backward(&df.data, x1, x2, &mut d1, &mut d2);
+        let mut ddw = Tensor::<f32>::zeros(2 * self.hidden, h, w)?;
+        ddw.data[..n].copy_from_slice(&d1);
+        ddw.data[n..].copy_from_slice(&d2);
+        let df = self.ffn_dw.backward(&ddw, h, w)?;
+        let df = self.ffn_in.backward(&df, h, w)?;
+        let df = math::layer_norm_channels_backward(
+            &df,
+            &tape.x_mid,
+            &self.ffn_norm.weight,
+            &self.ffn_norm.bias,
+        )?;
+        let mut d_xmid = d_out.clone();
+        for (a, &b) in d_xmid.data.iter_mut().zip(&df.data) {
+            *a += b;
+        }
+        // Attention branch on d_xmid: attn_out -> channel_attention ->
+        // prep_conv2 -> prep_conv1 -> LN. Then d_x = d_xmid + attn-branch.
+        let d = self.attn_out.backward(&d_xmid, h, w)?;
+        let d = math::channel_attention_backward(
+            eng,
+            &tape.qkv,
+            &tape.attn,
+            &d,
+            HEADS,
+            &self.temperature,
+        )?;
+        let d = self.prep_conv2.backward(&d, h, w)?;
+        let d = self.prep_conv1.backward(&d, h, w)?;
+        let d = math::layer_norm_channels_backward(
+            &d,
+            &tape.x_in,
+            &self.prep_norm.weight,
+            &self.prep_norm.bias,
+        )?;
+        for (a, &b) in d_xmid.data.iter_mut().zip(&d.data) {
+            *a += b;
+        }
+        Ok(d_xmid)
+    }
+}
+
+/// `TransformerBlock::backward`'s forward intermediates (RDLR HOP VJP).
+pub(crate) struct TbTape {
+    /// Block input (planar) — `prep_norm`'s input for the LN backward.
+    x_in: Tensor<f32>,
+    /// `prep_conv2`'s planar output — the `qkv` `channel_attention` consumed.
+    qkv: Tensor<f32>,
+    /// The attention softmax weights.
+    attn: Vec<f32>,
+    /// Post-attention block input (planar) — `ffn_norm`'s input.
+    x_mid: Tensor<f32>,
+    /// `ffn_dw`'s planar output — the elu-gate halves `x1`/`x2`.
+    gate: Tensor<f32>,
 }
 
 /// `TAM`: two transformer blocks, optionally run at half resolution between a stride-2
@@ -423,4 +543,63 @@ impl Tam {
             None => Ok(x),
         }
     }
+
+    /// [`Self::forward`] recording the two `TransformerBlock` tapes and the
+    /// resample input dims `backward` needs (RDLR HOP VJP).
+    pub fn forward_tape(&self, eng: &Engine, x: BTensor) -> Result<(BTensor, TamTape)> {
+        let in_dims = (x.h, x.w);
+        let x = match &self.resample {
+            Some((ds, _)) => {
+                let t = ds.forward(eng, &x)?;
+                drop(x);
+                t
+            }
+            None => x,
+        };
+        let (x, t0) = self.blocks[0].forward_tape(eng, x)?;
+        let mid_dims = (x.h, x.w);
+        let (x, t1) = self.blocks[1].forward_tape(eng, x)?;
+        let out = match &self.resample {
+            Some((_, us)) => us.forward(eng, &x)?,
+            None => x,
+        };
+        Ok((
+            out,
+            TamTape {
+                tb: [t0, t1],
+                in_dims,
+                mid_dims,
+            },
+        ))
+    }
+
+    /// `d_out` (planar) → `d_x`: `us_conv` backward (if resampled) → block1 →
+    /// block0 → `ds_conv` backward. RDLR HOP VJP.
+    pub fn backward(
+        &self,
+        eng: &Engine,
+        d_out: &Tensor<f32>,
+        tape: &TamTape,
+    ) -> Result<Tensor<f32>> {
+        let d = match &self.resample {
+            Some((_, us)) => us.backward(d_out, tape.mid_dims.0, tape.mid_dims.1)?,
+            None => d_out.clone(),
+        };
+        let d = self.blocks[1].backward(eng, &d, &tape.tb[1])?;
+        let d = self.blocks[0].backward(eng, &d, &tape.tb[0])?;
+        match &self.resample {
+            Some((ds, _)) => ds.backward(&d, tape.in_dims.0, tape.in_dims.1),
+            None => Ok(d),
+        }
+    }
+}
+
+/// `Tam::backward`'s forward intermediates (RDLR HOP VJP).
+pub(crate) struct TamTape {
+    /// Each `TransformerBlock`'s tape.
+    tb: [TbTape; 2],
+    /// `ds_conv`'s input dims (`Tam`'s full-resolution input).
+    in_dims: (usize, usize),
+    /// `us_conv`'s input dims (the half-resolution block output).
+    mid_dims: (usize, usize),
 }

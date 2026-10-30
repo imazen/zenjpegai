@@ -265,7 +265,6 @@ pub fn channel_attention(
 
 /// [`channel_attention`] that also returns the `attn` weights — the tape
 /// `channel_attention_backward` needs (RDLR HOP VJP).
-#[allow(dead_code)]
 pub fn channel_attention_tape(
     eng: &Engine,
     qkv: &Tensor<f32>,
@@ -312,7 +311,6 @@ pub fn channel_attention_tape(
 /// weights (from [`channel_attention_tape`]). `d_attn = d_out·v^T`, softmax
 /// VJP, `dq = T·d·k`, `dk = T·d^T·q`, `dv = attn^T·d_out`, then the L2-norm
 /// backward on q,k — all sums in `dot8` order for tier bit-identity.
-#[allow(dead_code)]
 pub fn channel_attention_backward(
     eng: &Engine,
     qkv: &Tensor<f32>,
@@ -426,7 +424,6 @@ pub fn channel_attention_backward(
 /// `elu_gate` backward: `a = elu(a)·b` upstream `d` → `(d_a, d_b)` where
 /// `d_a = elu'(a)·b·d` (`elu'(x) = 1` for `x>0`, `exp(x)` else) and
 /// `d_b = elu(a)·d`. `a`/`b` are the forward's pre-gating halves. RDLR VJP.
-#[allow(dead_code)]
 pub fn elu_gate_backward(d: &[f32], a: &[f32], b: &[f32], d_a: &mut [f32], d_b: &mut [f32]) {
     for (((da, db), (&av, &bv)), &o) in d_a
         .iter_mut()
@@ -445,7 +442,6 @@ pub fn elu_gate_backward(d: &[f32], a: &[f32], b: &[f32], d_a: &mut [f32], d_b: 
 /// (x[c][i]−μ[i])/σ[i]·w[c]+b[c]` → `d_x`. `x` is the forward's pre-LN input
 /// (μ,σ recomputed). Per position `d_x[c] = (d_ŷ[c] − mean(d_ŷ) − ŷ[c]·
 /// mean(d_ŷ·ŷ))/σ` with `d_ŷ = d·w`. RDLR VJP.
-#[allow(dead_code)]
 pub fn layer_norm_channels_backward(
     d: &Tensor<f32>,
     x: &Tensor<f32>,

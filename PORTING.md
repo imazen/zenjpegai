@@ -815,12 +815,19 @@ measured numbers in the status table above when you close an item.
   clamped to `[0,34]`, fraction preserved, then `exp(idx·log_k + ln σ_min)` —
   identical to `rate_point_y`'s forward sigma, reproducing `rate_y` to 0.08
   bits — plus the `/2` Gaussian exponent and `LowerBound`'s unstick
-  (`x>=bound | grad<0`) pass-through. **Not ported: the HOP synthesis VJP** —
-  `Primary::forward_tape`/`backward` cover `Light` (BOP/SOP) only, so
-  `--rdlr --op hop` errors `HOP synthesis backward not yet implemented` instead
-  of running; RDLR on HOP needs a `PrimaryTape::Hop` and the TAM/CAB backwards,
-  plus a `rdlr_img30_hop_*` oracle dump to verify against (the reference's
-  `dump_rdlr.py` works on any op but needs the reference venv).
+  (`x>=bound | grad<0`) pass-through. **HOP synthesis VJP** is implemented too —
+  `Primary::forward_tape`/`backward` dispatch on `Light`/`Hop` (`PrimaryTape::{Light,
+  Hop}`): `HopPrimary`'s `res`/`up*`/`act*`/`cab`/`conv3`/`pixel_shuffle`/`tam`/
+  `up4`/`denormalize` chain backwards compose the `ResidualBlock`, `Cab`, TAM
+  `TransformerBlock` (channel-attention softmax VJP `d_attn=d_out·v^T`→`da`→
+  `dq/dk/dv`+L2-norm, `layer_norm_channels`, `elu_gate`) adjoints — all `dot8`-order
+  `f64` accumulation for tier bit-identity. The `TransformerBlock`'s *nested* residual
+  (`out = x_mid + ffn(x_mid)`, `x_mid = x + attn(x)`) means the attention backward
+  consumes `d_xmid = d_out + ffn^T(d_out)`, not `d_out` — the subtle step that makes
+  it the true adjoint. `hop_primary_backward_is_adjoint` verifies the whole chain
+  against a finite difference (ratio 1.0006): no reference dump needed since a VJP
+  is mathematically determined by the forward. (Semantic parity of the *optimized*
+  HOP latent vs the reference is still unverified — needs a `rdlr_img30_hop_*` dump.)
   Driver semantics (`process_y` / `rdlr_y_iteration` / `rdlr_tool`): the leaf is the
   *tile-core* latent (`tiling.get_data(lat_tile, optimized_part_of_lattile_rel_to_overlap)`;
   whole latent for a single tile); each iteration writes the leaf back into the tile at

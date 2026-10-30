@@ -233,6 +233,7 @@ pub(crate) fn backward(
     let d_rec = rec_grad(eng, up, &rp.rec, original, area)?;
     // d(y_hat) — synthesis backward minus the resi term's -means_hat.
     let d_yhat_synth = synthesis.backward(
+        eng,
         rp.synth_tape
             .as_ref()
             .ok_or(Error::InvalidArgument("RDLR: no synthesis tape"))?,
@@ -1142,7 +1143,7 @@ mod oracle {
                 // backward — if downstream is right, `synth - d_resi` should
                 // then equal `y_hat_grad` (isolating `d_rec` as the sole gap).
                 let ref_synth = synthesis
-                    .backward(rp.synth_tape.as_ref().unwrap(), &want_dr)
+                    .backward(eng, rp.synth_tape.as_ref().unwrap(), &want_dr)
                     .unwrap();
                 let want_dyh = dump[&format!("rdlr.{i}.y_hat_grad")].tensor_f32();
                 let (mut e_xy, mut e_xx, mut e_yy) = (0.0f64, 0.0f64, 0.0f64);
@@ -1166,7 +1167,7 @@ mod oracle {
                 if i == 1 {
                     let v = &want_dr;
                     let bw = synthesis
-                        .backward(rp.synth_tape.as_ref().unwrap(), v)
+                        .backward(eng, rp.synth_tape.as_ref().unwrap(), v)
                         .unwrap();
                     let eps = 1e-3f32;
                     let n = want_yh1.data.len();
@@ -1222,7 +1223,10 @@ mod oracle {
                 if i == 1 {
                     let bop = load_dump(Path::new("/home/lilith/tmp/bop_layers"));
                     let crate::model::synthesis::PrimaryTape::Light(tape) =
-                        rp.synth_tape.as_ref().unwrap();
+                        rp.synth_tape.as_ref().unwrap()
+                    else {
+                        return;
+                    };
                     let cmp = |mine: &Tensor<f32>, want: &Tensor<f32>, tag: &str| {
                         let mut md = 0.0f64;
                         let mut ad = 0.0f64;
@@ -1420,7 +1424,7 @@ mod oracle {
                 for (k, v) in d_rec.data.iter_mut().enumerate() {
                     *v = ((k * 7919) % 977) as f32 / 977.0 - 0.5;
                 }
-                let d_yh = synthesis.backward(&tape, &d_rec).unwrap();
+                let d_yh = synthesis.backward(eng, &tape, &d_rec).unwrap();
                 // Full inner-product adjoint: a single random `v` verifies the
                 // whole backward — ⟨d_yh, v⟩ must equal ⟨d_rec, rec(y+εv)−rec(y)⟩/ε.
                 let mut v = rp.y_hat.clone();
@@ -1508,5 +1512,83 @@ mod oracle {
                 "optimize_y best_loss {best_loss}"
             );
         }
+    }
+
+    /// The HOP synthesis VJP is the network adjoint: `⟨backward(d), v⟩` must
+    /// equal `⟨d, forward(y+εv) − forward(y)⟩/ε` for any deterministic `v`/`d`.
+    /// Self-contained — no reference dump, the same identity the conv VJPs
+    /// (`conv2d_backward_is_adjoint`) already satisfy.
+    #[test]
+    fn hop_primary_backward_is_adjoint() {
+        let models = std::env::var_os("ZENJPEGAI_MODELS")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from("/home/lilith/work/zen/jpeg-ai-reference-software/models")
+            });
+        let enc = crate::encoder::Encoder::new(models);
+        let eng = &enc.engine;
+        let synthesis =
+            crate::model::load_synthesis_primary(enc.models.as_ref(), 2, OperatingPoint::Hop, eng)
+                .unwrap();
+        // A small deterministic latent `[160, 4, 4]` over a 64x64 picture.
+        let (h, w, lh, lw) = (64usize, 64usize, 4usize, 4usize);
+        let mut y = crate::tensor::Tensor::<f32>::zeros(160, lh, lw).unwrap();
+        for (k, v) in y.data.iter_mut().enumerate() {
+            *v = ((k * 2654435761usize) % 1021) as f32 / 1021.0 - 0.5;
+        }
+        let (rec_t, tape) = synthesis
+            .forward_tape(
+                eng,
+                &BTensor::from_planar(&y, eng.tier.block()).unwrap(),
+                h,
+                w,
+                &enough::Unstoppable,
+            )
+            .unwrap();
+        let mut d_rec = Tensor::<f32>::zeros(1, rec_t.h, rec_t.w).unwrap();
+        for (k, v) in d_rec.data.iter_mut().enumerate() {
+            *v = ((k * 7919) % 977) as f32 / 977.0 - 0.5;
+        }
+        let d_yh = synthesis.backward(eng, &tape, &d_rec).unwrap();
+        let mut v = y.clone();
+        for (k, x) in v.data.iter_mut().enumerate() {
+            *x = ((k * 40503usize) % 1021) as f32 / 1021.0 - 0.5;
+        }
+        let lhs: f64 = d_yh
+            .data
+            .iter()
+            .zip(&v.data)
+            .map(|(&a, &b)| a as f64 * b as f64)
+            .sum();
+        let mut yp = y.clone();
+        let e = 1e-3f32;
+        for (x, &b) in yp.data.iter_mut().zip(&v.data) {
+            *x += e * b;
+        }
+        let rec_p = synthesis
+            .forward_with(
+                eng,
+                &BTensor::from_planar(&yp, eng.tier.block()).unwrap(),
+                h,
+                w,
+                &enough::Unstoppable,
+            )
+            .unwrap();
+        let rhs: f64 = d_rec
+            .data
+            .iter()
+            .zip(&rec_p.data)
+            .zip(&rec_t.data)
+            .map(|((&d, &rp_), &rt)| d as f64 * (rp_ - rt) as f64)
+            .sum::<f64>()
+            / e as f64;
+        eprintln!(
+            "hop synthesis adjoint: bwd {lhs:.5e}  fd {rhs:.5e}  ratio {:.4}",
+            lhs / rhs
+        );
+        assert!(
+            ((lhs - rhs) / rhs.abs().max(1.0)).abs() < 5e-3,
+            "hop synthesis backward not the adjoint: {lhs} vs {rhs}"
+        );
     }
 }

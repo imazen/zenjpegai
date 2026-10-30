@@ -286,19 +286,26 @@ impl SynthesisPrimary {
         match &self.0 {
             Primary::Light(m) => {
                 let (rec, t) = m.forward_tape(eng, y_hat, h, w, stop)?;
-                Ok((rec, PrimaryTape::Light(t)))
+                Ok((rec, PrimaryTape::Light(Box::new(t))))
             }
-            Primary::Hop(_) => Err(Error::InvalidArgument(
-                "RDLR VJP: HOP synthesis backward not yet implemented",
-            )),
+            Primary::Hop(m) => {
+                let (rec, t) = m.forward_tape(eng, y_hat, h, w, stop)?;
+                Ok((rec, PrimaryTape::Hop(Box::new(t))))
+            }
         }
     }
 
     /// The input gradient through the synthesis (RDLR VJP): `d_rec` → `d(y_hat)`
     /// as a planar `[160, lh, lw]` tensor.
-    pub fn backward(&self, tape: &PrimaryTape, d_rec: &Tensor<f32>) -> Result<Tensor<f32>> {
+    pub fn backward(
+        &self,
+        eng: &Engine,
+        tape: &PrimaryTape,
+        d_rec: &Tensor<f32>,
+    ) -> Result<Tensor<f32>> {
         match (&self.0, tape) {
             (Primary::Light(m), PrimaryTape::Light(t)) => m.backward(t, d_rec),
+            (Primary::Hop(m), PrimaryTape::Hop(t)) => m.backward(eng, t, d_rec),
             _ => Err(Error::InvalidArgument("RDLR VJP: tape / primary mismatch")),
         }
     }
@@ -307,7 +314,9 @@ impl SynthesisPrimary {
 /// The synthesis's per-primary VJP tape (RDLR).
 pub enum PrimaryTape {
     /// `LightPrimary`'s tape.
-    Light(SynthTape),
+    Light(Box<SynthTape>),
+    /// `HopPrimary`'s tape.
+    Hop(Box<HopTape>),
 }
 
 /// `DecoderHOPPrim`.
@@ -379,6 +388,125 @@ impl HopPrimary {
         denormalize(&mut x);
         Ok(x)
     }
+
+    /// [`Self::forward`] recording the intermediates `backward` needs (RDLR HOP
+    /// VJP): each layer's tape plus the dims the crop/transpose backwards pad to.
+    #[allow(clippy::too_many_lines)]
+    fn forward_tape(
+        &self,
+        eng: &Engine,
+        y_hat: &BTensor,
+        h: usize,
+        w: usize,
+        stop: &dyn Stop,
+    ) -> Result<(Tensor<f32>, HopTape)> {
+        let (mut x, res_c1) = self.res.forward_tape(eng, y_hat)?;
+        stop.check()?;
+        x = self.up1.forward(eng, &x)?;
+        let (x, a1x, a1m) = self.act1.forward_tape(eng, x)?;
+        let a1_dims = (x.h, x.w);
+        let mut x = x.crop_par(eng, h.div_ceil(8), w.div_ceil(8))?;
+        let crop8_dims = (x.h, x.w);
+        stop.check()?;
+        x = self.up2.forward(eng, &x)?;
+        let (x, cab_t) = self.cab.forward_tape(eng, &x)?;
+        let cab_dims = (x.h, x.w);
+        let x = x.crop_par(eng, h.div_ceil(4), w.div_ceil(4))?;
+        let crop4_dims = (x.h, x.w);
+        stop.check()?;
+        let (x, a2x, a2m) = self.act2.forward_tape(eng, x)?;
+        let mut x = x;
+        stop.check()?;
+        x = self.conv3.forward(eng, &x)?;
+        x = fast::pixel_shuffle(eng, &x, 2)?;
+        stop.check()?;
+        let (x, tam_t) = self.tam.forward_tape(eng, x)?;
+        let tam_dims = (x.h, x.w);
+        let x = x.crop_par(eng, h.div_ceil(2), w.div_ceil(2))?;
+        let crop2_dims = (x.h, x.w);
+        stop.check()?;
+        let (x, a3x, a3m) = self.act3.forward_tape(eng, x)?;
+        let mut x = x;
+        stop.check()?;
+        x = self.up4.forward(eng, &x)?;
+        let mut x = x.to_planar()?;
+        let pre_denorm = x.clone();
+        denormalize(&mut x);
+        Ok((
+            x,
+            HopTape {
+                res_c1,
+                act: [(a1x, a1m), (a2x, a2m), (a3x, a3m)],
+                cab_t,
+                tam_t,
+                pre_denorm,
+                a1_dims,
+                cab_dims,
+                tam_dims,
+                crop8_dims,
+                crop4_dims,
+                crop2_dims,
+            },
+        ))
+    }
+
+    /// `d_rec` (planar `[1,H,W]`) → `d(y_hat)` (planar `[160,lh,lw]`): the
+    /// reverse of `forward` — denormalize → up4 → act3 → pad → tam →
+    /// pixel_shuffle → conv3 → act2 → pad → cab → up2 → pad → act1 → up1 → res.
+    fn backward(&self, eng: &Engine, tape: &HopTape, d_rec: &Tensor<f32>) -> Result<Tensor<f32>> {
+        let d = denormalize_backward(d_rec, &tape.pre_denorm);
+        let (uh, uw) = tape.crop2_dims;
+        let d = self.up4.backward(&d, uh, uw)?;
+        let d = self.act3.backward(&d, &tape.act[2].0, &tape.act[2].1)?;
+        // crop_par(h/2) backward: pad to tam's output dims.
+        let d = zero_pad(&d, tape.tam_dims.0, tape.tam_dims.1)?;
+        let d = self.tam.backward(eng, &d, &tape.tam_t)?;
+        // pixel_shuffle(2) backward -> conv3's [4c] output.
+        let d = pixel_shuffle_backward(&d, 2)?;
+        let d = self
+            .conv3
+            .backward(&d, tape.crop4_dims.0, tape.crop4_dims.1)?;
+        let d = self.act2.backward(&d, &tape.act[1].0, &tape.act[1].1)?;
+        // crop_par(h/4) backward: pad to cab's output dims.
+        let d = zero_pad(&d, tape.cab_dims.0, tape.cab_dims.1)?;
+        let d = self.cab.backward(&d, &tape.cab_t)?;
+        let d = self
+            .up2
+            .backward(&d, tape.crop8_dims.0, tape.crop8_dims.1)?;
+        // crop_par(h/8) backward: pad to act1's (= up1's) output dims.
+        let d = zero_pad(&d, tape.a1_dims.0, tape.a1_dims.1)?;
+        let d = self.act1.backward(&d, &tape.act[0].0, &tape.act[0].1)?;
+        let (lh, lw) = (tape.res_c1.h, tape.res_c1.w);
+        let d = self.up1.backward(&d, lh, lw)?;
+        // ResidualBlock: conv2(relu(conv1(y)))+y — res.backward adds the skip.
+        self.res.backward(&d, &tape.res_c1)
+    }
+}
+
+/// `HopPrimary::backward`'s forward intermediates (RDLR HOP VJP).
+pub struct HopTape {
+    /// `res`'s `conv1` output (the ReLU mask).
+    res_c1: BTensor,
+    /// Each `ResAu`'s `(x, mask)`.
+    act: [(BTensor, BTensor); 3],
+    /// `cab`'s tape.
+    cab_t: crate::model::attention::CabTape,
+    /// `tam`'s tape.
+    tam_t: crate::model::attention::TamTape,
+    /// The picture before `denormalize`.
+    pre_denorm: Tensor<f32>,
+    /// `act1`/`up1` output dims (`crop_par(h/8)` backward target).
+    a1_dims: (usize, usize),
+    /// `cab` output dims (`crop_par(h/4)` backward target).
+    cab_dims: (usize, usize),
+    /// `tam` output dims (`crop_par(h/2)` backward target).
+    tam_dims: (usize, usize),
+    /// `crop_par(h/8)` output dims (`up2` input).
+    crop8_dims: (usize, usize),
+    /// `crop_par(h/4)` output dims (`act2`/`conv3` input).
+    crop4_dims: (usize, usize),
+    /// `crop_par(h/2)` output dims (`act3`/`up4` input).
+    crop2_dims: (usize, usize),
 }
 
 /// `DecoderSOPPrim` / `DecoderBOPPrim`.
