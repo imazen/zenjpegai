@@ -1081,6 +1081,30 @@ Remaining ~8%: `d_resi` scale drifts 0.99→1.05 across iterations (divisor
 small and uncorrelated. Still missing vs full RDLR parity: chroma
 (`numIteYChroma`), tiled (>1 MP) coverage, and the final BD-rate check.
 
+## RDLR shipped-config scope (2026-10-30)
+
+The shipped `cfg/tools/RDLR.json` runs a much narrower RDLR than the source
+suggests: `numIteYLuma=8`, `numIteYChroma=0`, `numIteZLuma/ZChroma=0` — only
+the luma Y loop runs; chroma and Z-RDLR are dead config. `RDLR._process` also
+gates on `num_samples < numSamples` (4.2 MP), and with
+`numSamplesPerLumaTile=4.2M` equal to the gate, `process_y`'s TileManager can
+never split: **luma is always a single tile** in the shipped config. Our
+single-tile `rdlr::luma` + the new `pixels < 4_200_000` gate therefore
+matches shipped behaviour exactly; the chroma/tiled paths below describe the
+unshipped branches only.
+
+Two more shipped-config fixes landed in the same change:
+
+- `_get_slopes_parameters` `single_seq_bpp_slopes` uses **fixed**
+  `mean_{psnrY,msssimY}_slopes` tables keyed by `int(target_bpp·100)`
+  (6/12/25/50/75/'other', degrees→radians) — not per-image probing. The
+  dumped vector's slopes (76.474952° / 1.200354°) are exactly bucket 12
+  (beta 0.012's `-target_bpps 12`). `rdlr::fixed_slopes` + `target_bpp_centi`
+  (beta→centi-bpp `[6,12,25,50]`) replace the earlier `estimate_slopes`
+  probe; the encode path now uses the reference's fixed values.
+- `backward`'s `z_hat` argument is genuinely unused (the z-rate is
+  piecewise-constant in y) — renamed `_z_hat`.
+
 Chroma (`rdlr_comp_UV.get_current_rate_point`) differs from the luma path in
 three ways the port must mirror: `_compress_ar_scale` is called with explicit
 `(y.clone(), psi, scale_log, True, scale_lin)` args (not `decisions`);

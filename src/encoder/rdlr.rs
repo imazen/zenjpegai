@@ -218,7 +218,7 @@ pub(crate) fn backward(
     up: &LossUpstream,
     rp: &RatePoint,
     y: &Tensor<f32>,
-    z_hat: &Tensor<i8>,
+    _z_hat: &Tensor<i8>,
     scale_log: &Tensor<i32>,
     mask: &Tensor<bool>,
     q: &impl mcm::Quantiser,
@@ -450,48 +450,38 @@ fn calc_lr(num_samples: f64) -> f32 {
     }
 }
 
-/// The operating-point BD-curve tangents (`slope_psnr`, `slope_msssim`) —
-/// `atan(Δdistortion / Δlog bpp)` probed by a small latent scale (a direction the
-/// optimiser itself can move: more latent energy costs rate and buys distortion,
-/// the local rate/distortion tangent). One extra rate point.
-#[allow(clippy::too_many_arguments)]
-fn estimate_slopes(
-    eng: &Engine,
-    hdr: &crate::header::PictureHeader,
-    model: &crate::model::common::CommonModel,
-    synthesis: &SynthesisPrimary,
-    lh: &lh::Likelihood,
-    y: &Tensor<f32>,
-    z_hat: &Tensor<i8>,
-    scale_log: &Tensor<i32>,
-    mask: &Tensor<bool>,
-    q: &impl mcm::Quantiser,
-    num_chs: usize,
-    original: &Tensor<f32>,
-    area: Area,
-    pixels: f64,
-    stop: &dyn enough::Stop,
-) -> Result<(f64, f64)> {
-    let r0 = rate_point_y(
-        eng, hdr, model, synthesis, lh, y, z_hat, scale_log, mask, q, num_chs, original, area,
-        pixels, stop,
-    )?;
-    let mut yp = y.clone();
-    for v in &mut yp.data {
-        *v *= 1.02;
-    }
-    let r1 = rate_point_y(
-        eng, hdr, model, synthesis, lh, &yp, z_hat, scale_log, mask, q, num_chs, original, area,
-        pixels, stop,
-    )?;
-    let dl = r1.bpp.ln() - r0.bpp.ln();
-    if dl.abs() < 1e-9 {
-        return Ok((0.0, 0.0));
-    }
-    Ok((
-        ((r1.psnr - r0.psnr) / dl).atan(),
-        ((r1.msssim - r0.msssim) / dl).atan(),
-    ))
+/// The operating points' `target_bpps` in centi-bpp (the `-target_bpps` CLI
+/// values — `target_bpps[bpp_idx]` indexes `mean_*_slopes`). `get_target_bpp`
+/// is `target_bpps[idx]·0.01`; `get_target_bpp_int` = `int(target_bpp·100)`
+/// recovers the centi-bpp key. Beta [0.002, 0.012, 0.075, 0.5] → [6, 12, 25, 50].
+fn target_bpp_centi(model_id: u8) -> i32 {
+    const TARGET_BPPS: [i32; 4] = [6, 12, 25, 50];
+    TARGET_BPPS.get(model_id as usize).copied().unwrap_or(-1)
+}
+
+/// `_get_slopes_parameters` `single_seq_bpp_slopes` fallback: the fixed
+/// `mean_{psnrY,msssimY}_slopes` keyed by `int(target_bpp·100)` (degrees →
+/// radians). The dumped vector's slopes (76.474952° / 1.200354°) match bucket
+/// 12 — beta 0.012's `-target_bpps 12`. Non-listed targets take `'other'`.
+fn fixed_slopes(target_bpp_int: i32) -> (f64, f64) {
+    let deg = std::f64::consts::PI / 180.0;
+    let psnr = match target_bpp_int {
+        6 => 74.868811,
+        12 => 76.474952,
+        25 => 76.252456,
+        50 => 69.157414,
+        75 => 57.958624,
+        _ => 70.942451,
+    };
+    let msssim = match target_bpp_int {
+        6 => 1.629650,
+        12 => 1.200354,
+        25 => 0.785844,
+        50 => 0.372070,
+        75 => 0.175778,
+        _ => 0.832739,
+    };
+    (psnr * deg, msssim * deg)
 }
 
 /// `process_y`'s whole-picture luma path for `EncodeParams::rdlr`: the source
@@ -531,10 +521,7 @@ pub(crate) fn luma(
         )?;
         (r.bpp, r.psnr, r.msssim)
     };
-    let (sp, sm) = estimate_slopes(
-        eng, hdr, model, &synthesis, lh, latent, z_hat, scale_log, mask, q, num_chs, original,
-        area, pixels, stop,
-    )?;
+    let (sp, sm) = fixed_slopes(target_bpp_centi(model_id));
     let (best, _loss) = optimize_y(
         eng,
         ctx,

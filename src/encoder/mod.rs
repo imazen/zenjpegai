@@ -1432,7 +1432,13 @@ impl Encoder {
         // Adagrad iterations toward a better rate/distortion point, then quantise
         // the refined latent's residual as usual.
         let refined;
-        let latent = if ccs == 0 && params.rdlr && hdr.regions.is_none() {
+        // `RDLR._process` gates on `num_samples < numSamples` (4.2 MP): larger
+        // pictures return their decisions unchanged — no RDLR at all.
+        let latent = if ccs == 0
+            && params.rdlr
+            && hdr.regions.is_none()
+            && rdlr_org.map(|s| s.w * s.h < 4_200_000).unwrap_or(true)
+        {
             let source = rdlr_org.ok_or_else(|| {
                 Error::InvalidArgument("RDLR: the encode needs the source planes".into())
             })?;
