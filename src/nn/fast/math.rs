@@ -262,16 +262,40 @@ fn channel_attention_impl(
     for_each_row(eng, &mut out.data, n, |row_idx, row| {
         let head = row_idx / c;
         let weights = &attn[row_idx * c..][..c];
-        let mut acc = alloc::vec![0.0f64; n];
-        let _acc_charge = crate::mem::Charge::of_vec(&acc);
-        for (j, &a) in weights.iter().enumerate() {
-            axpy64(&mut acc, a as f64, &v[(head * c + j) * n..][..n]);
-        }
-        for (o, &s) in row.iter_mut().zip(&acc) {
-            *o = s as f32;
-        }
+        scratch64(n, |acc| {
+            for (j, &a) in weights.iter().enumerate() {
+                axpy64(acc, a as f64, &v[(head * c + j) * n..][..n]);
+            }
+            for (o, &s) in row.iter_mut().zip(&*acc) {
+                *o = s as f32;
+            }
+        });
     });
     Ok((out, attn))
+}
+
+/// `f` runs with a zeroed `f64` scratch of `n`, reused per thread between calls
+/// — the attention VJP's accumulators (an `f64` [`conv` module's `border_buf`]).
+fn scratch64(n: usize, f: impl FnOnce(&mut [f64])) {
+    #[cfg(feature = "std")]
+    {
+        use std::cell::RefCell;
+        thread_local! {
+            /// The scratch and its ledger token; both die at thread exit.
+            static SCRATCH64: RefCell<(Vec<f64>, crate::mem::Charge)> =
+                const { RefCell::new((Vec::new(), crate::mem::Charge::EMPTY)) };
+        }
+        SCRATCH64.with(|s| {
+            let mut s = s.borrow_mut();
+            s.0.clear();
+            s.0.resize(n, 0.0);
+            let bytes = crate::mem::vec_bytes(&s.0);
+            s.1.resize(bytes);
+            f(s.0.as_mut_slice());
+        });
+    }
+    #[cfg(not(feature = "std"))]
+    f(&mut alloc::vec![0.0f64; n]);
 }
 
 /// [`channel_attention`] that also returns the `attn` weights — the tape
@@ -344,57 +368,60 @@ pub fn channel_attention_backward(
             // dq_row[l] = T · Σ_j da_row[j]·k_j[l], then the L2-norm backward.
             let head = row_idx / c;
             let da_row = &da[row_idx * c..][..c];
-            let mut acc = alloc::vec![0.0f64; n];
-            for (j, &a) in da_row.iter().enumerate() {
-                let w = temperature[head] * a;
-                let kj = &k[(head * c + j) * n..][..n];
-                for (s, &kv) in acc.iter_mut().zip(kj) {
-                    *s += w as f64 * kv as f64;
-                }
-            }
             let q_row = &q[row_idx * n..][..n];
-            let mut proj = 0.0f64;
-            for (&ql, &s) in q_row.iter().zip(&acc) {
-                proj += ql as f64 * s;
-            }
-            let inv = 1.0 / norms[row_idx] as f64;
-            for (o, (&ql, &s)) in row.iter_mut().zip(q_row.iter().zip(&acc)) {
-                *o = ((s - proj * ql as f64) * inv) as f32;
-            }
+            scratch64(n, |acc| {
+                for (j, &a) in da_row.iter().enumerate() {
+                    let w = temperature[head] * a;
+                    let kj = &k[(head * c + j) * n..][..n];
+                    for (s, &kv) in acc.iter_mut().zip(kj) {
+                        *s += w as f64 * kv as f64;
+                    }
+                }
+                let mut proj = 0.0f64;
+                for (&ql, &s) in q_row.iter().zip(acc.iter()) {
+                    proj += ql as f64 * s;
+                }
+                let inv = 1.0 / norms[row_idx] as f64;
+                for (o, (&ql, &s)) in row.iter_mut().zip(q_row.iter().zip(acc.iter())) {
+                    *o = ((s - proj * ql as f64) * inv) as f32;
+                }
+            });
         } else if row_idx < 2 * dim {
             // dk_j[l] = T · Σ_i da_i[j]·q_i[l], then the L2-norm backward.
             let (head, j) = ((row_idx - dim) / c, (row_idx - dim) % c);
             let kj = &k[(head * c + j) * n..][..n];
-            let mut acc = alloc::vec![0.0f64; n];
-            for i in 0..c {
-                let w = temperature[head] * da[(head * c + i) * c + j];
-                let qi = &q[(head * c + i) * n..][..n];
-                for (s, &qv) in acc.iter_mut().zip(qi) {
-                    *s += w as f64 * qv as f64;
+            scratch64(n, |acc| {
+                for i in 0..c {
+                    let w = temperature[head] * da[(head * c + i) * c + j];
+                    let qi = &q[(head * c + i) * n..][..n];
+                    for (s, &qv) in acc.iter_mut().zip(qi) {
+                        *s += w as f64 * qv as f64;
+                    }
                 }
-            }
-            let mut proj = 0.0f64;
-            for (&kl, &s) in kj.iter().zip(&acc) {
-                proj += kl as f64 * s;
-            }
-            let inv = 1.0 / norms[dim + head * c + j] as f64;
-            for (o, (&kl, &s)) in row.iter_mut().zip(kj.iter().zip(&acc)) {
-                *o = ((s - proj * kl as f64) * inv) as f32;
-            }
+                let mut proj = 0.0f64;
+                for (&kl, &s) in kj.iter().zip(acc.iter()) {
+                    proj += kl as f64 * s;
+                }
+                let inv = 1.0 / norms[dim + head * c + j] as f64;
+                for (o, (&kl, &s)) in row.iter_mut().zip(kj.iter().zip(acc.iter())) {
+                    *o = ((s - proj * kl as f64) * inv) as f32;
+                }
+            });
         } else {
             // dv_j[l] = Σ_i attn[i][j]·d_out_i[l].
             let (head, j) = ((row_idx - 2 * dim) / c, (row_idx - 2 * dim) % c);
-            let mut acc = alloc::vec![0.0f64; n];
-            for i in 0..c {
-                let a = attn[(head * c + i) * c + j] as f64;
-                let d_out_row = &d_out.data[(head * c + i) * n..][..n];
-                for (s, &dv) in acc.iter_mut().zip(d_out_row) {
-                    *s += a * dv as f64;
+            scratch64(n, |acc| {
+                for i in 0..c {
+                    let a = attn[(head * c + i) * c + j] as f64;
+                    let d_out_row = &d_out.data[(head * c + i) * n..][..n];
+                    for (s, &dv) in acc.iter_mut().zip(d_out_row) {
+                        *s += a * dv as f64;
+                    }
                 }
-            }
-            for (o, &s) in row.iter_mut().zip(&acc) {
-                *o = s as f32;
-            }
+                for (o, &s) in row.iter_mut().zip(acc.iter()) {
+                    *o = s as f32;
+                }
+            });
         }
     });
     Ok(dqkv)
