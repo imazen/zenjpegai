@@ -423,6 +423,85 @@ pub fn channel_attention_backward(
     Ok(dqkv)
 }
 
+/// `elu_gate` backward: `a = elu(a)·b` upstream `d` → `(d_a, d_b)` where
+/// `d_a = elu'(a)·b·d` (`elu'(x) = 1` for `x>0`, `exp(x)` else) and
+/// `d_b = elu(a)·d`. `a`/`b` are the forward's pre-gating halves. RDLR VJP.
+#[allow(dead_code)]
+pub fn elu_gate_backward(d: &[f32], a: &[f32], b: &[f32], d_a: &mut [f32], d_b: &mut [f32]) {
+    for (((da, db), (&av, &bv)), &o) in d_a
+        .iter_mut()
+        .zip(d_b.iter_mut())
+        .zip(a.iter().zip(b.iter()))
+        .zip(d.iter())
+    {
+        let elu = if av > 0.0 { av } else { exp(av) - 1.0 };
+        let delu = if av > 0.0 { 1.0 } else { exp(av) };
+        *da = delu * bv * o;
+        *db = elu * o;
+    }
+}
+
+/// `layer_norm_channels` backward: per-position LN `out[c][i] =
+/// (x[c][i]−μ[i])/σ[i]·w[c]+b[c]` → `d_x`. `x` is the forward's pre-LN input
+/// (μ,σ recomputed). Per position `d_x[c] = (d_ŷ[c] − mean(d_ŷ) − ŷ[c]·
+/// mean(d_ŷ·ŷ))/σ` with `d_ŷ = d·w`. RDLR VJP.
+#[allow(dead_code)]
+pub fn layer_norm_channels_backward(
+    d: &Tensor<f32>,
+    x: &Tensor<f32>,
+    weight: &[f32],
+    bias: &[f32],
+) -> Result<Tensor<f32>> {
+    let (c, n) = (x.c, x.h * x.w);
+    if weight.len() != c || bias.len() != c || c == 0 || d.c != c {
+        return Err(Error::InvalidArgument("layer norm backward: shape"));
+    }
+    // Recompute mean / denom / the normalised x per position (as the forward).
+    let mut mean = alloc::vec![0.0f64; n];
+    for ch in 0..c {
+        acc_plane(&mut mean, x.plane(ch));
+    }
+    for m in &mut mean {
+        *m /= c as f64;
+    }
+    let mut var = alloc::vec![0.0f64; n];
+    for ch in 0..c {
+        acc_plane_sq_dev(&mut var, x.plane(ch), &mean);
+    }
+    let mut xn = alloc::vec![0.0f32; c * n];
+    let _xn_charge = crate::mem::Charge::of_vec(&xn);
+    let mut denom = alloc::vec![0.0f32; n];
+    let _denom_charge = crate::mem::Charge::of_vec(&denom);
+    for i in 0..n {
+        denom[i] = ((var[i] / c as f64) as f32 + 1e-5).sqrt();
+    }
+    for ch in 0..c {
+        for (o, (&xv, i)) in xn[ch * n..][..n]
+            .iter_mut()
+            .zip(x.plane(ch).iter().zip(0..n))
+        {
+            *o = (xv - mean[i] as f32) / denom[i];
+        }
+    }
+    // Per position: d_x[c] = (d_ŷ[c] − Σ d_ŷ/c − ŷ[c]·Σ d_ŷ·ŷ/c) / σ, d_ŷ = d·w.
+    let mut dx = Tensor::<f32>::zeros(c, x.h, x.w)?;
+    for i in 0..n {
+        let mut s1 = 0.0f64;
+        let mut s2 = 0.0f64;
+        for ch in 0..c {
+            let dy = d.data[ch * n + i] * weight[ch];
+            s1 += dy as f64;
+            s2 += dy as f64 * xn[ch * n + i] as f64;
+        }
+        let (m1, m2, sig) = (s1 as f32 / c as f32, s2 as f32 / c as f32, denom[i]);
+        for ch in 0..c {
+            let dy = d.data[ch * n + i] * weight[ch];
+            dx.data[ch * n + i] = (dy - m1 - xn[ch * n + i] * m2) / sig;
+        }
+    }
+    Ok(dx)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
