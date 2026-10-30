@@ -9,6 +9,7 @@ use alloc::vec::Vec;
 use crate::error::{Error, Result};
 use crate::model::load;
 use crate::nn::fast::{self, BTensor, ConvLayer, ConvTransposeLayer, Engine, math};
+use crate::tensor::Tensor;
 use crate::weights::Checkpoint;
 
 /// `conv3x3 -> ReLU -> conv3x3`, plus the input.
@@ -39,6 +40,40 @@ impl ResidualBlock {
         drop(t);
         fast::add_assign(&mut out, x)?;
         Ok(out)
+    }
+
+    /// [`Self::forward`] that also returns `conv1`'s output before the ReLU — the
+    /// mask `backward` needs. `out = conv2(relu(conv1(x))) + x`. RDLR HOP VJP —
+    /// used by `Cab`/`HopPrimary::forward_tape` (wired up next).
+    #[allow(dead_code)]
+    pub fn forward_tape(&self, eng: &Engine, x: &BTensor) -> Result<(BTensor, BTensor)> {
+        let mut t = self.conv1.forward(eng, x)?;
+        let conv1_out = t.clone();
+        fast::relu(&mut t);
+        let mut out = self.conv2.forward(eng, &t)?;
+        drop(t);
+        fast::add_assign(&mut out, x)?;
+        Ok((out, conv1_out))
+    }
+
+    /// `d_out` (planar) → `d_x` (planar): the skip contributes `d_out` verbatim,
+    /// the trunk `conv1^T(relu'(conv1_out) · conv2^T d_out)`. Same-size convs —
+    /// `h,w` are the input's throughout. RDLR HOP VJP — used by `Cab::backward`.
+    #[allow(dead_code)]
+    pub fn backward(&self, d_out: &Tensor<f32>, conv1_out: &BTensor) -> Result<Tensor<f32>> {
+        let (h, w) = (conv1_out.h, conv1_out.w);
+        let mut d = self.conv2.backward(d_out, h, w)?;
+        let c1 = conv1_out.to_planar()?;
+        for (g, &p) in d.data.iter_mut().zip(&c1.data) {
+            if p <= 0.0 {
+                *g = 0.0;
+            }
+        }
+        let mut dx = self.conv1.backward(&d, h, w)?;
+        for (a, &b) in dx.data.iter_mut().zip(&d_out.data) {
+            *a += b;
+        }
+        Ok(dx)
     }
 }
 
@@ -104,6 +139,106 @@ impl Cab {
         fast::add_assign(&mut trunk, x)?;
         Ok(trunk)
     }
+
+    /// [`Self::forward`] recording what `backward` needs: the pre-multiply trunk,
+    /// the post-sigmoid mask, each `ResidualBlock`'s `conv1` output, and the
+    /// half-resolution mask input's dims. RDLR HOP VJP — used by
+    /// `HopPrimary::forward_tape` (wired up next).
+    #[allow(dead_code)]
+    #[allow(clippy::type_complexity)]
+    pub fn forward_tape(&self, eng: &Engine, x: &BTensor) -> Result<(BTensor, CabTape)> {
+        let (mut trunk, rb0_c1) = self.trunk[0].forward_tape(eng, x)?;
+        let (t1, rb1_c1) = self.trunk[1].forward_tape(eng, &trunk)?;
+        trunk = t1;
+        let trunk_pre = trunk.clone();
+        let mut m = self.subscale.forward(eng, x)?;
+        let (m2, m2_c1) = self.mask2.forward_tape(eng, &m)?;
+        let (m3, m3_c1) = self.mask3.forward_tape(eng, &m2)?;
+        m = m3;
+        let mask_dims = (m.h, m.w);
+        m = self.upscale.forward(eng, &m)?;
+        if (m.h, m.w) != (trunk.h, trunk.w) {
+            return Err(Error::InvalidArgument("CAB: odd feature map size"));
+        }
+        math::sigmoid(eng, &mut m.data);
+        let sig = m.clone();
+        math::mul_assign(eng, &mut trunk.data, &m.data)?;
+        fast::add_assign(&mut trunk, x)?;
+        Ok((
+            trunk,
+            CabTape {
+                trunk_pre,
+                sig,
+                rb_c1: [rb0_c1, rb1_c1],
+                mask_c1: [m2_c1, m3_c1],
+                mask_dims,
+            },
+        ))
+    }
+
+    /// `d_out` (planar) → `d_x`: `out = trunk·sigmoid(m) + x`. The trunk branch
+    /// gets `d_out·sigmoid(m)`, the mask branch `d_out·trunk` through `σ'` and
+    /// the mask chain back to full resolution, the skip `d_out` verbatim. RDLR
+    /// HOP VJP — used by `HopPrimary::backward` (wired up next).
+    #[allow(dead_code)]
+    pub fn backward(&self, d_out: &Tensor<f32>, tape: &CabTape) -> Result<Tensor<f32>> {
+        let (h, w) = (tape.trunk_pre.h, tape.trunk_pre.w);
+        let trunk = tape.trunk_pre.to_planar()?;
+        let sig = tape.sig.to_planar()?;
+        // d_trunk = d_out · sig ; d_sig = d_out · trunk (elementwise).
+        let mut d_trunk = d_out.clone();
+        let mut d_sig = d_out.clone();
+        for (dt, (&s, &o)) in d_trunk
+            .data
+            .iter_mut()
+            .zip(sig.data.iter().zip(&d_out.data))
+        {
+            *dt = o * s;
+        }
+        for (ds, (&t, &o)) in d_sig
+            .data
+            .iter_mut()
+            .zip(trunk.data.iter().zip(&d_out.data))
+        {
+            *ds = o * t;
+        }
+        // Trunk branch: res[1] then res[0] backwards.
+        let d = self.trunk[1].backward(&d_trunk, &tape.rb_c1[1])?;
+        let d = self.trunk[0].backward(&d, &tape.rb_c1[0])?;
+        let mut dx = d;
+        // Mask branch: σ'(m) = sig·(1−sig) on d_sig, then upscale (half res
+        // input) → mask3 → mask2 → subscale (back to full res).
+        for (ds, &s) in d_sig.data.iter_mut().zip(&sig.data) {
+            *ds *= s * (1.0 - s);
+        }
+        let (mh, mw) = tape.mask_dims;
+        let d = self.upscale.backward(&d_sig, mh, mw)?;
+        let d = self.mask3.backward(&d, &tape.mask_c1[1])?;
+        let d = self.mask2.backward(&d, &tape.mask_c1[0])?;
+        let d = self.subscale.backward(&d, h, w)?;
+        for (a, &b) in dx.data.iter_mut().zip(&d.data) {
+            *a += b;
+        }
+        // Skip: `+ x`.
+        for (a, &b) in dx.data.iter_mut().zip(&d_out.data) {
+            *a += b;
+        }
+        Ok(dx)
+    }
+}
+
+/// `Cab::backward`'s forward intermediates.
+pub(crate) struct CabTape {
+    /// `trunk` before the sigmoid mask multiply.
+    trunk_pre: BTensor,
+    /// `sigmoid(mask)`, upscaled to trunk size.
+    sig: BTensor,
+    /// Each trunk `ResidualBlock`'s `conv1` output.
+    rb_c1: [BTensor; 2],
+    /// `mask2`/`mask3`'s `conv1` outputs.
+    mask_c1: [BTensor; 2],
+    /// `upscale`'s input dims (half resolution).
+    mask_dims: (usize, usize),
 }
 
 #[derive(Clone, Debug)]
