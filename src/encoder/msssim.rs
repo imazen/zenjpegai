@@ -106,7 +106,7 @@ fn gaussian_filter(
 /// leading one). The divisor stays 4; an odd side yields ceil dims.
 fn avg_pool2(src: &[f32], h: usize, w: usize) -> (Vec<f32>, usize, usize) {
     let (ph, pw) = (h % 2, w % 2);
-    let (oh, ow) = ((h + 1) / 2, (w + 1) / 2);
+    let (oh, ow) = (h.div_ceil(2), w.div_ceil(2));
     let mut out = alloc::vec![0.0f32; oh * ow];
     for oy in 0..oh {
         for ox in 0..ow {
@@ -271,7 +271,7 @@ fn gaussian_backward(d: &[f32], h: usize, w: usize, win: &[f32; WIN]) -> Vec<f32
 /// its four samples at the forward's `h % 2` / `w % 2` leading offset.
 fn avg_pool2_backward(d: &[f32], h: usize, w: usize) -> Vec<f32> {
     let (ph, pw) = (h % 2, w % 2);
-    let (oh, ow) = ((h + 1) / 2, (w + 1) / 2);
+    let (oh, ow) = (h.div_ceil(2), w.div_ceil(2));
     let mut din = vec![0.0f32; h * w];
     for y in 0..oh {
         for x in 0..ow {

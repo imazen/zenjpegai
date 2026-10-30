@@ -37,6 +37,7 @@ use super::{compress_regions, lh};
 
 /// `ln(sigma_quant_min)` — `pipeline.json`'s `sigma_quant_min = 0.11`, the same
 /// value `GMProbModel` lower-bounds its scales at (`scale_bound` defaults to it).
+#[allow(clippy::excessive_precision)]
 const LN_SIGMA_MIN: f32 = -2.207274913787842;
 /// `GMProbModel.scale_bound`, the `LowerBound` on the linear scales in `_likelihood`.
 const SCALE_BOUND: f32 = 0.11;
@@ -55,8 +56,6 @@ pub(crate) struct RatePoint {
     pub msssim: f64,
     /// `resi_hat` — the quantised residual as integers (`residual_quant`).
     pub residual_q: Tensor<i16>,
-    /// `residual_dq` — the dequantised residual.
-    pub residual_dq: Tensor<f32>,
     /// The merged hyper-decoder output the quantisation was measured against.
     pub psi: Tensor<f32>,
     /// `y_hat = residual_dq + means` — the reconstructed latent, decoder-exact.
@@ -64,9 +63,9 @@ pub(crate) struct RatePoint {
     /// The reconstructed picture plane (0..255) at the component's resolution.
     pub rec: Tensor<f32>,
     /// `-log2` GM likelihood of `y - means_hat`, in bits (the `rate_y` term).
+    /// Read by the oracle test only.
+    #[allow(dead_code)]
     pub rate_y: f64,
-    /// Factorized `z_hat` bit count (the `bs.encode_term()` term).
-    pub z_bits: f64,
     /// The synthesis's VJP tape (present when `rate_point_y` built `rec`).
     pub synth_tape: Option<crate::model::synthesis::PrimaryTape>,
 }
@@ -161,13 +160,11 @@ pub(crate) fn rate_point_y(
         psnr,
         msssim,
         residual_q,
-        residual_dq: residual,
         psi,
         y_hat,
         rec,
         synth_tape: Some(tape),
         rate_y,
-        z_bits,
     })
 }
 
@@ -280,7 +277,7 @@ pub(crate) fn backward(
 /// written with `erfc`, floored at `likelihood_bound`.
 fn gm_nbits(resi: f32, sigma: f32) -> f64 {
     // `get_std_cum_freq`'s `const = -(2**-0.5)`.
-    const C: f64 = -0.7071067811865476;
+    const C: f64 = -std::f64::consts::FRAC_1_SQRT_2;
     let s = sigma as f64;
     let v = resi.abs() as f64;
     let upper = 0.5 * libm::erfc(C * (0.5 - v) / s);
@@ -313,7 +310,7 @@ fn gm_nbits_vjp(resi: f32, sigma: f32, d_rate_positive: bool) -> f64 {
     let du = (0.5 - v) / s;
     let dl = (0.5 + v) / s;
     // lik = Φ(du) − Φ(−dl) via erfc (the forward's exact form, for `p`).
-    const C: f64 = -0.7071067811865476;
+    const C: f64 = -std::f64::consts::FRAC_1_SQRT_2;
     let upper = 0.5 * libm::erfc(C * du);
     let lower = 0.5 * libm::erfc(C * (-dl));
     let p = upper - lower;
@@ -637,43 +634,6 @@ pub(crate) fn rate_vjp(
 // matching the forward path's op-order/FMA policy; `math::` kernels reused
 // where a forward op already has a fixed implementation.
 
-/// `relu6`'s input gradient: `0 < x < 6`.
-fn relu6_backward(dout: &Tensor<f32>, x: &Tensor<f32>) -> Tensor<f32> {
-    let mut out = dout.clone();
-    for (o, &v) in out.data.iter_mut().zip(&x.data) {
-        if v <= 0.0 || v >= 6.0 {
-            *o = 0.0;
-        }
-    }
-    out
-}
-
-/// `elu`'s input gradient: `x > 0 ? 1 : exp(x)`.
-fn elu_backward(dout: &Tensor<f32>, x: &Tensor<f32>) -> Tensor<f32> {
-    let mut out = dout.clone();
-    for (o, &v) in out.data.iter_mut().zip(&x.data) {
-        if v <= 0.0 {
-            *o *= math::exp(v);
-        }
-    }
-    out
-}
-
-/// `resi = y - means_hat`, `means_hat = y_hat - resi_hat`: the residual term's
-/// backward onto `y`, `y_hat`, `resi_hat` (`+1, -1, +1` — `resi_hat`'s STE
-/// makes it `data_q`'s passthrough; `resi_dq`'s dequantize is non-differentiable
-/// in the reference — `resi_hat_grad` == `gm_resi_grad` exactly).
-/// Returns `(d_y_direct, d_y_hat, d_resi_hat)` — the y_hat/resi_hat gradients
-/// before downstream synthesis/MCM accumulation.
-fn resi_vjp(d_resi: &Tensor<f32>) -> (Tensor<f32>, Tensor<f32>, Tensor<f32>) {
-    let d_y = d_resi.clone();
-    let mut d_yhat = d_resi.clone();
-    for v in d_yhat.data.iter_mut() {
-        *v = -*v;
-    }
-    (d_y, d_yhat, d_resi.clone())
-}
-
 /// `calc_distortion_loss` for the luma tile: `mean((a-b)²)` over `area` (+1e-10),
 /// `ms_ssim(a, b, data_range = 255)`.
 fn distortion(
@@ -707,8 +667,8 @@ fn distortion(
     Ok((psnr, msssim))
 }
 
-/// `Likelihood`'s `z_bits` accessor lives in `lh.rs` (it reads the private
-/// `z_nbits` table directly).
+// `Likelihood`'s `z_bits` accessor lives in `lh.rs` (it reads the private
+// `z_nbits` table directly).
 
 #[cfg(all(test, feature = "reference-tests"))]
 mod oracle {
@@ -809,29 +769,12 @@ mod oracle {
             )
             .unwrap()
         }
-        fn tensor_i32(&self) -> Tensor<i32> {
-            assert_eq!(self.dtype, "f32");
-            Tensor::from_vec(
-                self.shape[1],
-                self.shape[2],
-                self.shape[3],
-                self.f32().into_iter().map(|v| v as i32).collect(),
-            )
-            .unwrap()
-        }
     }
 
     fn vectors_root() -> PathBuf {
         std::env::var_os("ZENJPEGAI_VECTORS")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("/mnt/v/output/zenjpegai/reference/vectors"))
-    }
-
-    fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
-        a.iter()
-            .zip(b)
-            .map(|(&x, &y)| (x - y).abs())
-            .fold(0.0, f32::max)
     }
 
     /// The dumped encode's whole context is rebuilt from the dumped `z_hat`
@@ -906,7 +849,7 @@ mod oracle {
                 .unwrap();
         let lh = &set.lh[0];
         let original = dump["rdlr.0.original"].tensor_f32();
-        let pixels = (888.0 * 560.0) as f64;
+        let pixels = 888.0 * 560.0;
         let area = Area {
             x: 0,
             y: 0,
@@ -1278,10 +1221,8 @@ mod oracle {
                 // `act[i]`/`res_conv_out`/`pre_denorm` are the intermediates.
                 if i == 1 {
                     let bop = load_dump(Path::new("/home/lilith/tmp/bop_layers"));
-                    let tape = match rp.synth_tape.as_ref().unwrap() {
-                        crate::model::synthesis::PrimaryTape::Light(t) => t,
-                        _ => panic!("not light"),
-                    };
+                    let crate::model::synthesis::PrimaryTape::Light(tape) =
+                        rp.synth_tape.as_ref().unwrap();
                     let cmp = |mine: &Tensor<f32>, want: &Tensor<f32>, tag: &str| {
                         let mut md = 0.0f64;
                         let mut ad = 0.0f64;

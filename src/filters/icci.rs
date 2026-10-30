@@ -256,18 +256,25 @@ pub fn filter(
             [&image.y, &image.u, &image.v],
             (a.x, a.y, a.width, a.height),
         )?;
-        // Every correction is computed from the tile as it was read, then written back.
-        let luma = net_y
-            .map(|i| cache.get(models, op, i, eng)?.luma_correction(eng, &input))
-            .transpose()?;
-        let chroma = net_uv
-            .map(|i| {
-                let want = [sel.use_yuv[1], sel.use_yuv[2]];
-                cache
-                    .get(models, op, i, eng)?
-                    .chroma_corrections(eng, &input, want)
-            })
-            .transpose()?;
+        // Every correction is computed from the tile as it was read, then written back. The
+        // two networks are independent (both read `input`, produce disjoint outputs): fetch
+        // the `Arc`s serially, then run the two corrections concurrently — each trunk is too
+        // small for the engine's row-level split to fill the pool alone.
+        let net_y = net_y.map(|i| cache.get(models, op, i, eng)).transpose()?;
+        let net_uv = net_uv.map(|i| cache.get(models, op, i, eng)).transpose()?;
+        let luma_f = || net_y.map(|n| n.luma_correction(eng, &input)).transpose();
+        let chroma_f = || {
+            let want = [sel.use_yuv[1], sel.use_yuv[2]];
+            net_uv
+                .map(|n| n.chroma_corrections(eng, &input, want))
+                .transpose()
+        };
+        #[cfg(feature = "parallel")]
+        let (luma, chroma) = rayon::join(luma_f, chroma_f);
+        #[cfg(not(feature = "parallel"))]
+        let (luma, chroma) = (luma_f(), chroma_f());
+        let luma = luma?;
+        let chroma = chroma?;
         let [cu, cv] = chroma.unwrap_or([None, None]);
         for (p, (plane, c)) in [&mut image.y, &mut image.u, &mut image.v]
             .into_iter()

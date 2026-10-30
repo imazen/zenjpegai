@@ -1439,9 +1439,9 @@ impl Encoder {
             && hdr.regions.is_none()
             && rdlr_org.map(|s| s.w * s.h < 4_200_000).unwrap_or(true)
         {
-            let source = rdlr_org.ok_or_else(|| {
-                Error::InvalidArgument("RDLR: the encode needs the source planes".into())
-            })?;
+            let source = rdlr_org.ok_or(Error::InvalidArgument(
+                "RDLR: the encode needs the source planes",
+            ))?;
             let synth_op = hdr
                 .synthesis_transforms
                 .first()
