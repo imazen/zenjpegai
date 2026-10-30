@@ -1080,3 +1080,11 @@ Remaining ~8%: `d_resi` scale drifts 0.99→1.05 across iterations (divisor
 `/15` vs `/16` nuance — rate_y favours ~14.85); the leaf error is otherwise
 small and uncorrelated. Still missing vs full RDLR parity: chroma
 (`numIteYChroma`), tiled (>1 MP) coverage, and the final BD-rate check.
+
+Chroma (`rdlr_comp_UV.get_current_rate_point`) differs from the luma path in
+three ways the port must mirror: `_compress_ar_scale` is called with explicit
+`(y.clone(), psi, scale_log, True, scale_lin)` args (not `decisions`);
+`means_hat = y_hat − quantizer.dequantize(resi_hat)` uses the **dequantised**
+residual (luma uses the raw `resi_q` symbol); and `y_new2 =
+cat(sup_info.detach(), y_hat)` prepends the luma sup_info channels to the
+decoder input. `numIteYChroma` iterations + best-iterate selection mirror Y.
