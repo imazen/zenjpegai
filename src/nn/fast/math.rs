@@ -207,6 +207,17 @@ pub fn channel_attention(
     heads: usize,
     temperature: &[f32],
 ) -> Result<Tensor<f32>> {
+    Ok(channel_attention_impl(eng, qkv, heads, temperature)?.0)
+}
+
+/// The forward returning `(out, attn)` — shared by [`channel_attention`] and
+/// [`channel_attention_tape`] so `attn` is computed exactly once.
+fn channel_attention_impl(
+    eng: &Engine,
+    qkv: &Tensor<f32>,
+    heads: usize,
+    temperature: &[f32],
+) -> Result<(Tensor<f32>, Vec<f32>)> {
     if heads == 0 || temperature.len() != heads || !qkv.c.is_multiple_of(3 * heads) {
         return Err(Error::InvalidArgument("attention: channel / head counts"));
     }
@@ -260,7 +271,7 @@ pub fn channel_attention(
             *o = s as f32;
         }
     });
-    Ok(out)
+    Ok((out, attn))
 }
 
 /// [`channel_attention`] that also returns the `attn` weights — the tape
@@ -271,39 +282,7 @@ pub fn channel_attention_tape(
     heads: usize,
     temperature: &[f32],
 ) -> Result<(Tensor<f32>, Vec<f32>)> {
-    let out = channel_attention(eng, qkv, heads, temperature)?;
-    // Rebuild `attn` exactly as `channel_attention` did (the softmax weights are
-    // cheap relative to storing a second forward of the QK products).
-    let dim = qkv.c / 3;
-    let c = dim / heads;
-    let n = qkv.h * qkv.w;
-    let mut qk = qkv.data[..2 * dim * n].to_vec();
-    for_each_row(eng, &mut qk, n, |_, row| {
-        let norm = dot8(row, row).sqrt() as f32;
-        div_slice(row, norm.max(1e-12));
-    });
-    let (q, k) = qk.split_at(dim * n);
-    let mut attn = alloc::vec![0.0f32; dim * c];
-    for_each_row(eng, &mut attn, c, |row_idx, row| {
-        let head = row_idx / c;
-        let qi = &q[row_idx * n..][..n];
-        let mut max = f32::NEG_INFINITY;
-        for (j, a) in row.iter_mut().enumerate() {
-            let kj = &k[(head * c + j) * n..][..n];
-            *a = dot8(qi, kj) as f32 * temperature[head];
-            max = max.max(*a);
-        }
-        let mut sum = 0.0f64;
-        for a in row.iter_mut() {
-            *a = exp(*a - max);
-            sum += *a as f64;
-        }
-        let sum = sum as f32;
-        for a in row.iter_mut() {
-            *a /= sum;
-        }
-    });
-    Ok((out, attn))
+    channel_attention_impl(eng, qkv, heads, temperature)
 }
 
 /// The input gradient through [`channel_attention`] (RDLR HOP VJP): `d_out`
