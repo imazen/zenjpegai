@@ -1050,10 +1050,33 @@ autograd gives **the identical 0.7877/0.831** — `LightPrimary`/`decoder`/
 synthesis/`ms_ssim`/metric/`conv`/`ResAu`/`denormalize`/`pixel_shuffle`/`crop`/
 `rate_vjp`/`d_resi`/`backward` bug.
 
-`y_hat`/`out[2]` feeds a THIRD gradient path `X` ≈ 20% beyond
-`means_hat`(→`resi`, ∂=-1) + `decoder`(→`synth`), concentrated in `y_hat`'s low
-channels (0-9, per-channel absmean ~1.7e-5). `y_hat_grad` = `synth - d_resi + X`
-where `X` is the missing `y_hat`/`out[2]` → `scale`/`sigma`/`means`/`mu`/
-`entropy`/`z`/`hyper`/`context`/`MCM`/`cas`/`sup_info`/`y_new2`/`decoder`/
-`residual_dq`/`resi_hat`/`numBits`/`bpp`/`loss` path the `rate_vjp`/`backward`
-composition does not yet model. `d(y)`/`cas_y_in_grad` corr 0.72 reflects this.
+## RDLR leaf gradient — resolved (2026-10-30)
+
+The "third gradient path `X`" was a dump artifact plus three small compounding
+bugs, all now fixed (`103ce3c`):
+
+- `rdlr.<i>.x_hat_grad` in `dump_rdlr.py` is indexed by decoder *call*
+  (`rec.{i}`) not iteration: `rec.0` is the ref point, `rec.{i+1}` iteration i.
+  With the right upstream (`rdlr.{i+1}.x_hat_grad`), `synth - d_resi` ==
+  `y_hat_grad` exactly (corr 1.0000). `LightPrimary::backward`, `rec_grad`
+  (PSNR+MS-SSIM VJP), and `loss_upstream` were always correct.
+- `gm_nbits_vjp` dropped `C² = 1/2` in the Gaussian exponent —
+  `d lik/dv ∝ e^{−x²/2}`, not `e^{−x²}`.
+- `GMProbModel._likelihood` divides the scale by `1<<scale_table_precision`:
+  `sigma ≈ scale_lin/15`, not `scale_lin` (sub-precision index on `scale_log`).
+- `LowerBound.backward` passes floored-likelihood gradients when the upstream
+  grad is negative (`x>=bound | grad<0`), the "unstick" direction; the old
+  code zeroed them unconditionally.
+
+Oracle (`rdlr_img30_bop_m1_b0`, all 8 iterations): `d_resi` vs `gm_resi_grad`
+corr ~1.0; `compress_backward` vs `cas_y_in_grad` 0.9994 with reference
+upstreams (the context VJP needed no changes — the autoregressive `mu`,
+`diff`, STE, cube-mask, and `spatial_params` chains were already right);
+`d(y)` vs `y_grad` corr 0.92 / scale 0.94 (was 0.51/0.29). Exact structural
+identities verified in the dump: `resi_hat_grad == gm_resi_grad` and
+`cas_y_in_grad + gm_resi_grad == y_grad` (max 7e-12).
+
+Remaining ~8%: `d_resi` scale drifts 0.99→1.05 across iterations (divisor
+`/15` vs `/16` nuance — rate_y favours ~14.85); the leaf error is otherwise
+small and uncorrelated. Still missing vs full RDLR parity: chroma
+(`numIteYChroma`), tiled (>1 MP) coverage, and the final BD-rate check.
