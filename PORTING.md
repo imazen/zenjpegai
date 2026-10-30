@@ -240,15 +240,21 @@ kernels themselves, already the tuned `nn::fast`/`math` path.
 
 `channel_attention` cost structure (`nn/fast/math.rs`): two `dim·c·n` f64 MAC
 passes — `attn[i][j] = dot8(q_i, k_j)·temp` (L2-normalised q,k) then `out_i =
-Σ_j attn[i][j]·v_j` — each output element keeps its own `index mod 8` f64
-accumulator chain (the bit-exactness contract: identical sum order on every
-tier). The headroom is **blocking across output elements, not the math**:
-`dot8(q_i, k_j)` reloads `k_j`/`q_i` per (i,j) pair, and `axpy64` reloads `v_j`
-per output row — restructuring so one `q_i` register row feeds a block of 8
-`k_j` outputs (one `v_j` row feeds 8 outputs) preserves each element's `l mod 8`
-accumulator order exactly while cutting memory traffic ~8× and widening the
-f64 SIMD. f32 accumulation is off the table — it changes the sum order and
-breaks tier bit-identity.
+Σ_j attn[i][j]·v_j`. **Tried and reverted (2026-10-30):** blocking eight `j`
+outputs per `q_i` (`acc[l mod 8][j-lane]`, `k` transposed once) and eight
+output rows per `v_j` load was ~3–4× *slower* (~1000–1400 ms vs ~305 ms for a
+TAM call at 560x888). The blocker is that `dot8`'s per-output `acc[l mod 8]`
+uses compile-time indices inside an unrolled `0..8` inner loop — register-
+resident, SIMD'd; the blocked form's `acc[l & 7]` is a runtime index, so the
+64 f64 accumulators spill to the stack every element, and the AV pass's `8n`
+f64 accumulator blows past L1 vs the original `n` f64. The original is
+f64-MAC-throughput-bound already at ~305 ms; the remaining levers — f32
+accumulation or a smaller `dim·c·n` — both change the summation order and
+break tier bit-identity, so TAM is at its floor under the parity contract.
+Conv/CAB stages (`norm+conv1` ~70–180 ms, `conv2` ~50–90, `cab` ~180, `conv3`
+~20) are the next-largest encode cost and already run the tuned `nn::fast`
+kernels; a Winograd/int8-VNNI path for the 3×3s (the D2 queue) is the
+remaining conv win, gated on the same bit-identity constraint.
 
 With every tool on (`tools_on`; `benchmarks/encode_tools_on_2026-09-18.{tsv,meta}`) the
 reference's post-filter searches dominate its encode — its rate-matched `tools_on` encode of
