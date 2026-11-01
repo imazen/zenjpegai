@@ -1718,19 +1718,19 @@ impl Encoder {
             latent
         };
 
-        // `process_z` (numIteZChroma): refine the chroma `z_hat` toward
+        // `process_z` (numIteZLuma / numIteZChroma): refine `z_hat` toward
         // `encode_z + encode_y` total bits, then re-derive `scales`/`mask`/`q`
         // for the optimized hyper-latent — `del cur_decision['scale_log']` →
         // `component_scales` inside the residual coding sees only the new `z_hat`.
         let z_opt;
         let scales_opt;
-        let (z_hat, scales, mask) = if ccs == 1
-            && params.num_ite_z > 0
+        let (z_hat, scales, mask) = if params.num_ite_z > 0
             && hdr.regions.is_none()
             && (hdr.width as usize) * (hdr.height as usize) < 4_200_000
         {
             z_opt = rdlr::optimize_z(
                 eng,
+                ccs,
                 model,
                 &set.lh[ccs],
                 latent,

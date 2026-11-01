@@ -529,6 +529,7 @@ impl ContextModel {
         d_out_resihat: &Tensor<f32>,
         tape: Option<Vec<StageTape>>,
         stop: &dyn enough::Stop,
+        mut d_psi: Option<&mut Tensor<f32>>,
     ) -> Result<Tensor<f32>> {
         let (c, h, w) = (self.chs, y.h, y.w);
         let (hh, hw) = (h.div_ceil(2), w.div_ceil(2));
@@ -683,6 +684,18 @@ impl ContextModel {
                 phase
                     .fusion
                     .backward(&d_mu, &tape.pre_relu1, &tape.pre_relu2, (0, hh, hw))?;
+            if let Some(dp) = &mut d_psi {
+                // `joined` is `d(cat([t, psi_s]))` for context stages — `d(t)` =
+                // first chs, `d(psi_s)` = last chs — or `d(psi_s)` directly for
+                // stage 0 (no context). `d(psi)` at `[4C]` = the per-stage block.
+                let n = c * hh * hw;
+                let part = if phase.context.is_some() {
+                    &joined.data[n..n * 2]
+                } else {
+                    &joined.data[..n]
+                };
+                dp.data[s * n..(s + 1) * n].copy_from_slice(part);
+            }
             if let Some((pointwise, grouped)) = &phase.context {
                 // joined = cat([t (chs), psi_s (chs)]) → d(t) = first chs.
                 let mut d_t = Tensor::<f32>::zeros(c, hh, hw)?;

@@ -417,6 +417,7 @@ pub(crate) fn backward(
         &d_resi,
         Some(rp.tape.clone()),
         stop,
+        None,
     )?;
     for (a, &b) in d_y.data.iter_mut().zip(&d_resi.data) {
         *a += b;
@@ -1592,6 +1593,7 @@ mod oracle {
                         &want_ur,
                         None,
                         &enough::Unstoppable,
+                        None,
                     )
                     .unwrap();
                 // `compress_backward` alone must land on `cas_y_in_grad`; with
@@ -2178,6 +2180,9 @@ pub(crate) struct ZRatePoint {
     psi: BTensor,
     /// `hyper_decoder`'s VJP intermediates.
     hyper_tape: hyper_decoder::HyperTape,
+    /// `compress`'s MCM tape (luma `compress_backward`) — `None` on the chroma
+    /// context-free path.
+    mcm_tape: Option<Vec<mcm::StageTape>>,
     /// `compress`'s reconstructed latent (mean + resi_dq) at latent res.
     y_hat: Tensor<f32>,
     /// The quantized residual (the `+ residual_q` term of `resi`).
@@ -2191,6 +2196,7 @@ pub(crate) struct ZRatePoint {
 /// differentiable) + `scale_log` (int `hsd`) + `compress` → `rate_y` + `z_bits`.
 pub(crate) fn rate_point_z(
     eng: &Engine,
+    ccs: usize,
     model: &crate::model::common::CommonModel,
     lh: &lh::Likelihood,
     y: &Tensor<f32>,
@@ -2209,7 +2215,29 @@ pub(crate) fn rate_point_z(
         .hyper_decoder
         .forward_tape(eng, z_hat_cont, psi_h, psi_w, stop)?;
     let scale_log = model.hsd.forward(z_hat_i8, lh_y, lw_y, SIGMA_IDX_MAX)?;
-    let out = compress_context_free(y, &psi, q, mask, num_chs, crate::encoder::SKIP_CUBE_THR)?;
+    let (out, mcm_tape) = if ccs == 0 {
+        // luma: MCM `compress` — `d(psi)` flows through the stage VJPs.
+        let ctx = model
+            .context
+            .as_ref()
+            .ok_or(Error::InvalidArgument("process_z luma: no context model"))?;
+        let o = ctx.compress(
+            eng,
+            y,
+            &psi,
+            q,
+            mask,
+            num_chs,
+            crate::encoder::SKIP_CUBE_THR,
+            stop,
+        )?;
+        (o.clone(), Some(o.tape.clone()))
+    } else {
+        (
+            compress_context_free(y, &psi, q, mask, num_chs, crate::encoder::SKIP_CUBE_THR)?,
+            None,
+        )
+    };
     let rate_y = gm_rate(y, &out.y_hat, &out.residual_q, &scale_log);
     let z_bits = lh.z_bits(z_hat_i8);
     Ok(ZRatePoint {
@@ -2217,6 +2245,7 @@ pub(crate) fn rate_point_z(
         z_hat_i8: z_hat_i8.clone(),
         psi,
         hyper_tape,
+        mcm_tape,
         y_hat: out.y_hat,
         residual_q: out.residual_q,
         scale_log,
@@ -2235,17 +2264,52 @@ pub(crate) fn backward_z(
     lh: &lh::Likelihood,
     y: &Tensor<f32>,
     rp: &ZRatePoint,
+    q: &impl mcm::Quantiser,
+    mask: &Tensor<bool>,
+    num_chs: usize,
+    stop: &dyn enough::Stop,
 ) -> Result<Tensor<f32>> {
     let _ = eng;
     // `d(rate_y)/d(resi)` — `d_rate_y = 1` (the loss *is* the total bits).
     let d_resi = rate_vjp(1.0, y, &rp.y_hat, &rp.residual_q, &rp.scale_log);
-    // `resi = y - means_hat`, `means_hat = mean = upshuffle_psi(psi)` → `d(mean) = -d_resi`.
-    let mut d_mean = d_resi.clone();
-    for v in d_mean.data.iter_mut() {
-        *v = -*v;
-    }
-    // `d(psi) = upshuffle_psi_backward(d_mean)`.
-    let d_psi = mcm::upshuffle_psi_backward(&d_mean, rp.psi.c, rp.psi.h, rp.psi.w)?;
+    let (c, hh, hw) = (rp.psi.c / 4, rp.psi.h, rp.psi.w);
+    let d_psi = if let Some(mcm_tape) = &rp.mcm_tape {
+        // luma MCM: `means_hat = y_hat - resi_dq` → `d(y_hat) = -d_resi`,
+        // `d(resi_dq) = +d_resi`; `compress_backward` maps them onto `d(psi)`
+        // (and a `d_y` the z-path ignores).
+        let mut d_out_yhat = d_resi.clone();
+        for v in d_out_yhat.data.iter_mut() {
+            *v = -*v;
+        }
+        let mut d_psi = Tensor::<f32>::zeros(rp.psi.c, hh, hw)?;
+        let ctx = model
+            .context
+            .as_ref()
+            .ok_or(Error::InvalidArgument("process_z luma: no context model"))?;
+        let _d_y = ctx.compress_backward(
+            eng,
+            y,
+            &rp.psi,
+            q,
+            mask,
+            num_chs,
+            crate::encoder::SKIP_CUBE_THR,
+            &d_out_yhat,
+            &d_resi,
+            Some(mcm_tape.clone()),
+            stop,
+            Some(&mut d_psi),
+        )?;
+        d_psi
+    } else {
+        // chroma context-free: `resi = y - means_hat`, `means_hat = mean =
+        // upshuffle_psi(psi)` → `d(mean) = -d_resi` → `d(psi)`.
+        let mut d_mean = d_resi.clone();
+        for v in d_mean.data.iter_mut() {
+            *v = -*v;
+        }
+        mcm::upshuffle_psi_backward(&d_mean, rp.psi.c, hh, hw)?
+    };
     // `d(z_hat) = hyper_decoder.backward(d_psi)` + `d(z_bits)`.
     let mut d_z = model.hyper_decoder.backward(&rp.hyper_tape, &d_psi)?;
     let d_z_ent = lh.z_bits_vjp(&rp.z_hat_i8);
@@ -2286,6 +2350,7 @@ fn quant_z(z_hat: &Tensor<f32>) -> Result<Tensor<i8>> {
 /// best integer `z_hat` (`best['z_hat'].round()`).
 pub(crate) fn optimize_z(
     eng: &Engine,
+    ccs: usize,
     model: &crate::model::common::CommonModel,
     lh: &lh::Likelihood,
     y: &Tensor<f32>,
@@ -2320,6 +2385,7 @@ pub(crate) fn optimize_z(
         let z_hat_i8 = quant_z(&z_hat_cont)?;
         let rp = rate_point_z(
             eng,
+            ccs,
             model,
             lh,
             y,
@@ -2345,7 +2411,7 @@ pub(crate) fn optimize_z(
         // `d(total)/d(z_hat)` at z-res; STE makes `d(z_new) = d(z_hat)`, so the
         // additive leaf gradients are `d(additive2) = d(z_new)`,
         // `d(additive) = sum(d(z_new))`.
-        let d_z = backward_z(eng, model, lh, y, &rp)?;
+        let d_z = backward_z(eng, model, lh, y, &rp, q, mask, num_chs, stop)?;
         for (i, (a2, sq)) in additive2.iter_mut().zip(&mut sq2).enumerate() {
             let g = d_z.data[i];
             *sq += g * g;
