@@ -26,7 +26,7 @@ use crate::encoder::msssim;
 use crate::error::{Error, Result};
 use crate::model::common::SIGMA_PRECISION;
 use crate::model::mcm;
-use crate::model::synthesis::SynthesisPrimary;
+use crate::model::synthesis::{SynthesisPrimary, SynthesisSecondary};
 use crate::nn::fast::math;
 use crate::nn::fast::{BTensor, Engine};
 use crate::tensor::Tensor;
@@ -169,6 +169,138 @@ pub(crate) fn rate_point_y(
         rate_y,
         tape: mcm_tape,
     })
+}
+
+/// `RDLRCompUV.get_current_rate_point` for one chroma latent tile: the UV rate
+/// (`test_bpp_UV`) and the per-plane PSNRs. `sup` is `sup_info` — the (refined)
+/// luma `y_hat` decimated `[:, :, ::2, ::2]` into the chroma decoder's input
+/// planes. `original` is the source chroma `[2, H, W]` over `area` at 0..255.
+pub(crate) struct RatePointUV {
+    /// `test_bpp_UV`: (factorized `z` bits + `-log2` GM likelihood bits) / pixels.
+    pub bpp: f64,
+    /// `psnr` of the reconstructed U plane against `original[0]` over `area`.
+    pub psnr_u: f64,
+    /// `psnr` of the reconstructed V plane against `original[1]` over `area`.
+    pub psnr_v: f64,
+    pub residual_q: Tensor<i16>,
+    pub psi: Tensor<f32>,
+    pub y_hat: Tensor<f32>,
+    /// The two reconstructed chroma planes `[2, H, W]`.
+    pub rec: Tensor<f32>,
+    #[allow(dead_code)]
+    pub rate_uv: f64,
+    pub tape: Vec<mcm::StageTape>,
+}
+
+/// `RDLRCompUV.get_current_rate_point`: the chroma analogue of [`rate_point_y`]
+/// — `_compress_ar_scale` on the chroma latent, the UV residual rate, then the
+/// secondary synthesis on `cat(sup_info, y_hat)` and per-plane PSNR.
+///
+/// Called by the chroma `rdlr_y_iteration` driver (the next piece of the
+/// chroma-RDLR port); the evaluator itself is complete and mirrors `rate_point_y`.
+#[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
+pub(crate) fn rate_point_uv(
+    eng: &Engine,
+    hdr: &crate::header::PictureHeader,
+    model: &crate::model::common::CommonModel,
+    synthesis_uv: &SynthesisSecondary,
+    lh: &lh::Likelihood,
+    y: &Tensor<f32>,
+    z_hat: &Tensor<i8>,
+    scale_log: &Tensor<i32>,
+    mask: &Tensor<bool>,
+    q: &impl mcm::Quantiser,
+    num_chs: usize,
+    original: &Tensor<f32>,
+    sup: &BTensor,
+    area: Area,
+    pixels: f64,
+    psi_in: Option<&Tensor<f32>>,
+    stop: &dyn enough::Stop,
+) -> Result<RatePointUV> {
+    let out = compress_regions(
+        eng, hdr, 1, model, z_hat, y, mask, q, num_chs, y.h, y.w, psi_in, stop,
+    )?;
+    let mcm::Compressed {
+        residual_q,
+        psi,
+        y_hat,
+        tape: mcm_tape,
+        ..
+    } = out;
+
+    let log_k = log_k() as f32;
+    let inv = 1.0f32 / (1u32 << SIGMA_PRECISION) as f32;
+    let mut rate_uv = 0.0f64;
+    for ch in 0..residual_q.c {
+        let (r, s, yq, yh) = (
+            residual_q.plane(ch),
+            scale_log.plane(ch),
+            y.plane(ch),
+            y_hat.plane(ch),
+        );
+        for i in 0..r.len() {
+            let resi = yq[i] - yh[i] + r[i] as f32;
+            let scale_lin = math::exp(s[i] as f32 * inv * log_k + LN_SIGMA_MIN);
+            let idx = (scale_lin + 64.0)
+                .mul_add(1.0 / 128.0, 0.0)
+                .clamp(0.0, 34.0);
+            let sigma = math::exp(idx * log_k + LN_SIGMA_MIN).max(SCALE_BOUND);
+            rate_uv += gm_nbits(resi, sigma);
+        }
+    }
+
+    // `tool.decoder(cat(sup_info, y_hat), h, w)` — the secondary synthesis takes
+    // the luma latent as its first-stage input planes.
+    let rec = synthesis_uv.forward_with(
+        eng,
+        sup,
+        &BTensor::from_planar(&y_hat, eng.tier.block())?,
+        original.h,
+        original.w,
+        stop,
+    )?;
+    let psnr_u = psnr_plane(&rec, 0, original, 0, area);
+    let psnr_v = psnr_plane(&rec, 1, original, 1, area);
+
+    let z_bits = lh.z_bits(z_hat);
+    let bpp = (z_bits + rate_uv) / pixels;
+    Ok(RatePointUV {
+        bpp,
+        psnr_u,
+        psnr_v,
+        residual_q,
+        psi,
+        y_hat,
+        rec,
+        rate_uv,
+        tape: mcm_tape,
+    })
+}
+
+/// `psnr` of `rec[plane]` against `original[plane]` inside `area` —
+/// `20·log10(255) - 10·log10(mse + 1e-10)`, the same formula `distortion` uses
+/// on the luma plane.
+#[allow(dead_code)]
+fn psnr_plane(
+    rec: &Tensor<f32>,
+    rec_plane: usize,
+    original: &Tensor<f32>,
+    orig_plane: usize,
+    area: Area,
+) -> f64 {
+    let (ah, aw) = (area.height, area.width);
+    let mut mse = 0.0f64;
+    for row in 0..ah {
+        for x in 0..aw {
+            let o = original.plane(orig_plane)[(area.y + row) * original.w + area.x + x];
+            let r = rec.plane(rec_plane)[(area.y + row) * rec.w + area.x + x];
+            mse += ((o - r) as f64) * ((o - r) as f64);
+        }
+    }
+    mse /= (ah * aw) as f64;
+    20.0 * (255.0f64).log10() - 10.0 * (mse + 1e-10).log10()
 }
 
 /// `PSNR`'s input gradient: `psnr = C - 10·log10(mse + eps)`, `mse =

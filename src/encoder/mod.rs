@@ -973,6 +973,7 @@ impl Encoder {
     /// `_calculate_mssim_distortion` collapses to weighted MSE at `MSSSIMweight = 0`), times
     /// 5000. The best loss under `bits_mismatch < 0.09` wins; when nothing qualifies the
     /// coupled luma beta is kept.
+    #[allow(clippy::too_many_arguments)]
     fn find_uv_beta(
         &self,
         src: &SourceImage,
