@@ -132,6 +132,7 @@ struct Args {
     precision: zenjpegai::nn::fast::Precision,
     num_chs: Option<(u16, u16)>,
     quality_map: Option<PathBuf>,
+    qp_map: Option<String>,
     single_thread: bool,
     scalar: bool,
     f16: bool,
@@ -176,6 +177,7 @@ fn parse_args() -> Result<Args, String> {
         precision: zenjpegai::nn::fast::Precision::Exact,
         num_chs: None,
         quality_map: None,
+        qp_map: None,
         single_thread: false,
         scalar: false,
         f16: false,
@@ -227,6 +229,7 @@ fn parse_args() -> Result<Args, String> {
                 });
             }
             "--quality-map" => a.quality_map = Some(PathBuf::from(value("--quality-map")?)),
+            "--qp-map" => a.qp_map = Some(value("--qp-map")?),
             "--rdlr" => a.rdlr = true,
             "--clipping" => a.clipping = true,
             "--rvs" => a.rvs = true,
@@ -510,10 +513,66 @@ fn run() -> Result<(), String> {
             if let Some((y, uv)) = args.num_chs {
                 params.num_chs = [y, uv];
             }
-            // `--quality-map`: an RGB mask at picture resolution, white = region of interest.
-            let quality_map = match &args.quality_map {
+            // `--quality-map` (an RGB mask, `qp_map_type` 3) or `--qp-map` (the other
+            // generators: `noise:`/`roi:`/`variance`, upstream's qp_map_type 2/1/0).
+            if args.quality_map.is_some() && args.qp_map.is_some() {
+                return Err("--quality-map and --qp-map are mutually exclusive".into());
+            }
+            let latent_hw = (image.height().div_ceil(16), image.width().div_ceil(16));
+            let quality_map = match &args.qp_map {
                 None => None,
-                Some(path) => {
+                Some(spec) => {
+                    let (h, w) = latent_hw;
+                    let parse_i = |s: &str| s.parse::<i32>();
+                    let parse_u = |s: &str| s.parse::<usize>();
+                    let m = if spec == "variance" {
+                        let meta = image
+                            .meta(params.c_ver, params.c_hor)
+                            .map_err(|e| format!("{e:?}"))?;
+                        let luma = zenjpegai::encoder::preprocess(&image, &meta)
+                            .map_err(|e| format!("{e:?}"))?
+                            .luma;
+                        zenjpegai::tools::qualmap::QualityMap::from_variance(&luma, 16)
+                    } else if let Some(body) = spec.strip_prefix("noise:") {
+                        let p: Vec<&str> = body.split(',').collect();
+                        if p.len() != 3 {
+                            return Err("--qp-map noise:<block>,<min>,<max>".into());
+                        }
+                        zenjpegai::tools::qualmap::QualityMap::from_noise(
+                            parse_u(p[0]).map_err(|_| "--qp-map noise: bad block")?,
+                            parse_i(p[1]).map_err(|_| "--qp-map noise: bad min")?,
+                            parse_i(p[2]).map_err(|_| "--qp-map noise: bad max")?,
+                            h,
+                            w,
+                        )
+                    } else if let Some(body) = spec.strip_prefix("roi:") {
+                        let mut rois = Vec::new();
+                        for rect in body.split(';') {
+                            let p: Vec<usize> = rect
+                                .split(',')
+                                .map(|s| s.parse::<usize>())
+                                .collect::<std::result::Result<_, _>>()
+                                .map_err(|_| "--qp-map roi:<x>,<y>,<wid>,<hei>;...")?;
+                            if p.len() != 4 {
+                                return Err("--qp-map roi:<x>,<y>,<wid>,<hei>;...".into());
+                            }
+                            rois.push((p[0], p[1], p[2], p[3]));
+                        }
+                        zenjpegai::tools::qualmap::QualityMap::from_roi_rects(&rois, h, w)
+                    } else {
+                        return Err(
+                            "--qp-map: `variance`, `noise:<block>,<min>,<max>` or `roi:<x>,<y>,<wid>,<hei>;...`"
+                                .into(),
+                        );
+                    };
+                    Some(m.map_err(|e| format!("{e:?}"))?)
+                }
+            };
+            // `--quality-map`: an RGB mask at picture resolution, white = region of interest.
+            let quality_map = match (quality_map, &args.quality_map) {
+                (Some(m), _) => Some(m),
+                (None, None) => None,
+                (None, Some(path)) => {
                     let bytes = std::fs::read(path).map_err(|e| format!("{path:?}: {e}"))?;
                     let mask =
                         zenjpegai::encoder::read_png_rgb8(&bytes).map_err(|e| format!("{e:?}"))?;
