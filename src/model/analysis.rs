@@ -103,6 +103,18 @@ struct Trunk {
     cab: Option<Cab>,
     conv3: ConvLayer,
     act3: ResAu,
+    /// `clip_thres` of `conv1..conv3` (`E1`..`E3`), when the checkpoint carries it.
+    clip: [Option<(Vec<f32>, Vec<f32>)>; 3],
+}
+
+/// `clip_thres` layer name for a conv stage: `E1B`..`E5B` for BOP, `E1H`..`E5H` for HOP
+/// (`autoencoder_data/encoder/*_{prim,sec}.py::forward` under `is_clip`).
+fn clip_key(op: OperatingPoint, stage: usize) -> String {
+    let s = match op {
+        OperatingPoint::Hop => "H",
+        _ => "B",
+    };
+    alloc::format!("clip_thres.E{stage}{s}")
 }
 
 impl Trunk {
@@ -131,56 +143,63 @@ impl Trunk {
             },
             conv3: conv_s2(ck, "conv3", C, C, eng)?,
             act3: ResAu::load(ck, "act3", C, eng)?,
+            clip: [
+                load::clip_bounds(ck, &clip_key(op, 1)),
+                load::clip_bounds(ck, &clip_key(op, 2)),
+                load::clip_bounds(ck, &clip_key(op, 3)),
+            ],
         })
     }
 
-    /// Input in `[0, 255]`; output at 1/8 of the input resolution, not padded.
+    /// Input in `[0, 255]`; output at 1/8 of the input resolution, not padded. `clip` applies
+    /// the checkpoint's `clip_thres` after each conv (`clipping_mode = 1`), if it has any.
     fn forward(
         &self,
         eng: &Engine,
         x: &Tensor<f32>,
         h: usize,
         w: usize,
+        clip: bool,
         stop: &dyn Stop,
     ) -> Result<BTensor> {
         if x.h != h || x.w != w {
             return Err(Error::InvalidArgument("analysis transform: input size"));
         }
-        let x = crate::encoder::stage!(
-            "  norm+conv1+act1",
-            self.act1.forward(
-                eng,
-                self.conv1.forward(
-                    eng,
-                    &pad_for(
-                        BTensor::from_planar_par(eng, &normalize(x)?, eng.tier.block())?,
-                        h,
-                        w,
-                        1
-                    )?
-                )?
-            )
+        let mut c1 = self.conv1.forward(
+            eng,
+            &pad_for(
+                BTensor::from_planar_par(eng, &normalize(x)?, eng.tier.block())?,
+                h,
+                w,
+                1,
+            )?,
         )?;
+        if clip && let Some(b) = &self.clip[0] {
+            load::clip_channels(&mut c1, b);
+        }
+        let x = crate::encoder::stage!("  norm+conv1+act1", self.act1.forward(eng, c1))?;
         stop.check()?;
         let mut x = pad_for(x, h, w, 2)?;
         if let Some(tam) = &self.tam {
             x = crate::encoder::stage!("  tam", tam.forward(eng, x))?;
             stop.check()?;
         }
-        let x = crate::encoder::stage!(
-            "  conv2+act2",
-            self.act2.forward(eng, self.conv2.forward(eng, &x)?)
-        )?;
+        let mut c2 = self.conv2.forward(eng, &x)?;
+        if clip && let Some(b) = &self.clip[1] {
+            load::clip_channels(&mut c2, b);
+        }
+        let x = crate::encoder::stage!("  conv2+act2", self.act2.forward(eng, c2))?;
         stop.check()?;
         let mut x = pad_for(x, h, w, 4)?;
         if let Some(cab) = &self.cab {
             x = crate::encoder::stage!("  cab", cab.forward(eng, &x))?;
             stop.check()?;
         }
-        let x = crate::encoder::stage!(
-            "  conv3+act3",
-            self.act3.forward(eng, self.conv3.forward(eng, &x)?)
-        )?;
+        let mut c3 = self.conv3.forward(eng, &x)?;
+        if clip && let Some(b) = &self.clip[2] {
+            load::clip_channels(&mut c3, b);
+        }
+        let x = crate::encoder::stage!("  conv3+act3", self.act3.forward(eng, c3))?;
         stop.check()?;
         Ok(x)
     }
@@ -201,6 +220,9 @@ pub struct AnalysisPrimary {
     trunk: Trunk,
     conv4: ConvLayer,
     conv5: ConvLayer,
+    /// `clip_thres` of `conv4` (`E4`) and `conv5` (`E5`), when the checkpoint carries it.
+    clip4: Option<(Vec<f32>, Vec<f32>)>,
+    clip5: Option<(Vec<f32>, Vec<f32>)>,
 }
 
 impl AnalysisPrimary {
@@ -211,16 +233,37 @@ impl AnalysisPrimary {
             trunk: Trunk::load(ck, op, 1, true, eng)?,
             conv4: conv_s2(ck, "conv4", C, chs, eng)?,
             conv5: ConvLayer::new(load::conv1x1(ck, "conv5", chs, chs, false)?, eng)?,
+            clip4: load::clip_bounds(ck, &clip_key(op, 4)),
+            clip5: load::clip_bounds(ck, &clip_key(op, 5)),
         })
     }
 
     pub fn forward(&self, eng: &Engine, x: &Tensor<f32>, stop: &dyn Stop) -> Result<BTensor> {
+        self.forward_clip(eng, x, false, stop)
+    }
+
+    /// `forward` with the checkpoint's `clip_thres` applied after each conv when `clip` —
+    /// `common_modules.py` running the encoder with `clipping_mode = 1`.
+    pub fn forward_clip(
+        &self,
+        eng: &Engine,
+        x: &Tensor<f32>,
+        clip: bool,
+        stop: &dyn Stop,
+    ) -> Result<BTensor> {
         let (h, w) = (x.h, x.w);
-        let t = self.trunk.forward(eng, x, h, w, stop)?;
+        let t = self.trunk.forward(eng, x, h, w, clip, stop)?;
         let t = pad_for(t, h, w, 8)?;
-        let t = self.conv4.forward(eng, &t)?;
+        let mut t = self.conv4.forward(eng, &t)?;
+        if clip && let Some(b) = &self.clip4 {
+            load::clip_channels(&mut t, b);
+        }
         stop.check()?;
-        self.conv5.forward(eng, &t)
+        let mut t = self.conv5.forward(eng, &t)?;
+        if clip && let Some(b) = &self.clip5 {
+            load::clip_channels(&mut t, b);
+        }
+        Ok(t)
     }
 }
 
@@ -230,6 +273,8 @@ impl AnalysisPrimary {
 pub struct AnalysisSecondary {
     trunk: Trunk,
     conv5: ConvLayer,
+    /// `clip_thres` of `conv5` (`E5`), when the checkpoint carries it.
+    clip5: Option<(Vec<f32>, Vec<f32>)>,
 }
 
 impl AnalysisSecondary {
@@ -239,11 +284,27 @@ impl AnalysisSecondary {
         Ok(Self {
             trunk: Trunk::load(ck, op, 12, false, eng)?,
             conv5: ConvLayer::new(load::conv1x1(ck, "conv5", C, chs, false)?, eng)?,
+            clip5: load::clip_bounds(ck, &clip_key(op, 5)),
         })
     }
 
     pub fn forward(&self, eng: &Engine, x: &Tensor<f32>, stop: &dyn Stop) -> Result<BTensor> {
-        let t = self.trunk.forward(eng, x, x.h, x.w, stop)?;
-        self.conv5.forward(eng, &t)
+        self.forward_clip(eng, x, false, stop)
+    }
+
+    /// `forward` with the checkpoint's `clip_thres` applied after each conv when `clip`.
+    pub fn forward_clip(
+        &self,
+        eng: &Engine,
+        x: &Tensor<f32>,
+        clip: bool,
+        stop: &dyn Stop,
+    ) -> Result<BTensor> {
+        let t = self.trunk.forward(eng, x, x.h, x.w, clip, stop)?;
+        let mut t = self.conv5.forward(eng, &t)?;
+        if clip && let Some(b) = &self.clip5 {
+            load::clip_channels(&mut t, b);
+        }
+        Ok(t)
     }
 }

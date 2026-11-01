@@ -158,6 +158,11 @@ pub struct EncodeParams {
     /// tier- and reference-bit-identical; [`Precision::Approximate`] is `f32`
     /// accumulation — faster, opt-in, and *not* reference-parity.
     pub precision: crate::nn::fast::Precision,
+    /// `clipping_mode` of the reference encoder: when the checkpoint carries `clip_thres`
+    /// (no shipped model does), clamp each analysis / hyper-encoder conv output channel to
+    /// its `MinList`/`MaxList` — `base_layers/utils.py::feature_clipping`. A no-op on
+    /// shipped weights.
+    pub clipping: bool,
 }
 
 /// How a region's residual reaches the codestream
@@ -214,6 +219,7 @@ impl Default for EncodeParams {
             num_chs: LATENT_CHANNELS.map(|c| c as u16),
             rdlr: false,
             precision: crate::nn::fast::Precision::Exact,
+            clipping: false,
         }
     }
 }
@@ -660,7 +666,9 @@ impl Encoder {
         let planes = [&input.luma, &input.chroma];
         // The two analyses are independent (the chroma transform reads its own plane and its
         // own checkpoints); the luma and chroma passes run concurrently.
-        let analyse = |ccs| self.analyse_component(&set, ccs, planes[ccs], independent, stop);
+        let analyse = |ccs| {
+            self.analyse_component(&set, ccs, planes[ccs], independent, params.clipping, stop)
+        };
         #[cfg(feature = "parallel")]
         let (a, b) = rayon::join(|| analyse(0), || analyse(1));
         #[cfg(not(feature = "parallel"))]
@@ -775,6 +783,7 @@ impl Encoder {
                     ccs,
                     [&input.luma, &input.chroma][ccs],
                     independent,
+                    params.clipping,
                     stop,
                 )
             };
@@ -966,6 +975,7 @@ impl Encoder {
         ccs: usize,
         plane: &Tensor<f32>,
         independent_regions: Option<(usize, usize)>,
+        clip: bool,
         stop: &dyn enough::Stop,
     ) -> Result<(Tensor<f32>, Tensor<i8>)> {
         let (ph, pw) = (plane.h, plane.w);
@@ -1003,14 +1013,14 @@ impl Encoder {
             let yt = stage!(
                 "analysis",
                 match ccs {
-                    0 => set.analysis_y.forward(eng, &tile, stop)?,
-                    _ => set.analysis_uv.forward(eng, &tile, stop)?,
+                    0 => set.analysis_y.forward_clip(eng, &tile, clip, stop)?,
+                    _ => set.analysis_uv.forward_clip(eng, &tile, clip, stop)?,
                 }
             );
             stop.check()?;
             let zt = stage!(
                 "hyper_enc",
-                set.hyper[ccs].forward(eng, &yt, t.image.height, t.image.width, d, stop)
+                set.hyper[ccs].forward_clip(eng, &yt, t.image.height, t.image.width, d, clip, stop)
             )?
             .to_planar()?;
             let yt = yt.to_planar()?;
@@ -1114,7 +1124,7 @@ impl Encoder {
             let divider = if ccs == 0 { 16 } else { 8 };
             let latent = BTensor::from_planar(latent, eng.tier.block())?;
             let z = set.hyper[ccs]
-                .forward(eng, &latent, ph, pw, divider, stop)?
+                .forward_clip(eng, &latent, ph, pw, divider, params.clipping, stop)?
                 .to_planar()?;
             let max = (Z_OFFSET - 1) as f32;
             let data = z

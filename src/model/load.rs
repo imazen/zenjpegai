@@ -87,3 +87,33 @@ pub(crate) fn conv_transpose(
     let b = ck.f32(&format!("{prefix}.bias"))?.data;
     ConvTranspose2d::new(in_ch, out_ch, k, stride, pad, out_pad, w.data, Some(b))
 }
+
+/// `clip_thres.<layer>` of a checkpoint — the per-channel `[MinList, MaxList]` bounds of
+/// `base_layers/utils.py::feature_clipping` — or `None` when the checkpoint carries no
+/// `clip_thres` for the layer (every shipped model file).
+pub(crate) fn clip_bounds(ck: &Checkpoint<'_>, key: &str) -> Option<(Vec<f32>, Vec<f32>)> {
+    let lo = ck.list(&format!("{key}.MinList"))?;
+    let hi = ck.list(&format!("{key}.MaxList"))?;
+    Some((
+        lo.iter().map(|&x| x as f32).collect(),
+        hi.iter().map(|&x| x as f32).collect(),
+    ))
+}
+
+/// `feature_clipping(x, layer, clip_thres, is_clip)` on a blocked tensor: `x[c]` clamped to
+/// `[lo[c], hi[c]]`, leaving channels the lists do not cover alone.
+pub(crate) fn clip_channels(x: &mut crate::nn::fast::BTensor, bounds: &(Vec<f32>, Vec<f32>)) {
+    let (lo, hi) = bounds;
+    let (v, plane) = (x.v, x.h * x.w);
+    for (blk, b) in x.data.chunks_exact_mut(plane * v).enumerate() {
+        for lane in 0..v {
+            let c = blk * v + lane;
+            let (Some(&lo), Some(&hi)) = (lo.get(c), hi.get(c)) else {
+                break;
+            };
+            for x in b[lane..].iter_mut().step_by(v) {
+                *x = x.clamp(lo, hi);
+            }
+        }
+    }
+}

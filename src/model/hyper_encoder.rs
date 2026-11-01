@@ -36,6 +36,8 @@ pub struct HyperEncoder {
     conv3: ConvLayer,
     conv4: ConvLayer,
     conv5: ConvLayer,
+    /// `clip_thres` of `conv1..conv5` (`HE1`..`HE5`), when the checkpoint carries it.
+    clip: [Option<(Vec<f32>, Vec<f32>)>; 5],
 }
 
 impl HyperEncoder {
@@ -56,12 +58,16 @@ impl HyperEncoder {
                 eng,
             )
         };
+        let clip = |stage: usize| {
+            load::clip_bounds(ck, &alloc::format!("hyper_encoder.clip_thres.HE{stage}"))
+        };
         Ok(Self {
             conv1: conv("conv1", 1)?,
             conv2: conv("conv2", 1)?,
             conv3: conv("conv3", 2)?,
             conv4: conv("conv4", 1)?,
             conv5: conv("conv5", 2)?,
+            clip: [clip(1), clip(2), clip(3), clip(4), clip(5)],
         })
     }
 
@@ -77,6 +83,22 @@ impl HyperEncoder {
         latent_divider: usize,
         stop: &dyn Stop,
     ) -> Result<BTensor> {
+        self.forward_clip(eng, y, h, w, latent_divider, false, stop)
+    }
+
+    /// `forward` with the checkpoint's `clip_thres` applied after each conv when `clip`
+    /// (`clipping_mode = 1` — `autoencoder_hyper/encoder/basic.py::forward` under `is_clip`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_clip(
+        &self,
+        eng: &Engine,
+        y: &BTensor,
+        h: usize,
+        w: usize,
+        latent_divider: usize,
+        clip: bool,
+        stop: &dyn Stop,
+    ) -> Result<BTensor> {
         let d = latent_divider;
         if y.h != h.div_ceil(d) || y.w != w.div_ceil(d) {
             return Err(Error::InvalidArgument("hyper-encoder: latent size"));
@@ -86,15 +108,31 @@ impl HyperEncoder {
             *v = v.abs();
         }
         let mut x = self.conv1.forward(eng, &x)?;
+        if clip && let Some(b) = &self.clip[0] {
+            load::clip_channels(&mut x, b);
+        }
         leaky_relu(&mut x);
         stop.check()?;
-        let x = self.conv2.forward(eng, &x)?;
+        let mut x = self.conv2.forward(eng, &x)?;
+        if clip && let Some(b) = &self.clip[1] {
+            load::clip_channels(&mut x, b);
+        }
         let x = replicate_pad(x, pad_amount(h, d), pad_amount(w, d))?;
         let mut x = self.conv3.forward(eng, &x)?;
+        if clip && let Some(b) = &self.clip[2] {
+            load::clip_channels(&mut x, b);
+        }
         leaky_relu(&mut x);
         stop.check()?;
-        let x = self.conv4.forward(eng, &x)?;
+        let mut x = self.conv4.forward(eng, &x)?;
+        if clip && let Some(b) = &self.clip[3] {
+            load::clip_channels(&mut x, b);
+        }
         let x = replicate_pad(x, pad_amount(h, 2 * d), pad_amount(w, 2 * d))?;
-        self.conv5.forward(eng, &x)
+        let mut x = self.conv5.forward(eng, &x)?;
+        if clip && let Some(b) = &self.clip[4] {
+            load::clip_channels(&mut x, b);
+        }
+        Ok(x)
     }
 }

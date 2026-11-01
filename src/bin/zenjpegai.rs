@@ -73,6 +73,9 @@ OPTIONS:
                        bit-identical to the reference) or `fast` (f32 accumulation in the
                        heavy kernels — the TAM attention and the RDLR backward — opt-in,
                        quicker, and not bit-matched to the reference)
+    --clipping         encode: the reference's `clipping_mode` — apply the checkpoint's
+                       `clip_thres` per-channel clamp after every analysis and
+                       hyper-encoder conv (a no-op on shipped weights, which carry none)
     --max-channels <y,uv>  progressive decode: read only the first latent channels
     --single-thread    do not use the thread pool
     --scalar           no SIMD (for debugging; every tier produces identical pixels)
@@ -125,6 +128,7 @@ struct Args {
     ans_threads: u8,
     regions: Option<zenjpegai::encoder::RegionMode>,
     rdlr: bool,
+    clipping: bool,
     precision: zenjpegai::nn::fast::Precision,
     num_chs: Option<(u16, u16)>,
     quality_map: Option<PathBuf>,
@@ -168,6 +172,7 @@ fn parse_args() -> Result<Args, String> {
         ans_threads: 1,
         regions: None,
         rdlr: false,
+        clipping: false,
         precision: zenjpegai::nn::fast::Precision::Exact,
         num_chs: None,
         quality_map: None,
@@ -223,6 +228,7 @@ fn parse_args() -> Result<Args, String> {
             }
             "--quality-map" => a.quality_map = Some(PathBuf::from(value("--quality-map")?)),
             "--rdlr" => a.rdlr = true,
+            "--clipping" => a.clipping = true,
             "--rvs" => a.rvs = true,
             "--grfs" => a.grfs = true,
             "--lsbs" => a.lsbs = true,
@@ -495,6 +501,7 @@ fn run() -> Result<(), String> {
             params.num_threads_r = args.ans_threads;
             params.regions = args.regions;
             params.rdlr |= args.rdlr;
+            params.clipping |= args.clipping;
             params.precision = args.precision;
             params.c_ver = args.c_ver;
             params.c_hor = args.c_hor;

@@ -55,6 +55,9 @@ pub struct Checkpoint<'a> {
     touched: Vec<AtomicBool>,
     /// Top-level integer entries (`epoch`, ...).
     ints: Vec<(String, i64)>,
+    /// Numeric scalar lists found in nested dicts (e.g. `clip_thres.E1B.MinList`), only from
+    /// `.pth` checkpoints — packed files have no dicts.
+    lists: Vec<(String, Vec<f64>)>,
 }
 
 /// A materialised tensor: contiguous, row-major.
@@ -69,6 +72,56 @@ pub struct Tensor<T> {
 impl<T> Tensor<T> {
     pub fn numel(&self) -> usize {
         self.data.len()
+    }
+}
+
+/// Flatten a nested state-dict dict into dotted names, up to `MAX_DEPTH` levels: tensor
+/// leaves join `tensors` (`key.layer.weight`), lists of numbers join `lists`
+/// (`key.layer.MinList` — the shape `clip_thres` tables have). Other values are ignored.
+#[cfg(feature = "pth")]
+fn flatten_nested(
+    prefix: &str,
+    items: Vec<(pickle::Value, pickle::Value)>,
+    depth: usize,
+    tensors: &mut Vec<(String, pickle::TensorRef)>,
+    lists: &mut Vec<(String, Vec<f64>)>,
+) {
+    const MAX_DEPTH: usize = 3;
+    if depth >= MAX_DEPTH {
+        return;
+    }
+    for (k, v) in items {
+        let pickle::Value::Str(leaf) = k else {
+            continue;
+        };
+        match v {
+            pickle::Value::Tensor(t) => {
+                tensors.push((alloc::format!("{prefix}.{leaf}"), t));
+            }
+            pickle::Value::Dict(inner) => {
+                flatten_nested(
+                    &alloc::format!("{prefix}.{leaf}"),
+                    inner,
+                    depth + 1,
+                    tensors,
+                    lists,
+                );
+            }
+            pickle::Value::List(xs) => {
+                let xs: Option<Vec<f64>> = xs
+                    .iter()
+                    .map(|x| match x {
+                        pickle::Value::Float(f) => Some(*f),
+                        pickle::Value::Int(i) => Some(*i as f64),
+                        _ => None,
+                    })
+                    .collect();
+                if let Some(xs) = xs {
+                    lists.push((alloc::format!("{prefix}.{leaf}"), xs));
+                }
+            }
+            _ => {}
+        }
     }
 }
 
@@ -87,6 +140,7 @@ impl<'a> Checkpoint<'a> {
                 touched: tensors.iter().map(|_| AtomicBool::new(false)).collect(),
                 tensors,
                 ints,
+                lists: Vec::new(),
             });
         }
         #[cfg(feature = "pth")]
@@ -104,12 +158,16 @@ impl<'a> Checkpoint<'a> {
             };
             let mut tensors = Vec::new();
             let mut ints = Vec::new();
+            let mut lists = Vec::new();
             for (k, v) in items {
                 let Value::Str(name) = k else { continue };
                 match v {
                     Value::Tensor(t) => tensors.push((name, t)),
                     Value::Int(i) => ints.push((name, i)),
-                    // nested dicts (optimizer state) and anything else are not model weights
+                    // Nested dicts (`clip_thres` tables; optimizer state) are not model
+                    // weights, but their tensor / scalar-list leaves are addressable as
+                    // `key.layer.leaf` for loaders that want them.
+                    Value::Dict(inner) => flatten_nested(&name, inner, 0, &mut tensors, &mut lists),
                     _ => {}
                 }
             }
@@ -118,6 +176,7 @@ impl<'a> Checkpoint<'a> {
                 touched: tensors.iter().map(|_| AtomicBool::new(false)).collect(),
                 tensors,
                 ints,
+                lists,
             })
         }
         #[cfg(not(feature = "pth"))]
@@ -161,6 +220,15 @@ impl<'a> Checkpoint<'a> {
     /// A top-level integer entry such as `epoch`.
     pub fn int(&self, name: &str) -> Option<i64> {
         self.ints.iter().find(|(n, _)| n == name).map(|&(_, v)| v)
+    }
+
+    /// A numeric scalar list found in a nested dict (`clip_thres.E1B.MinList`); `None` when
+    /// the name is absent (packed checkpoints never have lists).
+    pub fn list(&self, name: &str) -> Option<&[f64]> {
+        self.lists
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v.as_slice())
     }
 
     /// Contiguous little-endian bytes of a tensor, row-major, plus its shape.
