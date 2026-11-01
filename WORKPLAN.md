@@ -104,3 +104,28 @@ construction, and say so in `PORTING.md`.
   10-bit eICCI/LEF (needs reference decode support check first).
 - [ ] GPU work (separate workspace): shader-f16 (B3), GPU pool ledger — parity-breaking.
 - [ ] Sweep `PORTING.md` after every landing: row update + what remains missing.
+
+## Continuation checkpoint (post-`process_z`)
+
+`process_z` is DONE both components (`5374daa`): `compress_backward`→`d_psi`
+(MCM psi-part plumbing for luma), `rate_point_z`/`backward_z`/`optimize_z`
+`ccs`-parametric (`compress`/`compress_backward`+`d_psi` luma; `compress_context_free`
++`upshuffle_psi_backward` chroma), `num_ite_z`+`--num-ite-z`+`final_run` gating+
+`component_pass` re-derives `scales`/`mask`/`q` from optimized `z_hat`. Verified
+end-to-end (fires, real `d_z` ~36, valid stream decodes; identical output = legit
+no-improvement — additive can't flip `z_hat` <0.5 in `num_ite_z` iters).
+`colour_transform_idx=2` RESOLVED upstream-broken→rejected (no oracle exists).
+ALL RDLR dead-paths now ported (`process_y` luma+chroma, `process_z` luma+chroma,
+`feature_clipping`, QMAP 0/1/2, UV-beta, `Precision::Approximate` early-exit).
+
+Next high-value (unstarted):
+- **`d_psi` finite-diff** — `d(psi_s)` extraction in `compress_backward` is a
+  subset of the oracle-verified `d_y` path but has NO reference oracle
+  (upstream dumps no `psi_grad`). A `d(Σ forward-out)/d(psi)` finite-diff in
+  `mcm.rs` (needs a real MCM fixture — `load_common`/`CommonModel.context`)
+  would close the verification gap.
+- **Winograd F(2,3) `Precision::Approximate` conv** — convs use `packed`/
+  `depthwise` SIMD kernels (NOT `dot8`); a Winograd 3x3 kernel is the big
+  remaining perf knob (parity-breaking, opt-in). ~250 lines + error-bounded test.
+- f16-weight kernels, niche coverage vectors (per-tile eICCI, single-chroma
+  tiles, 10-bit LEF/eICCI), GPU (separate workspace).
