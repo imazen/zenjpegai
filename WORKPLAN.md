@@ -38,6 +38,20 @@ construction, and say so in `PORTING.md`.
        (`get_luma_tile_rate`) adds the luma's rate into `expected_joined_rate`. Order: luma
        `process_y` first, then chroma with `sup_info`/`calc_additional_rate`
        (`rdlr_tool.py:256-283`).
+       **`rate_point_uv` + `RatePointUV` + `psnr_plane` LANDED (`5382f2a`)** — the
+       evaluator. Remaining pieces, mirroring `backward`/`optimize_y`:
+       - `loss_upstream_uv`: `loss = -(nU·cU + nV·cV)/2`, `nP=[-sin,cos]`,
+         `cP=[rate_log_diff, psnrP_diff]`, `rate_log_diff=log(rate_UV+Y_part)-log(ref)`.
+         Gradients: `d(loss)/d(log_joined)=(sin_U+sin_V)/2`, `d(loss)/d(psnrP)=-cos_P/2`.
+       - `backward_uv`: `d(resi)` via `rate_vjp` (GM term) + `d(rec_u)/d(rec_v)` via
+         `psnr_vjp` parametrized on plane → `SynthesisSecondary::backward` through
+         `cat(sup, y_hat)` (sup detached → grad on the 96 chroma part only; needs a
+         secondary `forward_tape`/`backward` — check `synthesis.rs` Secondary tape) →
+         `ctx.compress_backward` → `d(y)` + direct `+1` resi term.
+       - `optimize_uv` driver: Adagrad on chroma `y` mirroring `optimize_y`, with
+         `sup_info`/`calc_additional_rate`/`tile_rate_ref` refs.
+       - `rdlr` integration (`encoder/mod.rs`/`rdlr.rs::rdlr`): luma `process_y` first →
+         `sup_info = y_hat[::2,::2]` + `calc_additional_rate` → chroma `process_y`
     2. **`process_z`** (`rdlr_comp_base.py:77`): dead even upstream (NO callers). `Substract`
        filter (per-position `additive2` + scalar `additive`) + Adagrad(lr*0.9) + STE
        `z_hat = z_new + clamp(round(z_new)-z_new, -1, 1)` optimizing `z_hat` toward
