@@ -25,7 +25,7 @@ construction, and say so in `PORTING.md`.
 
 ## Next up
 
-- [ ] **chroma / z RDLR** (`cfg/tools/RDLR.json`: `numIteYLuma=8` shipped, `numIteYChroma`,
+- [~] **chroma / z RDLR** — chroma `process_y` DONE (c2fe1ec, `--num-ite-uv`); `process_z` pending (`cfg/tools/RDLR.json`: `numIteYLuma=8` shipped, `numIteYChroma`,
   `numIteZLuma`, `numIteZChroma = 0`; set them >0 in a reference cfg → the path RUNS, so there
   IS an oracle — dump + compare). Three sub-parts:
     1. **chroma `process_y`** (`rdlr_comp_UV.py::RDLRCompUV.rdlr_y_iteration` /
@@ -73,11 +73,21 @@ construction, and say so in `PORTING.md`.
        - `numIteYChroma` default 40 (shipped 0 → knob `EncodeParams` off-by-default);
          oracle = reference cfg with numIteYChroma>0 → dump.
     2. **`process_z`** (`rdlr_comp_base.py:77`): dead even upstream (NO callers). `Substract`
-       filter (per-position `additive2` + scalar `additive`) + Adagrad(lr*0.9) + STE
+       filter (per-position `additive2` + scalar `additive`) + Adagrad(lr*0.9/iter) + STE
        `z_hat = z_new + clamp(round(z_new)-z_new, -1, 1)` optimizing `z_hat` toward
        `encode_z + encode_y` total bits (`ECLibLH`), `numIteZ` iters (default 14),
-       early-stop `nochange==7`. Needs the z-entropy VJP + the `z_hat→psi→scale_log→residual`
-       chain — the hard part (like `optimize_y`'s backward but on z).
+       early-stop `nochange==7`. Loss = `ac.get_total_bits()` after `encode_z(z_hat)` +
+       `encode_y(z_hat→psi→scale_log→residual_q)`. Needs:
+       - `rate_point_z`: `z_hat → (hyper_decoder) psi → scale_log → compress →
+         rate_y(GM) + lh.z_bits(z_hat)` total-bits eval; resi via `y - mean`.
+       - `backward_z`: `d(total_bits)/d(z_hat)` = `d(z_hat)` z-entropy term +
+         `d(rate_y)/d(scale_log)·d(scale_log)/d(psi)·d(psi)/d(z_hat)` — needs a
+         HYPER-DECODER backward (`z_hat→psi`, NEW VJP) + scale-derivation backward
+         (`psi→scale_log`) + the sigma→likelihood chain. ~500 lines, the deepest
+         remaining VJP. STE: `d(z_hat)/d(z_new)≈1` where the clamp is inside ±1.
+       - `optimize_z` driver: `Substract`-equiv additive params + Adagrad(lr0·0.9^i),
+         `numIteZ` iters, `nochange==7` early-stop, `best['z_hat'].round()` final.
+       - `EncodeParams::num_ite_z` (shipped 0 → opt-in).
     3. **`optimize_z`/`rate_point_z`/`rate_point_uv`** in `rdlr.py` — the point evaluators
        the above two use.
 - [ ] **`colour_transform_idx = 2`** (user-defined transform; decoder side self-inconsistent
