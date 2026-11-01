@@ -76,22 +76,24 @@ construction, and say so in `PORTING.md`.
        filter (per-position `additive2` + scalar `additive`) + Adagrad(lr*0.9/iter) + STE
        `z_hat = z_new + clamp(round(z_new)-z_new, -1, 1)` optimizing `z_hat` toward
        `encode_z + encode_y` total bits, `numIteZ` iters (default 14), `nochange==7`.
-       **DONE (chroma, this turn):** `HyperDecoder::forward_tape`/`backward`/`forward_f32`
-       + `HyperTape` + `load_hyper_decoder` (finite-diff verified, `9fef660`),
-       `mcm::upshuffle_psi_backward` (`psi→mean` scatter), `lh::z_bits_vjp` (the
-       `encode_z` LUT-slope term), `rate_point_z`/`backward_z`/`optimize_z`/`ste_z`/
-       `quant_z`/`ZRatePoint` in `rdlr.rs` — the whole `z_hat→psi→mean→resi→rate_y`
-       + `z_bits` VJP for the CHROMA context-free path. **Remains:**
-       - `num_ite_z` param + `z` driver + `component_pass` integration (the new z_hat
-         must re-derive `psi`/`scale_log`/`residual`/`y_hat` before the residual coding).
-       - **LUMA `process_z`** (`numIteZLuma`): `rate_point_z` uses `compress_context_free`
-         (chroma-correct); luma needs `compress` (MCM) — its `d(mean)→d(psi)` requires
-         `compress_backward` to RETURN `d(psi)` (currently returns only `d_y` — the
-         `joined` per-stage `d(psi_s)` is computed internally but not plumbed out).
+       **DONE (both components, `a3c5e1b`/`a69e9ee`/`5374daa`):**
+       `HyperDecoder::forward_tape`/`backward`/`forward_f32` + `HyperTape` +
+       `load_hyper_decoder` (finite-diff verified), `mcm::upshuffle_psi_backward`,
+       `lh::z_bits_vjp`, `rate_point_z`/`backward_z`/`optimize_z`/`ste_z`/`quant_z`/
+       `ZRatePoint`, `compress_backward` → `d_psi` (MCM psi-part plumbing for luma),
+       `num_ite_z` + `--num-ite-z` + `final_run` gating + `component_pass` re-deriving
+       `scales`/`mask`/`q` from the optimized `z_hat`. Verified end-to-end (fires on
+       both `z_Y`/`z_UV`, real `d_z`, decodes cleanly; identical output = legit
+       no-improvement when the additive can't flip `z_hat` <0.5 in `num_ite_z`).
     3. **`optimize_z`/`rate_point_z`/`rate_point_uv`** in `rdlr.py` — the point evaluators
        the above two use.
-- [ ] **`colour_transform_idx = 2`** (user-defined transform; decoder side self-inconsistent
-  upstream — needs a decision on what the "correct" semantics are, then port).
+- [x] **`colour_transform_idx = 2`** — RESOLVED as correctly-rejected: the upstream path is
+  irrecoverably self-inconsistent (`pre`/`post_processing` both apply only the first row of
+  the *inverse* matrix to all 3 planes AND crash unpatched on `convert_range_(0,1)`), so no
+  trustworthy oracle exists — even the reference produces garbage/three-identical-planes. Our
+  `ColourTransform::Custom` parses the 12-byte matrix/offset bits exactly, then
+  `output.rs:379` returns `Err(Unsupported("user-defined colour transform"))` — the honest
+  port (rejecting a stream the reference itself cannot decode).
 - [ ] **More `Precision::Approximate` knobs**: Winograd F(2,3) for 3x3 convs, early-exit RDLR,
   f16-weight kernels (f16 `.pth` load already upcasts; a real f16 kernel is new). All opt-in,
   all parity-breaking — never under `Exact`.
