@@ -1,5 +1,8 @@
 //! `coding_tools/rdlr/` — Rate-Distortion Latent Refinement: the encoder-side
-//! iterative latent optimiser, the last coding tool not ported.
+//! iterative latent optimiser. `process_y` (luma `rdlr`, chroma `--num-ite-uv`),
+//! `process_z` (`--num-ite-z`, both `z_Y` and `z_UV`), `feature_clipping`, QMAP
+//! 0/1/2 and `independent_beta_UV` are all ported — the reference ships every
+//! one at `0`/off, so each is opt-in here.
 //!
 //! At b9e573f the reference's RDLR is dead code — five stale call sites crash
 //! before the first iteration (`scripts/ref_vectors/dump_rdlr.py` restores each

@@ -14,8 +14,9 @@
 //! stride-2 convolution. The secondary transform's input is 12 planes at half the luma
 //! resolution: luma pixel-unshuffled by 2, then U and V pixel-unshuffled by 2 (4:4:4 coding).
 //!
-//! `feature_clipping` is not ported: no shipped checkpoint carries `clip_thres` and the
-//! reference runs with `clipping_mode = 0`.
+//! `feature_clipping` (`clip_thres` after each conv) IS ported and applies when the
+//! checkpoint carries `clip_thres.E{stage}` — dormant upstream because no shipped
+//! checkpoint carries it and `clipping_mode = 0`.
 
 use enough::Stop;
 
