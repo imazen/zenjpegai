@@ -51,7 +51,27 @@ construction, and say so in `PORTING.md`.
        - `optimize_uv` driver: Adagrad on chroma `y` mirroring `optimize_y`, with
          `sup_info`/`calc_additional_rate`/`tile_rate_ref` refs.
        - `rdlr` integration (`encoder/mod.rs`/`rdlr.rs::rdlr`): luma `process_y` first →
-         `sup_info = y_hat[::2,::2]` + `calc_additional_rate` → chroma `process_y`
+         `sup_info` + `calc_additional_rate` → chroma `process_y`.
+       RESOLVED geometry/spec (reference-verified):
+       - `sup` = luma `y_hat` at FULL latent res (h/16) — the decoder (`ccs_sgmm_tool.py:470`,
+         `supp_info_uv = tiles_synthesis['y_hat']`, crop only) is ground truth. The encode-side
+         `sup_info = y_hat[:,:,::2,::2]` in `rdlr_tool.py` is a DEAD-CODE BUG (would fail the
+         `cat` — chroma `y_hat` is at h/16, equal to luma's; `header.rs latent_size(1)` =
+         `component_size(1)/8` = `(h/2)/8` = h/16). Do NOT decimate.
+       - `ref_data` = `(joint_rate_ref, psnrU_ref, psnrV_ref, rate_ref_Y_part)`; element 0/3
+         get `additional_rate` (=`get_luma_tile_rate` = luma `rate_point_y.bpp` at the
+         refined `y`) added in `process_y`.
+       - `expected_joined_rate = bpp_UV + rate_ref_Y_part`; `rate_log_diff = ln(joined)-ln(ref)`.
+       - `loss = (lossU+lossV)/2`, `lossP = -dot([-sin sP, cos sP], [rate_log_diff, psnrP-P_ref])`.
+         Gradients: `d/d(rate_UV) = (sin sU + sin sV)/(2·joined)`, `d/d(psnrP) = -cos sP/2`.
+       - UV slopes `mean_psnrU_slopes` = {6:64.131075, 12:62.749463, 25:63.404102,
+         50:58.369855, 75:44.556739, other:58.642247}; `mean_psnrV_slopes` = {6:64.006979,
+         12:62.568593, 25:62.318648, 50:56.189655, 75:42.682759, other:57.553327}.
+       - `rate_UV` = `(z_bits + GM residual bits)/luma_pixels` = `rate_point_uv.bpp`.
+       - `original` for UV = 2ch source chroma planes at CHROMA res; `synthesis_uv` called
+         with (ch, cw) = chroma res → rec 2ch at chroma res for `psnr_plane`.
+       - `numIteYChroma` default 40 (shipped 0 → knob `EncodeParams` off-by-default);
+         oracle = reference cfg with numIteYChroma>0 → dump.
     2. **`process_z`** (`rdlr_comp_base.py:77`): dead even upstream (NO callers). `Substract`
        filter (per-position `additive2` + scalar `additive`) + Adagrad(lr*0.9) + STE
        `z_hat = z_new + clamp(round(z_new)-z_new, -1, 1)` optimizing `z_hat` toward
