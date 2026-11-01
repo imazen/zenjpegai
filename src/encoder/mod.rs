@@ -177,6 +177,10 @@ pub struct EncodeParams {
     /// default) disables it, matching the shipped config. Ignored without the source planes
     /// (a `with_source`/`encode` path supplies them; `rate_match` trial encodes have none).
     pub num_ite_uv: usize,
+    /// `numIteZChroma` — `process_z` hyper-latent refinement iterations on the
+    /// chroma `z_hat` (`0` ships upstream → opt-in; `~14` matches the reference
+    /// `process_z` default).
+    pub num_ite_z: usize,
 }
 
 /// How a region's residual reaches the codestream
@@ -236,6 +240,7 @@ impl Default for EncodeParams {
             clipping: false,
             uv_beta_search: false,
             num_ite_uv: 0,
+            num_ite_z: 0,
         }
     }
 }
@@ -844,6 +849,7 @@ impl Encoder {
                 eicci: if final_run { base_params.eicci } else { None },
                 rdlr: final_run && base_params.rdlr,
                 num_ite_uv: if final_run { base_params.num_ite_uv } else { 0 },
+                num_ite_z: if final_run { base_params.num_ite_z } else { 0 },
                 ..base_params
             };
             let uv_org = (params.num_ite_uv > 0)
@@ -1711,6 +1717,53 @@ impl Encoder {
         } else {
             latent
         };
+
+        // `process_z` (numIteZChroma): refine the chroma `z_hat` toward
+        // `encode_z + encode_y` total bits, then re-derive `scales`/`mask`/`q`
+        // for the optimized hyper-latent — `del cur_decision['scale_log']` →
+        // `component_scales` inside the residual coding sees only the new `z_hat`.
+        let z_opt;
+        let scales_opt;
+        let (z_hat, scales, mask) = if ccs == 1
+            && params.num_ite_z > 0
+            && hdr.regions.is_none()
+            && (hdr.width as usize) * (hdr.height as usize) < 4_200_000
+        {
+            z_opt = rdlr::optimize_z(
+                eng,
+                model,
+                &set.lh[ccs],
+                latent,
+                z_hat,
+                &mask,
+                &q,
+                num_chs,
+                lh,
+                lw,
+                params.num_ite_z,
+                stop,
+            )?;
+            scales_opt = stage!(
+                "scales-zrdlr",
+                component_scales_with(
+                    hdr,
+                    ccs,
+                    model,
+                    &z_opt,
+                    quality_map,
+                    params.rvs,
+                    GrfsFlags::Derive(params.grfs),
+                )
+            )?;
+            let mask = skip_mask(&scales_opt.skip_scale_log, None)?;
+            (&z_opt, scales_opt, mask)
+        } else {
+            (z_hat, scales, mask)
+        };
+        let q = EncoderQuantiser {
+            scales: &scales,
+            quality_map,
+        };
         let out = stage!(
             "compress",
             compress_regions(
@@ -2103,7 +2156,7 @@ fn region_area_grid(h: usize, w: usize, num_ver: usize, num_hor: usize) -> Vec<A
 }
 
 /// `quant_dequant` with the tools the encoder supports: the gain unit and RVS / GRFS.
-struct EncoderQuantiser<'a> {
+pub(crate) struct EncoderQuantiser<'a> {
     scales: &'a ComponentScales,
     quality_map: Option<&'a QualityMap>,
 }

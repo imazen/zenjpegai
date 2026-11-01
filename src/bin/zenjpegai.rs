@@ -136,6 +136,7 @@ struct Args {
     uv_beta_search: bool,
     /// `numIteYChroma` — chroma RDLR iterations (`RDLRCompUV`).
     num_ite_uv: usize,
+    num_ite_z: usize,
     precision: zenjpegai::nn::fast::Precision,
     num_chs: Option<(u16, u16)>,
     quality_map: Option<PathBuf>,
@@ -183,6 +184,7 @@ fn parse_args() -> Result<Args, String> {
         clipping: false,
         uv_beta_search: false,
         num_ite_uv: 0,
+        num_ite_z: 0,
         precision: zenjpegai::nn::fast::Precision::Exact,
         num_chs: None,
         quality_map: None,
@@ -243,11 +245,14 @@ fn parse_args() -> Result<Args, String> {
             "--clipping" => a.clipping = true,
             "--uv-beta-search" => a.uv_beta_search = true,
             "--num-ite-uv" => {
-                a.num_ite_uv = it
-                    .next()
-                    .ok_or("--num-ite-uv needs <n>")?
+                a.num_ite_uv = value("--num-ite-uv")?
                     .parse()
                     .map_err(|_| "--num-ite-uv <int>")?;
+            }
+            "--num-ite-z" => {
+                a.num_ite_z = value("--num-ite-z")?
+                    .parse()
+                    .map_err(|_| "--num-ite-z <int>")?;
             }
             "--rvs" => a.rvs = true,
             "--grfs" => a.grfs = true,
@@ -524,6 +529,7 @@ fn run() -> Result<(), String> {
             params.clipping |= args.clipping;
             params.uv_beta_search |= args.uv_beta_search;
             params.num_ite_uv = params.num_ite_uv.max(args.num_ite_uv);
+            params.num_ite_z = params.num_ite_z.max(args.num_ite_z);
             if args.num_ite_uv > 0 {
                 params.num_ite_uv = args.num_ite_uv;
             }
