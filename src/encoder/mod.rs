@@ -298,6 +298,10 @@ struct Component {
 struct ComponentPass {
     component: Component,
     payload: Vec<Vec<u8>>,
+    /// The reconstruction `compress` already produced (`mu + resi_dq`), kept only
+    /// when post-filters will need it — the post-filters path would otherwise
+    /// rebuild it in `reconstruct_latent_with`. `None` otherwise.
+    y_hat: Option<Tensor<f32>>,
     rvs_enabled: bool,
     grfs_channel_flags: Option<Vec<bool>>,
     cube_flags: Option<Vec<bool>>,
@@ -1180,6 +1184,11 @@ impl Encoder {
         hdr.components[1].cube_flags = b.cube_flags;
         let efe_residuals = vec![a.efe_residual, b.efe_residual];
         let efe_likely = vec![a.efe_likely, b.efe_likely];
+        // `compress` already rebuilt each component's `y_hat` (`mu + resi_dq`) —
+        // the same values `reconstruct_latent_with` would re-derive (the masked
+        // residual equals `e.residual`: `quantise(coded=false)` → `dq = 0`).
+        // Reusing them skips a whole hyper-decoder + context-model pass.
+        let recon_y_hats = [a.y_hat, b.y_hat];
         let lef_channel = a.lef_channel;
         residual_payloads.push(a.payload);
         residual_payloads.push(b.payload);
@@ -1252,14 +1261,15 @@ impl Encoder {
                     residual_q: Tensor::zeros(0, 0, 0)?,
                     residual: residual.ok_or(Error::InvalidData("internal: EFE residual"))?,
                 };
-                let mut lat = crate::decoder::reconstruct::reconstruct_latent_with(
-                    eng,
-                    &hdr,
-                    ccs,
-                    &set.common[ccs],
-                    &ent,
-                    stop,
-                )?;
+                // `reconstruct_latent_with` would rebuild `psi` + `y_hat` here —
+                // `compress` already produced them (`mu + resi_dq`), so reuse
+                // `recon_y_hats` and skip a whole hyper-decoder + MCM pass.
+                let mut lat = crate::decoder::reconstruct::Latent {
+                    psi: Tensor::zeros(0, 0, 0)?,
+                    y_hat: recon_y_hats[ccs]
+                        .clone()
+                        .ok_or(Error::InvalidData("internal: post-filters y_hat"))?,
+                };
                 // `ls_processing.post_processing` before synthesis, as the decoder does.
                 let tools = ToolHeader {
                     lsbs_enabled: [params.lsbs; 2],
@@ -1488,7 +1498,7 @@ impl Encoder {
             residual,
             cube_flag,
             psi,
-            ..
+            y_hat,
         } = out;
 
         // 6. `encoder_skip_and_cubeflag_for_tiles`: the final mask is the threshold mask
@@ -1551,6 +1561,7 @@ impl Encoder {
         Ok(ComponentPass {
             component: c,
             payload,
+            y_hat: post_filters.then_some(y_hat),
             rvs_enabled: params.rvs,
             grfs_channel_flags,
             cube_flags,
