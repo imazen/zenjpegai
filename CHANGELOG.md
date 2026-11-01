@@ -8,6 +8,11 @@
 
 ### Added
 
+- `EncodeParams::clipping` / `--clipping`: the reference's `clipping_mode` — apply the
+  checkpoint's `clip_thres` per-channel clamp after every analysis and hyper-encoder conv
+  (`feature_clipping`). No shipped model carries `clip_thres`, so it is a no-op on the
+  shipped weights; `scripts/ref_vectors/inject_clip_thres.py` writes a models/ copy with
+  bounds that visibly clamp for experimentation.
 - `DecodeJob::inventory` for the zencodec decoder: a byte-exact map of the codestream. Every
   substream (SOC, PIH, TON, SOQ, SOZ, SORP, SORS, UDI, RDI, EOC) is a segment with its framing
   and payload; independent-region SORP/SORS are image data with the region index split out; RDI
