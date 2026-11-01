@@ -153,6 +153,11 @@ pub struct EncodeParams {
     /// luma latent toward a better rate/distortion point, then the residual is re-derived for
     /// the refined latent. Single-tile / whole-picture only (no overlap handling yet).
     pub rdlr: bool,
+    /// Float-math precision of the heavy kernels (the TAM attention and the RDLR
+    /// synthesis backward). [`Precision::Exact`] (default) is `f64` accumulation —
+    /// tier- and reference-bit-identical; [`Precision::Approximate`] is `f32`
+    /// accumulation — faster, opt-in, and *not* reference-parity.
+    pub precision: crate::nn::fast::Precision,
 }
 
 /// How a region's residual reaches the codestream
@@ -208,6 +213,7 @@ impl Default for EncodeParams {
             eicci: None,
             num_chs: LATENT_CHANNELS.map(|c| c as u16),
             rdlr: false,
+            precision: crate::nn::fast::Precision::Exact,
         }
     }
 }
@@ -1082,7 +1088,8 @@ impl Encoder {
         rdlr_org: Option<&Tensor<f32>>,
     ) -> Result<(Vec<u8>, Vec<Component>)> {
         let set = self.model_set(self.check_params(w, h, params)?, params.op)?;
-        let eng = &self.engine;
+        let eng_owned = self.engine.with_precision(params.precision);
+        let eng = &eng_owned;
         let beta = params
             .beta_displacement_log
             .map(|b| b.clamp(BDL_RANGE.0, BDL_RANGE.1));

@@ -107,6 +107,22 @@ impl Tier {
     }
 }
 
+/// Numerical-precision mode of the float math kernels.
+///
+/// `Exact` (the default) keeps the `f64` accumulation-order the bit-identity
+/// contract requires — every SIMD tier and thread count produces byte-identical
+/// output. `Approximate` lets the heavy kernels (the TAM channel attention and
+/// its VJP) accumulate in `f32` — meaningfully faster (SIMD-friendly reductions)
+/// but neither tier-identical nor bit-matched to the reference, so it is an
+/// opt-in speed mode, never the default.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Precision {
+    /// `f64` accumulation, fixed order — tier- and thread-identical output.
+    Exact,
+    /// `f32` accumulation — faster, opt-in, output is approximate.
+    Approximate,
+}
+
 /// Execution context of the fast layers.
 #[derive(Clone, Copy, Debug)]
 pub struct Engine {
@@ -114,21 +130,41 @@ pub struct Engine {
     pub tier: Tier,
     /// Spread rows over the rayon pool (needs the `parallel` feature).
     pub parallel: bool,
+    /// Numerical-precision mode of the float math kernels.
+    pub precision: Precision,
 }
 
 impl Engine {
     /// The best tier this CPU supports ([`Tier::detect`]), parallel iff the `parallel` feature
-    /// is compiled in.
+    /// is compiled in, [`Precision::Exact`].
     pub fn new() -> Self {
         Self {
             tier: Tier::detect(),
             parallel: cfg!(feature = "parallel"),
+            precision: Precision::Exact,
         }
     }
 
     /// An engine with an explicit tier and threading choice (tests, benchmarks).
     pub fn with(tier: Tier, parallel: bool) -> Self {
-        Self { tier, parallel }
+        Self {
+            tier,
+            parallel,
+            precision: Precision::Exact,
+        }
+    }
+
+    /// `self` at [`Precision::Approximate`] — the opt-in faster math mode.
+    pub fn approximate(self) -> Self {
+        Self {
+            precision: Precision::Approximate,
+            ..self
+        }
+    }
+
+    /// `self` at an explicit precision.
+    pub fn with_precision(self, precision: Precision) -> Self {
+        Self { precision, ..self }
     }
 }
 

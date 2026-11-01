@@ -69,6 +69,10 @@ OPTIONS:
                        (the reference's qp_map_type 3)
     --num-chs <y,uv>   encode: code only the first y / uv latent channels (the stream's
                        num_chs; the decoder reconstructs the rest from the mean)
+    --precision <p>    encode: float-math precision, `exact` (default; f64 accumulation,
+                       bit-identical to the reference) or `fast` (f32 accumulation in the
+                       heavy kernels — the TAM attention and the RDLR backward — opt-in,
+                       quicker, and not bit-matched to the reference)
     --max-channels <y,uv>  progressive decode: read only the first latent channels
     --single-thread    do not use the thread pool
     --scalar           no SIMD (for debugging; every tier produces identical pixels)
@@ -121,6 +125,7 @@ struct Args {
     ans_threads: u8,
     regions: Option<zenjpegai::encoder::RegionMode>,
     rdlr: bool,
+    precision: zenjpegai::nn::fast::Precision,
     num_chs: Option<(u16, u16)>,
     quality_map: Option<PathBuf>,
     single_thread: bool,
@@ -163,6 +168,7 @@ fn parse_args() -> Result<Args, String> {
         ans_threads: 1,
         regions: None,
         rdlr: false,
+        precision: zenjpegai::nn::fast::Precision::Exact,
         num_chs: None,
         quality_map: None,
         single_thread: false,
@@ -293,6 +299,13 @@ fn parse_args() -> Result<Args, String> {
                 a.beta_disp = value("--beta-disp")?
                     .parse()
                     .map_err(|e| format!("--beta-disp: {e}"))?;
+            }
+            "--precision" => {
+                a.precision = match value("--precision")?.as_str() {
+                    "exact" => zenjpegai::nn::fast::Precision::Exact,
+                    "fast" => zenjpegai::nn::fast::Precision::Approximate,
+                    other => return Err(format!("--precision: unknown mode '{other}'")),
+                };
             }
             "--num-chs" => {
                 let v = value("--num-chs")?;
@@ -482,6 +495,7 @@ fn run() -> Result<(), String> {
             params.num_threads_r = args.ans_threads;
             params.regions = args.regions;
             params.rdlr |= args.rdlr;
+            params.precision = args.precision;
             params.c_ver = args.c_ver;
             params.c_hor = args.c_hor;
             params.diff_display = args.diff_display;
