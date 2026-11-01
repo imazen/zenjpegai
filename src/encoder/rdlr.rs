@@ -2272,7 +2272,7 @@ pub(crate) fn backward_z(
     let _ = eng;
     // `d(rate_y)/d(resi)` — `d_rate_y = 1` (the loss *is* the total bits).
     let d_resi = rate_vjp(1.0, y, &rp.y_hat, &rp.residual_q, &rp.scale_log);
-    let (c, hh, hw) = (rp.psi.c / 4, rp.psi.h, rp.psi.w);
+    let (hh, hw) = (rp.psi.h, rp.psi.w);
     let d_psi = if let Some(mcm_tape) = &rp.mcm_tape {
         // luma MCM: `means_hat = y_hat - resi_dq` → `d(y_hat) = -d_resi`,
         // `d(resi_dq) = +d_resi`; `compress_backward` maps them onto `d(psi)`

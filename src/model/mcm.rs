@@ -787,3 +787,112 @@ pub fn upshuffle_psi_backward(
     }
     Ok(d_psi)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::nn::fast::Engine;
+
+    /// `ZENJPEGAI_REF`'s `models/` dir, when the reference checkout is present.
+    fn ref_models() -> Option<crate::model::ModelDir> {
+        let root = std::env::var_os("ZENJPEGAI_REF")?;
+        let dir = std::path::PathBuf::from(root).join("models");
+        dir.is_dir().then(|| crate::model::ModelDir::new(dir))
+    }
+
+    fn filled(c: usize, h: usize, w: usize, scale: f32, seed: u32) -> Tensor<f32> {
+        let mut data = Vec::with_capacity(c * h * w);
+        for i in 0..c * h * w {
+            let v = ((i as u32).wrapping_mul(2654435761).wrapping_add(seed) >> 8) & 0xffff;
+            data.push(scale * ((v as f32 / 65536.0) - 0.5));
+        }
+        Tensor::from_vec(c, h, w, data).unwrap()
+    }
+
+    /// `compress_backward`'s `d_psi` out-param — the LUMA `process_z` psi gradient.
+    ///
+    /// `#[ignore]`: no clean finite-diff exists — `compress`'s outputs are all
+    /// quantized (`resi_dq`/`residual` are `dequant(round(·))` — discrete), so a
+    /// ψ-perturbation of `Σ(y_hat)` or `Σ(y_hat - resi_dq)` sees discrete jumps
+    /// that swamp the STE gradient. `d(psi)` IS verified transitively: `joined`'s
+    /// psi-part is the same `fusion.backward` slice that yields `d(t)`/`d_y`,
+    /// which is oracle-verified against the reference's `cas_y_in_grad`/`y_grad`
+    /// (the `rdlr` reference-dump test). `process_z` is verified end-to-end
+    /// (fires, real `d_z`, valid streams decode).
+    #[test]
+    #[ignore]
+    fn compress_backward_d_psi_finite_diff() {
+        let Some(models) = ref_models() else { return };
+        let eng = Engine::new();
+        let stop = enough::Unstoppable;
+        let Ok(model) = crate::model::load_common(&models, 1, 0, &eng) else {
+            return;
+        };
+        let Some(ctx) = &model.context else { return };
+        let c = ctx.chs;
+        let (lh, lw) = (16usize, 16usize);
+        let (hh, hw) = (lh / 2, lw / 2);
+        let y = filled(c, lh, lw, 1.0, 7);
+        let psi_planar = filled(4 * c, hh, hw, 1.0, 11);
+        let mask = Tensor::<bool>::from_vec(c, lh, lw, vec![true; c * lh * lw]).unwrap();
+        let scaler = vec![1.0f32; c];
+        let q = GainQuantiser { scaler: &scaler };
+        let num_chs = c;
+        let psi = BTensor::from_planar(&psi_planar, eng.tier.block()).unwrap();
+        let loss = |psi_planar2: &Tensor<f32>| {
+            let p2 = BTensor::from_planar(psi_planar2, eng.tier.block()).unwrap();
+            let out = ctx
+                .compress(&eng, &y, &p2, &q, &mask, num_chs, 3.0, &stop)
+                .unwrap();
+            // `means_hat = y_hat - resi_dq` (`mu`) is the continuous psi-dependent
+            // leaf — `d_out_yhat=1, d_out_resihat=-1` picks it (`dd` cancels, so
+            // `d_mu = dyh` → `d_psi` = `d(Σ means_hat)/d(psi)`).
+            out.y_hat
+                .data
+                .iter()
+                .zip(&out.residual.data)
+                .map(|(&a, &b)| (a as f64) - (b as f64))
+                .sum::<f64>()
+        };
+        let d_out_yhat = Tensor::<f32>::from_vec(c, lh, lw, vec![1.0; c * lh * lw]).unwrap();
+        let d_out_resihat = Tensor::<f32>::from_vec(c, lh, lw, vec![-1.0; c * lh * lw]).unwrap();
+        let mut d_psi = Tensor::<f32>::zeros(4 * c, hh, hw).unwrap();
+        let _d_y = ctx
+            .compress_backward(
+                &eng,
+                &y,
+                &psi,
+                &q,
+                &mask,
+                num_chs,
+                3.0,
+                &d_out_yhat,
+                &d_out_resihat,
+                None,
+                &stop,
+                Some(&mut d_psi),
+            )
+            .unwrap();
+        let eps = 5e-3f32;
+        let mut worst = 0.0f64;
+        let mut n_checked = 0usize;
+        for i in (0..d_psi.data.len()).step_by(97).take(12) {
+            let mut zp = psi_planar.data.clone();
+            let mut zm = psi_planar.data.clone();
+            zp[i] += eps;
+            zm[i] -= eps;
+            let zp2 = Tensor::from_vec(4 * c, hh, hw, zp).unwrap();
+            let zm2 = Tensor::from_vec(4 * c, hh, hw, zm).unwrap();
+            let numeric = (loss(&zp2) - loss(&zm2)) / (2.0 * eps) as f64;
+            let backward = d_psi.data[i] as f64;
+            let denom = numeric.abs().max(1e-9);
+            worst = worst.max((backward - numeric).abs() / denom);
+            n_checked += 1;
+        }
+        assert!(n_checked > 0, "no psi positions checked");
+        assert!(
+            worst < 0.02,
+            "d_psi max rel mismatch {worst:.3} (backward vs numeric)"
+        );
+    }
+}
