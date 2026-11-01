@@ -117,3 +117,62 @@ pub(crate) fn clip_channels(x: &mut crate::nn::fast::BTensor, bounds: &(Vec<f32>
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::nn::fast::BTensor;
+
+    /// `clip_channels` clamps each channel to its `[MinList, MaxList]` entry across the
+    /// blocked layout, leaving channels beyond the lists untouched.
+    #[test]
+    fn clip_channels_clamps_per_channel() {
+        // c = 10 channels over v = 4 lanes → three blocks, the last one half-full.
+        let mut x = BTensor::zeros(10, 2, 3, 4).unwrap();
+        let plane = x.h * x.w;
+        for c in 0..x.c {
+            let (blk, lane) = (c / x.v, c % x.v);
+            for i in 0..plane {
+                x.data[blk * plane * x.v + i * x.v + lane] = c as f32 * 10.0;
+            }
+        }
+        let lo: Vec<f32> = (0..10).map(|_| 20.0).collect();
+        let hi: Vec<f32> = (0..10).map(|_| 70.0).collect();
+        clip_channels(&mut x, &(lo, hi));
+        for c in 0..x.c {
+            let (blk, lane) = (c / x.v, c % x.v);
+            let want = (c as f32 * 10.0).clamp(20.0, 70.0);
+            for i in 0..plane {
+                assert_eq!(x.data[blk * plane * x.v + i * x.v + lane], want, "ch {c}");
+            }
+        }
+    }
+
+    /// A `MinList`/`MaxList` shorter than the channel count leaves the tail channels alone.
+    #[test]
+    fn clip_channels_short_lists_skip_tail() {
+        let mut x = BTensor::zeros(10, 1, 4, 4).unwrap();
+        let plane = x.h * x.w;
+        for c in 0..x.c {
+            let (blk, lane) = (c / x.v, c % x.v);
+            for i in 0..plane {
+                x.data[blk * plane * x.v + i * x.v + lane] = c as f32 * 10.0;
+            }
+        }
+        // Lists only cover channels 0..5 — channels 5..9 stay unclamped.
+        let lo = vec![0.0; 5];
+        let hi = vec![30.0; 5];
+        clip_channels(&mut x, &(lo, hi));
+        for c in 0..x.c {
+            let (blk, lane) = (c / x.v, c % x.v);
+            let want = if c < 5 {
+                (c as f32 * 10.0).clamp(0.0, 30.0)
+            } else {
+                c as f32 * 10.0
+            };
+            for i in 0..plane {
+                assert_eq!(x.data[blk * plane * x.v + i * x.v + lane], want, "ch {c}");
+            }
+        }
+    }
+}

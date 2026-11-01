@@ -435,3 +435,33 @@ impl<'a> Checkpoint<'a> {
         })
     }
 }
+
+#[cfg(all(test, feature = "pth"))]
+mod tests {
+    use super::*;
+
+    /// A `.pth` `state_dict` with a nested `clip_thres` dict (the shape
+    /// `set_clip_thres`/`feature_clipping` write) flattens its scalar lists into
+    /// `Checkpoint::list` under `clip_thres.<layer>.<key>`, alongside the tensors and ints.
+    #[test]
+    fn clip_thres_nested_dict_flattens() {
+        let bytes = std::fs::read("/tmp/clip_test.pth")
+            .expect("run the /tmp/clip_test.pth generator (torch.save a nested clip_thres dict)");
+        let ck = Checkpoint::parse(&bytes).unwrap();
+        assert_eq!(
+            ck.list("clip_thres.E1B.MinList"),
+            Some(vec![-1.5; 160].as_slice())
+        );
+        assert_eq!(
+            ck.list("clip_thres.E1B.MaxList"),
+            Some(vec![1.5; 160].as_slice())
+        );
+        assert_eq!(
+            ck.list("clip_thres.HE1.MinList"),
+            Some(vec![-2.0; 64].as_slice())
+        );
+        // The regular state dict is untouched by the flatten.
+        assert!(ck.contains("conv1.weight"));
+        assert_eq!(ck.int("epoch"), Some(3));
+    }
+}
