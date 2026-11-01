@@ -26,12 +26,26 @@ construction, and say so in `PORTING.md`.
 ## Next up
 
 - [ ] **chroma / z RDLR** (`cfg/tools/RDLR.json`: `numIteYLuma=8` shipped, `numIteYChroma`,
-  `numIteZLuma`, `numIteZChroma = 0`; `rdlr_comp_base.py::process_z/process_y` and
-  `rdlr.py::RDLRCompUV/RDLRCompZ/optimize_z/rate_point_z/rate_point_uv` exist but are
-  unexercised). `process_z`: `Substract` filter + Adagrad (lr ×0.9/iter) optimizing `z_hat`
-  toward the `encode_z + encode_y` total-bits loss, `numIteZ` iters (default 14). Chroma
-  `process_y` needs a chroma distortion term, not the luma MS-SSIM. Large port — start with
-  `process_z`.
+  `numIteZLuma`, `numIteZChroma = 0`; set them >0 in a reference cfg → the path RUNS, so there
+  IS an oracle — dump + compare). Three sub-parts:
+    1. **chroma `process_y`** (`rdlr_comp_UV.py::RDLRCompUV.rdlr_y_iteration` /
+       `get_current_rate_point`): chroma `optimize_y` variant. Loss = mean of per-channel
+       PSNR+rate direction projections (psnrU/psnrV vs rate_log_diff, `normal_vec` from
+       `current_bpp_curve_slopes`) — PSNR, NOT luma MS-SSIM. `sup_info` = refined luma
+       `y_hat[::2,::2]` concat'd into the chroma decoder input — OUR
+       `SynthesisSecondary::forward(eng, luma_sup_decimated, chroma_yhat, h, w)` already
+       takes it (`first_stage.conv1` = 256→48 = 160+96). `calc_additional_rate`
+       (`get_luma_tile_rate`) adds the luma's rate into `expected_joined_rate`. Order: luma
+       `process_y` first, then chroma with `sup_info`/`calc_additional_rate`
+       (`rdlr_tool.py:256-283`).
+    2. **`process_z`** (`rdlr_comp_base.py:77`): dead even upstream (NO callers). `Substract`
+       filter (per-position `additive2` + scalar `additive`) + Adagrad(lr*0.9) + STE
+       `z_hat = z_new + clamp(round(z_new)-z_new, -1, 1)` optimizing `z_hat` toward
+       `encode_z + encode_y` total bits (`ECLibLH`), `numIteZ` iters (default 14),
+       early-stop `nochange==7`. Needs the z-entropy VJP + the `z_hat→psi→scale_log→residual`
+       chain — the hard part (like `optimize_y`'s backward but on z).
+    3. **`optimize_z`/`rate_point_z`/`rate_point_uv`** in `rdlr.py` — the point evaluators
+       the above two use.
 - [ ] **`colour_transform_idx = 2`** (user-defined transform; decoder side self-inconsistent
   upstream — needs a decision on what the "correct" semantics are, then port).
 - [ ] **More `Precision::Approximate` knobs**: Winograd F(2,3) for 3x3 convs, early-exit RDLR,
