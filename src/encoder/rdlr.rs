@@ -770,6 +770,18 @@ mod oracle {
             )
             .unwrap()
         }
+        /// `resi_hat` indices exceed the `i8` symbol range on HOP (±244) — read
+        /// them as `i16` so the comparison does not saturate at ±127.
+        fn tensor_i16(&self) -> Tensor<i16> {
+            assert_eq!(self.dtype, "f32");
+            Tensor::from_vec(
+                self.shape[1],
+                self.shape[2],
+                self.shape[3],
+                self.f32().into_iter().map(|v| v as i16).collect(),
+            )
+            .unwrap()
+        }
     }
 
     fn vectors_root() -> PathBuf {
@@ -784,7 +796,19 @@ mod oracle {
     /// `gcrp.(i+1)` rate point the reference measured on it.
     #[test]
     fn rate_point_matches_reference_iterations() {
-        let dump = load_dump(&vectors_root().join("rdlr_img30_bop_m1_b0"));
+        check_vector("rdlr_img30_bop_m1_b0", 1, OperatingPoint::Bop);
+    }
+
+    /// The same replay on the high profile's dump (`rdlr_img30_hop_m2_b0`):
+    /// the HOP `Primary` tape/backward must also land on the reference's
+    /// per-iteration rate points and gradients.
+    #[test]
+    fn rate_point_matches_reference_iterations_hop() {
+        check_vector("rdlr_img30_hop_m2_b0", 2, OperatingPoint::Hop);
+    }
+
+    fn check_vector(dir_name: &str, model_id: usize, op: OperatingPoint) {
+        let dump = load_dump(&vectors_root().join(dir_name));
         let models = std::env::var_os("ZENJPEGAI_MODELS")
             .map(PathBuf::from)
             .unwrap_or_else(|| {
@@ -792,8 +816,12 @@ mod oracle {
             });
         let enc = crate::encoder::Encoder::new(models);
         let eng = &enc.engine;
-        let params = EncodeParams::default();
-        let set = enc.model_set(1, OperatingPoint::Bop).unwrap();
+        let params = EncodeParams {
+            model_id: model_id as u8,
+            op,
+            ..EncodeParams::default()
+        };
+        let set = enc.model_set(model_id, op).unwrap();
         let meta = SourceMeta {
             bit_depth: 8,
             s_ver: 1,
@@ -846,8 +874,7 @@ mod oracle {
             quality_map: None,
         };
         let synthesis =
-            crate::model::load_synthesis_primary(enc.models.as_ref(), 1, OperatingPoint::Bop, eng)
-                .unwrap();
+            crate::model::load_synthesis_primary(enc.models.as_ref(), model_id, op, eng).unwrap();
         let lh = &set.lh[0];
         let original = dump["rdlr.0.original"].tensor_f32();
         let pixels = 888.0 * 560.0;
@@ -881,8 +908,11 @@ mod oracle {
             // `_compress_ar_scale`'s outputs replayed exactly (`cas.0/1` are
             // the main encode, `cas.2` the ref point, `cas.3+i` iteration i).
             let c = i + 3;
-            let want_rq = dump[&format!("rdlr.cas.{c}.resi_hat")].tensor_i8();
-            let got: Vec<i16> = want_rq.data.iter().map(|&v| v as i16).collect();
+            // `resi_hat` is an index into the scale table — HOP's wider
+            // residuals exceed `i8`, so read it as `i16` (`tensor_i8` would
+            // saturate at ±127 and hide nothing-real diffs).
+            let want_rq = dump[&format!("rdlr.cas.{c}.resi_hat")].tensor_i16();
+            let got: Vec<i16> = want_rq.data;
             let ndiff = rp
                 .residual_q
                 .data
@@ -936,10 +966,12 @@ mod oracle {
                     md = md.max((resi - gm_resi.plane(ch)[k]).abs());
                     let sl = scales.scale_log.plane(ch)[k];
                     let lin = math::exp(sl as f32 * (1.0 / 128.0) * log_k() as f32 + LN_SIGMA_MIN);
-                    ms = ms.max((lin - gm_scale.plane(ch)[k]).abs());
+                    ms = ms.max((lin - gm_scale.plane(ch)[k]).abs() / gm_scale.plane(ch)[k]);
                 }
             }
-            assert!(ms < 4e-6, "iter {i}: gm scale diff {ms}");
+            // `scale_lin` reaches ~82 on HOP — compare the exp-precision (≲1 ULP)
+            // *relative* diff, not an absolute bound calibrated to BOP's range.
+            assert!(ms < 1e-6, "iter {i}: gm scale rel diff {ms}");
             assert!(md < 0.15, "iter {i}: gm resi diff {md}");
             // The rate term's upstream: `dL/d(resi)` = `dL/d(rate)·d(rate)/d(rate_y)·
             // d(rate_y)/d(resi)` — `gm_resi_grad` is exactly that.
@@ -1220,7 +1252,7 @@ mod oracle {
                 // Layer-by-layer `LightPrimary` vs reference `bop_prim`
                 // (dumped to `/home/lilith/tmp/bop_layers`): the tape's
                 // `act[i]`/`res_conv_out`/`pre_denorm` are the intermediates.
-                if i == 1 {
+                if i == 1 && op == OperatingPoint::Bop {
                     let bop = load_dump(Path::new("/home/lilith/tmp/bop_layers"));
                     let crate::model::synthesis::PrimaryTape::Light(tape) =
                         rp.synth_tape.as_ref().unwrap()
