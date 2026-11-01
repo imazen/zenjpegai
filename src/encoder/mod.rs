@@ -1499,6 +1499,7 @@ impl Encoder {
             cube_flag,
             psi,
             y_hat,
+            tape: _,
         } = out;
 
         // 6. `encoder_skip_and_cubeflag_for_tiles`: the final mask is the threshold mask
@@ -1779,6 +1780,7 @@ fn compress_regions<Q: mcm::Quantiser>(
         lw.div_ceil(2).div_ceil(mcm::CUBE_SIZE),
     );
     let mut cube_flag = alloc::vec![true; 4 * cube_h * cube_w];
+    let mut tape = Vec::new();
     for r in 0..n {
         stop.check()?;
         let (lt, pt, it) = (lg.extended[r], pg.extended[r], img.extended[r]);
@@ -1792,10 +1794,16 @@ fn compress_regions<Q: mcm::Quantiser>(
                 (&y_tile, &mask_tile, BTensor::from_planar(&psi_tile, v)?)
             }
         };
-        let out = match &model.context {
+        let mut out = match &model.context {
             Some(ctx) => ctx.compress(eng, yt, &psi_b, q, mt, num_chs, SKIP_CUBE_THR, stop)?,
             None => compress_context_free(yt, &psi_b, q, mt, num_chs, SKIP_CUBE_THR)?,
         };
+        // `compress`'s per-stage tape is the single region's whole-latent tape
+        // when `n == 1` — `compress_backward` consumes it. n > 1 never calls the
+        // backward, so the per-region tapes are dropped.
+        if n == 1 {
+            tape = std::mem::take(&mut out.tape);
+        }
         // `compress_ar_scale_tile`: independent regions keep their whole tile, dependent ones
         // drop the half-overlap on every side facing another region.
         let (core, offset) = if independent || n == 1 {
@@ -1839,6 +1847,7 @@ fn compress_regions<Q: mcm::Quantiser>(
         cube_flag,
         psi,
         y_hat,
+        tape,
     })
 }
 
@@ -1983,6 +1992,7 @@ fn compress_context_free<Q: mcm::Quantiser>(
         cube_flag,
         y_hat,
         psi: Tensor::<f32>::zeros(1, 1, 1)?,
+        tape: Vec::new(),
     })
 }
 

@@ -311,6 +311,10 @@ pub struct Compressed {
     /// can skip the second context-model pass. A one-sample placeholder where
     /// the caller does not fill it in.
     pub y_hat: Tensor<f32>,
+    /// Per-stage forward tape (`forward_tape`'s ReLU inputs + the effective
+    /// code mask) — `compress_backward` consumes it instead of replaying the
+    /// whole forward. Empty for the context-free path / non-RDLR callers.
+    pub(crate) tape: Vec<StageTape>,
 }
 
 /// Maximum of `err` over each `CUBE_SIZE x CUBE_SIZE` block of every channel, thresholded:
@@ -391,15 +395,21 @@ impl ContextModel {
         let mut coded = Tensor::<bool>::zeros(c, hh, hw)?;
 
         let mut context: Option<BTensor> = None;
+        // `fusion.forward_tape` (not `forward`) — the per-stage ReLU-input tape
+        // goes in `Compressed.tape`, so `compress_backward` can skip its pass-1
+        // replay of this whole forward.
+        let mut tapes: Vec<StageTape> = Vec::with_capacity(self.phases.len());
         for (s, phase) in self.phases.iter().enumerate() {
             stop.check()?;
             let psi_s = psi.slice_channels(s * c, (s + 1) * c)?;
-            let mut stage = match (&phase.context, &context) {
+            let (mut stage, pr1, pr2) = match (&phase.context, &context) {
                 (Some((pointwise, grouped)), Some(ctx)) => {
                     let t = grouped.forward(eng, &pointwise.forward(eng, ctx)?)?;
-                    phase.fusion.forward(eng, &BTensor::cat(&[&t, &psi_s])?)?
+                    phase
+                        .fusion
+                        .forward_tape(eng, &BTensor::cat(&[&t, &psi_s])?)?
                 }
-                _ => phase.fusion.forward(eng, &psi_s)?,
+                _ => phase.fusion.forward_tape(eng, &psi_s)?,
             };
             let (py, px) = STAGE_POSITIONS[s];
 
@@ -442,7 +452,9 @@ impl ContextModel {
             let out_phase = py * 2 + px;
             cube_flag[out_phase * cube_h * cube_w..][..cube_h * cube_w].copy_from_slice(&flags);
 
-            // Pass 2: the cubes that must not be skipped join the mask.
+            // Pass 2: the cubes that must not be skipped join the mask — and the
+            // effective code mask `compress_backward`'s STE gates on (`coded2`).
+            let mut coded2 = coded.data.clone();
             for ch in 0..c {
                 let (b, lane) = (ch / v, ch % v);
                 for yy in 0..hh {
@@ -454,6 +466,7 @@ impl ContextModel {
                         let cube = flags[(yy / CUBE_SIZE) * cube_w + xx / CUBE_SIZE];
                         let inside = sy < h && sx < w;
                         let code = (coded.data[i] || !cube) && !is_padding(s, h, w, hh, hw, yy, xx);
+                        coded2[i] = code;
                         let li = if inside { sy * w + sx } else { 0 };
                         let (sym, dq) = q.quantise(ch, li, diff.data[i], code);
                         let val = &mut row[xx * v + lane];
@@ -470,6 +483,11 @@ impl ContextModel {
                 None => stage,
                 Some(ctx) => BTensor::cat(&[&ctx, &stage])?,
             });
+            tapes.push(StageTape {
+                pre_relu1: pr1.to_planar()?,
+                pre_relu2: pr2.to_planar()?,
+                coded: coded2,
+            });
         }
         Ok(Compressed {
             residual_q,
@@ -477,6 +495,7 @@ impl ContextModel {
             cube_flag,
             psi: Tensor::<f32>::zeros(1, 1, 1)?,
             y_hat,
+            tape: tapes,
         })
     }
 
@@ -508,6 +527,7 @@ impl ContextModel {
         cube_thr: f32,
         d_out_yhat: &Tensor<f32>,
         d_out_resihat: &Tensor<f32>,
+        tape: Option<Vec<StageTape>>,
         stop: &dyn enough::Stop,
     ) -> Result<Tensor<f32>> {
         let (c, h, w) = (self.chs, y.h, y.w);
@@ -515,10 +535,19 @@ impl ContextModel {
         let v = psi.v;
 
         // Pass 1: replay the stage loop, recording the tape (fusion ReLU
-        // inputs + the coded mask + each stage's grid diff for the STE).
+        // inputs + the coded mask + each stage's grid diff for the STE) — unless
+        // `compress` already saved it in `Compressed.tape` (`tape` is `Some`),
+        // which skips this whole forward replay.
         let mut context: Option<BTensor> = None;
-        let mut tapes: Vec<StageTape> = Vec::with_capacity(self.phases.len());
+        let have_tape = tape.is_some();
+        let mut tapes: Vec<StageTape> = match tape {
+            Some(t) => t,
+            None => Vec::with_capacity(self.phases.len()),
+        };
         for (s, phase) in self.phases.iter().enumerate() {
+            if have_tape {
+                break;
+            }
             stop.check()?;
             let psi_s = psi.slice_channels(s * c, (s + 1) * c)?;
             let (mut stage, pr1, pr2) = match (&phase.context, &context) {
@@ -674,8 +703,11 @@ impl ContextModel {
     }
 }
 
-/// Per-stage forward intermediates saved for `compress_backward`.
-struct StageTape {
+/// Per-stage forward intermediates saved for `compress_backward` — `compress`
+/// produces them via `forward_tape` (same convs, keeps the tape), so the
+/// backward doesn't replay the whole forward.
+#[derive(Clone, Debug)]
+pub struct StageTape {
     /// `conv1`'s output before its ReLU, planar `[chs, hh, hw]`.
     pre_relu1: Tensor<f32>,
     /// `conv2`'s output before its ReLU.

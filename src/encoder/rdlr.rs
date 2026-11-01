@@ -68,6 +68,9 @@ pub(crate) struct RatePoint {
     pub rate_y: f64,
     /// The synthesis's VJP tape (present when `rate_point_y` built `rec`).
     pub synth_tape: Option<crate::model::synthesis::PrimaryTape>,
+    /// `compress`'s per-stage forward tape — `backward`'s `compress_backward`
+    /// consumes it instead of replaying the whole MCM forward.
+    pub tape: Vec<mcm::StageTape>,
 }
 
 /// `RDLRCompY.get_current_rate_point` for one luma latent tile: the rate point
@@ -106,6 +109,7 @@ pub(crate) fn rate_point_y(
         residual_q,
         psi,
         y_hat,
+        tape: mcm_tape,
         ..
     } = out;
 
@@ -163,6 +167,7 @@ pub(crate) fn rate_point_y(
         rec,
         synth_tape: Some(tape),
         rate_y,
+        tape: mcm_tape,
     })
 }
 
@@ -264,6 +269,7 @@ pub(crate) fn backward(
         crate::encoder::SKIP_CUBE_THR,
         &d_out_yhat,
         &d_resi,
+        Some(rp.tape.clone()),
         stop,
     )?;
     for (a, &b) in d_y.data.iter_mut().zip(&d_resi.data) {
@@ -1126,6 +1132,7 @@ mod oracle {
                         crate::encoder::SKIP_CUBE_THR,
                         &want_uh,
                         &want_ur,
+                        None,
                         &enough::Unstoppable,
                     )
                     .unwrap();
