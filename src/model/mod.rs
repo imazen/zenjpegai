@@ -174,6 +174,19 @@ pub fn load_hyper_encoder(
     })
 }
 
+/// Hyper-decoder of component `ccs` (stored in the common checkpoint) — the
+/// `z_hat → psi` network `process_z`'s VJP runs backwards.
+pub fn load_hyper_decoder(
+    src: &dyn ModelSource,
+    model_id: usize,
+    ccs: usize,
+    eng: &crate::nn::fast::Engine,
+) -> crate::error::Result<hyper_decoder::HyperDecoder> {
+    with_checkpoint(src, &common_path(model_id, ccs)?, |ck| {
+        hyper_decoder::HyperDecoder::load(ck, crate::header::LATENT_CHANNELS[ccs], eng)
+    })
+}
+
 /// Common modules of component `ccs` for model `model_id`, packed for `eng`.
 pub fn load_common(
     src: &dyn ModelSource,
