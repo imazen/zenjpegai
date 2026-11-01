@@ -229,6 +229,13 @@ fn icci_img30_base_eicci_bpp050() {
     check_icci("img30_base_eicci_bpp050", true);
 }
 
+/// High-profile eICCI: the stream's `model_id 2` selects the *HOP* network bank —
+/// the shared `icci::filter` path whose operating-point branch no other vector hits.
+#[test]
+fn icci_enc_img30_hop_m2_b0_eicci() {
+    check_icci("enc_img30_hop_m2_b0_eicci", true);
+}
+
 #[test]
 fn icci_img30_base_on_bpp025() {
     check_icci("img30_base_on_bpp025", true);
