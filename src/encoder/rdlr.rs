@@ -24,7 +24,8 @@ use alloc::vec::Vec;
 
 use crate::encoder::msssim;
 use crate::error::{Error, Result};
-use crate::model::common::SIGMA_PRECISION;
+use crate::model::common::{SIGMA_IDX_MAX, SIGMA_PRECISION, Z_OFFSET};
+use crate::model::hyper_decoder;
 use crate::model::mcm;
 use crate::model::synthesis::{SynthesisPrimary, SynthesisSecondary};
 use crate::nn::fast::math;
@@ -33,6 +34,7 @@ use crate::tensor::Tensor;
 use crate::tools::gain::log_k;
 use crate::tools::regions::Area;
 
+use super::compress_context_free;
 use super::{compress_regions, lh};
 
 /// `ln(sigma_quant_min)` — `pipeline.json`'s `sigma_quant_min = 0.11`, the same
@@ -2160,4 +2162,199 @@ mod oracle {
             "hop synthesis backward not the adjoint: {lhs} vs {rhs}"
         );
     }
+}
+
+/// `process_z` rate point — the `encode_z + encode_y` total-bits eval for one
+/// `z_hat` (the reference's `ECLibLH`-equivalent `ac.get_total_bits()`). The
+/// z-RDLR path (`numIteZLuma`/`numIteZChroma`, dead upstream) optimizes the
+/// hyper-latent `z_hat` toward the *total* component rate — a pure bitrate
+/// objective, no distortion term.
+pub(crate) struct ZRatePoint {
+    /// `encode_z(z_hat)` + `encode_y(z_hat→psi→scale_log→residual)` total bits.
+    total: f64,
+    /// The integer `z_hat` the entropy / `hsd` / compress calls consume.
+    z_hat_i8: Tensor<i8>,
+    /// `hyper_decoder(z_hat)` at psi-res — the `HyperDecoder::backward` leaf.
+    psi: BTensor,
+    /// `hyper_decoder`'s VJP intermediates.
+    hyper_tape: hyper_decoder::HyperTape,
+    /// `compress`'s reconstructed latent (mean + resi_dq) at latent res.
+    y_hat: Tensor<f32>,
+    /// The quantized residual (the `+ residual_q` term of `resi`).
+    residual_q: Tensor<i16>,
+    /// `hsd(z_hat)` — the sigma map (`rate_y`'s scale, held fixed in the VJP).
+    scale_log: Tensor<i32>,
+}
+
+/// `process_z`'s `encode_z + encode_y` eval: `z_hat_cont` (the STE-quantized
+/// continuous hyper-latent) → `z_hat_i8` (integer) → `psi` (hyper-decoder,
+/// differentiable) + `scale_log` (int `hsd`) + `compress` → `rate_y` + `z_bits`.
+pub(crate) fn rate_point_z(
+    eng: &Engine,
+    model: &crate::model::common::CommonModel,
+    lh: &lh::Likelihood,
+    y: &Tensor<f32>,
+    z_hat_cont: &Tensor<f32>,
+    z_hat_i8: &Tensor<i8>,
+    mask: &Tensor<bool>,
+    q: &impl mcm::Quantiser,
+    num_chs: usize,
+    lh_y: usize,
+    lw_y: usize,
+    stop: &dyn enough::Stop,
+) -> Result<ZRatePoint> {
+    // psi at psi-res = latent/2 (`upshuffle_psi` produces the latent-res mean).
+    let (psi_h, psi_w) = (lh_y.div_ceil(2), lw_y.div_ceil(2));
+    let (psi, hyper_tape) = model
+        .hyper_decoder
+        .forward_tape(eng, z_hat_cont, psi_h, psi_w, stop)?;
+    let scale_log = model.hsd.forward(z_hat_i8, lh_y, lw_y, SIGMA_IDX_MAX)?;
+    let out = compress_context_free(y, &psi, q, mask, num_chs, crate::encoder::SKIP_CUBE_THR)?;
+    let rate_y = gm_rate(y, &out.y_hat, &out.residual_q, &scale_log);
+    let z_bits = lh.z_bits(z_hat_i8);
+    Ok(ZRatePoint {
+        total: z_bits + rate_y,
+        z_hat_i8: z_hat_i8.clone(),
+        psi,
+        hyper_tape,
+        y_hat: out.y_hat,
+        residual_q: out.residual_q,
+        scale_log,
+    })
+}
+
+/// `process_z`'s backward: `d(encode_z + encode_y)/d(z_hat)` at z-res. The
+/// `encode_y` chain is `z_hat→psi→mean→resi→rate_y` (`d(mean) = -d_resi`,
+/// `d(psi) = upshuffle_psi_backward`, `d(z_hat) = hyper_decoder.backward`);
+/// `scale_log` (the int `hsd` path) is held fixed, matching the reference's
+/// zero gradient through its integer convolutions. The `encode_z` term is the
+/// `z_nbits` LUT's local slope.
+pub(crate) fn backward_z(
+    eng: &Engine,
+    model: &crate::model::common::CommonModel,
+    lh: &lh::Likelihood,
+    y: &Tensor<f32>,
+    rp: &ZRatePoint,
+) -> Result<Tensor<f32>> {
+    let _ = eng;
+    // `d(rate_y)/d(resi)` — `d_rate_y = 1` (the loss *is* the total bits).
+    let d_resi = rate_vjp(1.0, y, &rp.y_hat, &rp.residual_q, &rp.scale_log);
+    // `resi = y - means_hat`, `means_hat = mean = upshuffle_psi(psi)` → `d(mean) = -d_resi`.
+    let mut d_mean = d_resi.clone();
+    for v in d_mean.data.iter_mut() {
+        *v = -*v;
+    }
+    // `d(psi) = upshuffle_psi_backward(d_mean)`.
+    let d_psi = mcm::upshuffle_psi_backward(&d_mean, rp.psi.c, rp.psi.h, rp.psi.w)?;
+    // `d(z_hat) = hyper_decoder.backward(d_psi)` + `d(z_bits)`.
+    let mut d_z = model.hyper_decoder.backward(&rp.hyper_tape, &d_psi)?;
+    let d_z_ent = lh.z_bits_vjp(&rp.z_hat_i8);
+    for (o, &e) in d_z.data.iter_mut().zip(&d_z_ent.data) {
+        *o += e;
+    }
+    Ok(d_z)
+}
+
+/// The reference's `Substract` STE: `z_hat = z_new + clamp(round(z_new).detach()
+/// - z_new.detach(), -1, 1)` — `z_hat` keeps `z_new`'s value under the ±1 clamp
+/// of the rounding residual, `d(z_hat)/d(z_new) = 1` where the clamp holds.
+fn ste_z(z_new: &Tensor<f32>) -> Tensor<f32> {
+    let mut out = z_new.clone();
+    for (o, &z) in out.data.iter_mut().zip(&z_new.data) {
+        *o = z + (z.round_ties_even() - z).clamp(-1.0, 1.0);
+    }
+    out
+}
+
+/// `z_hat` (continuous, post-STE) → the integer symbol tensor.
+fn quant_z(z_hat: &Tensor<f32>) -> Result<Tensor<i8>> {
+    let max = (crate::mans::MAX_Z as i32 - 1 - Z_OFFSET) as f32;
+    Tensor::from_vec(
+        z_hat.c,
+        z_hat.h,
+        z_hat.w,
+        z_hat
+            .data
+            .iter()
+            .map(|&v| v.clamp(-(Z_OFFSET as f32), max).round_ties_even() as i8)
+            .collect(),
+    )
+}
+
+/// `process_z`: optimize `z_Y`'s `z_hat` toward `encode_z + encode_y` total
+/// bits via the `Substract` additive filter + Adagrad(lr·0.9/iter). Returns the
+/// best integer `z_hat` (`best['z_hat'].round()`).
+pub(crate) fn optimize_z(
+    eng: &Engine,
+    model: &crate::model::common::CommonModel,
+    lh: &lh::Likelihood,
+    y: &Tensor<f32>,
+    z_hat: &Tensor<i8>,
+    mask: &Tensor<bool>,
+    q: &impl mcm::Quantiser,
+    num_chs: usize,
+    lh_y: usize,
+    lw_y: usize,
+    num_ite: usize,
+    stop: &dyn enough::Stop,
+) -> Result<Tensor<i8>> {
+    let (c, zh, zw) = (z_hat.c, z_hat.h, z_hat.w);
+    let n = c * zh * zw;
+    // `Substract`: `z_new = z_Y + additive2 + additive`.
+    let mut additive2 = vec![0.0f32; n];
+    let mut additive = 0.0f32;
+    let mut sq2 = vec![0.0f32; n];
+    let mut sq_scalar = 0.0f32;
+    let mut lr = 0.05f32;
+    let mut best = f64::INFINITY;
+    let mut best_z = z_hat.clone();
+    let mut nochange = 0usize;
+    for _ in 0..num_ite {
+        lr *= 0.9;
+        // `z_new = z_Y + additive2 + additive`, then the STE `z_hat`.
+        let mut z_new = Tensor::<f32>::zeros(c, zh, zw)?;
+        for (o, (&zy, &a2)) in z_new.data.iter_mut().zip(z_hat.data.iter().zip(&additive2)) {
+            *o = zy as f32 + a2 + additive;
+        }
+        let z_hat_cont = ste_z(&z_new);
+        let z_hat_i8 = quant_z(&z_hat_cont)?;
+        let rp = rate_point_z(
+            eng,
+            model,
+            lh,
+            y,
+            &z_hat_cont,
+            &z_hat_i8,
+            mask,
+            q,
+            num_chs,
+            lh_y,
+            lw_y,
+            stop,
+        )?;
+        if rp.total < best {
+            best = rp.total;
+            best_z = z_hat_i8;
+            nochange = 0;
+        } else {
+            nochange += 1;
+            if nochange == 7 {
+                break;
+            }
+        }
+        // `d(total)/d(z_hat)` at z-res; STE makes `d(z_new) = d(z_hat)`, so the
+        // additive leaf gradients are `d(additive2) = d(z_new)`,
+        // `d(additive) = sum(d(z_new))`.
+        let d_z = backward_z(eng, model, lh, y, &rp)?;
+        for (i, (a2, sq)) in additive2.iter_mut().zip(&mut sq2).enumerate() {
+            let g = d_z.data[i];
+            *sq += g * g;
+            *a2 -= lr * g / (sq.sqrt() + 1e-10);
+        }
+        let g_scalar: f32 = d_z.data.iter().sum();
+        sq_scalar += g_scalar * g_scalar;
+        additive -= lr * g_scalar / (sq_scalar.sqrt() + 1e-10);
+    }
+    // `best['z_hat'].round()` — already integer.
+    Ok(best_z)
 }

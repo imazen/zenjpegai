@@ -745,3 +745,32 @@ pub fn upshuffle_psi_par(parallel: bool, psi: &BTensor, h: usize, w: usize) -> R
     });
     Ok(out)
 }
+
+/// [`upshuffle_psi`]'s VJP — scatter `d_mean[ch,y,x]` into
+/// `d_psi[STAGE_LUT[(y%2)*2+x%2]*c + ch, y/2, x/2]`, accumulating. Returns the
+/// planar `d(psi)` `[4c, psi_h, psi_w]` `HyperDecoder::backward` consumes.
+pub fn upshuffle_psi_backward(
+    d_mean: &Tensor<f32>,
+    psi_c: usize,
+    psi_h: usize,
+    psi_w: usize,
+) -> Result<Tensor<f32>> {
+    let (c, h, w) = (d_mean.c, d_mean.h, d_mean.w);
+    if psi_c != c * 4 || psi_h * 2 < h || psi_w * 2 < w {
+        return Err(Error::InvalidArgument(
+            "upshuffle_psi_backward: shape mismatch",
+        ));
+    }
+    let mut d_psi = Tensor::<f32>::zeros(psi_c, psi_h, psi_w)?;
+    for ch in 0..c {
+        for y in 0..h {
+            let py = y % 2;
+            for x in 0..w {
+                let s = STAGE_LUT[py * 2 + x % 2];
+                d_psi.data[((s * c + ch) * psi_h + y / 2) * psi_w + x / 2] +=
+                    d_mean.data[(ch * h + y) * w + x];
+            }
+        }
+    }
+    Ok(d_psi)
+}

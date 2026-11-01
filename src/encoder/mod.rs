@@ -2171,7 +2171,7 @@ fn assign<T: Copy + Default>(
 /// (`skip_mode.gen_skip_cubeflag`) rather than stage by stage. `num_chs` channels are coded;
 /// the reference reconstructs the rest from `psi` alone (`y_rec_resi[:, num_chs:] = 0`), so
 /// the tail channels' cube-flag error is their full residual `|y - psi|`, not the quantiser's.
-fn compress_context_free<Q: mcm::Quantiser>(
+pub(crate) fn compress_context_free<Q: mcm::Quantiser>(
     y: &Tensor<f32>,
     psi: &BTensor,
     q: &Q,

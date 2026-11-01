@@ -125,6 +125,24 @@ impl Likelihood {
         bits
     }
 
+    /// `d(z_bits)/d(z_hat)` per position — the z-likelihood model's local slope,
+    /// a central difference of the `z_nbits` LUT (`process_z`'s `encode_z` term;
+    /// `z_hat` is STE-quantized but continuous-domain).
+    pub(crate) fn z_bits_vjp(&self, z_hat: &Tensor<i8>) -> Tensor<f32> {
+        let mut out = Tensor::<f32>::zeros(z_hat.c, z_hat.h, z_hat.w).unwrap();
+        let hi = MAX_Z as i32 - 1;
+        for ch in 0..z_hat.c {
+            let lut = &self.z_nbits[ch];
+            for (o, &z) in out.plane_mut(ch).iter_mut().zip(z_hat.plane(ch)) {
+                let c = z as i32 + Z_OFFSET;
+                let p = (c + 1).clamp(0, hi) as usize;
+                let m = (c - 1).clamp(0, hi) as usize;
+                *o = ((lut[p] - lut[m]) / 2.0) as f32;
+            }
+        }
+        out
+    }
+
     /// `ECLibLH.total_bits` of one component: the factorized estimate of `z_hat` plus the
     /// Gaussian estimate of the (already masked) `residual_q`. `num_chs` truncates the
     /// residual only — `z` is coded over all channels whatever the residual's channel count
