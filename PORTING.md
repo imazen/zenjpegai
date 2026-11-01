@@ -829,8 +829,11 @@ measured numbers in the status table above when you close an item.
   is mathematically determined by the forward. End-to-end `--rdlr --op hop` encodes
   and decodes a valid stream (256x256, 0.239 bpp; the 560x888 optimizer is
   compute-bound on the `4·dim·c·n`-f64 attention backward). Semantic parity of the
-  *optimized* HOP latent vs the reference is still unverified — needs a
-  `rdlr_img30_hop_*` dump.
+  *optimized* HOP latent is reference-verified: `rdlr_img30_hop_m2_b0` (high
+  profile, model 2, `dump_rdlr.py`) replays all 8 iterations + `optimize_y` —
+  `resi_hat`/`z_hat`/`scale_log`/`skip_scale_log` integer-exact, `y_hat`/`psi`/`mu`
+  f32-exact (~1e-4), `cas`/`leaf`/`d_resi`/`d_rec`/`d_out` corr 0.9994-1.0000, and
+  `optimize_y` lands `best_loss -0.0445` on the reference's `-0.0446` iterate.
   Driver semantics (`process_y` / `rdlr_y_iteration` / `rdlr_tool`): the leaf is the
   *tile-core* latent (`tiling.get_data(lat_tile, optimized_part_of_lattile_rel_to_overlap)`;
   whole latent for a single tile); each iteration writes the leaf back into the tile at
