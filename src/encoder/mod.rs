@@ -163,6 +163,13 @@ pub struct EncodeParams {
     /// its `MinList`/`MaxList` — `base_layers/utils.py::feature_clipping`. A no-op on
     /// shipped weights.
     pub clipping: bool,
+    /// `independent_beta_UV = 0` of the reference bitrate matcher (`--bpp` only): search a
+    /// chroma quantiser displacement independently of the luma's, by
+    /// `find_UV_beta_with_hyperopt`'s objective — a deterministic sweep over encode+decode
+    /// trials minimising `10·distortion·(βY+2048)/2048·base_beta + bpp`. When `false`
+    /// (default) the chroma displacement equals the luma's, as `independent_beta_UV = 1`
+    /// ships. Ignored without a rate target and needs a `models_dir` [`Encoder`].
+    pub uv_beta_search: bool,
 }
 
 /// How a region's residual reaches the codestream
@@ -220,6 +227,7 @@ impl Default for EncodeParams {
             rdlr: false,
             precision: crate::nn::fast::Precision::Exact,
             clipping: false,
+            uv_beta_search: false,
         }
     }
 }
@@ -265,6 +273,10 @@ struct ModelSet {
 pub struct Encoder {
     models: Box<dyn ModelSource + Send + Sync>,
     engine: Engine,
+    /// The `models_dir` an `Encoder::{new,with_engine}` was built from — kept so a
+    /// [`Decoder`](crate::decoder::Decoder) can be spun up for the UV-beta search's
+    /// decode trials. `None` for `with_source` encoders (no directory to reopen).
+    models_dir: Option<std::path::PathBuf>,
     tables: AnsTables,
     limits: EncodeLimits,
     budget: Option<crate::decoder::MemoryBudget>,
@@ -354,13 +366,17 @@ impl Encoder {
     }
 
     pub fn with_engine(models_dir: impl Into<std::path::PathBuf>, engine: Engine) -> Self {
-        Self::with_source(Box::new(ModelDir::new(models_dir)), engine)
+        let dir = models_dir.into();
+        let mut enc = Self::with_source(Box::new(ModelDir::new(dir.clone())), engine);
+        enc.models_dir = Some(dir);
+        enc
     }
 
     pub fn with_source(models: Box<dyn ModelSource + Send + Sync>, engine: Engine) -> Self {
         Self {
             models,
             engine,
+            models_dir: None,
             tables: AnsTables::new(),
             limits: EncodeLimits::default(),
             budget: None,
@@ -796,7 +812,7 @@ impl Encoder {
         };
         // A trial encode on a model's already-computed latents.
         let code_with = |ccs_model: usize,
-                         beta: i32,
+                         beta: [i32; 2],
                          final_run: bool,
                          lats: &ModelLatents|
          -> Result<(Vec<u8>, f64)> {
@@ -804,7 +820,7 @@ impl Encoder {
             let (y, z) = lats;
             let params = EncodeParams {
                 model_id: ccs_model as u8,
-                beta_displacement_log: [beta; 2],
+                beta_displacement_log: beta,
                 efe_linear: final_run && base_params.efe_linear,
                 efe_nonlinear: final_run && base_params.efe_nonlinear,
                 eicci: if final_run { base_params.eicci } else { None },
@@ -854,7 +870,7 @@ impl Encoder {
         let trial = |id: usize| -> Result<(usize, ModelLatents, f64)> {
             stop.check()?;
             let l = analyse_model(id)?;
-            let (_stream, bpp) = code_with(id, 0, false, &l)?;
+            let (_stream, bpp) = code_with(id, [0; 2], false, &l)?;
             Ok((id, l, bpp))
         };
         #[cfg(feature = "parallel")]
@@ -893,7 +909,7 @@ impl Encoder {
                     return Ok(v);
                 }
                 stop.check()?;
-                let bpp = code_with(best_model, b, false, &best_lats)?.1;
+                let bpp = code_with(best_model, [b; 2], false, &best_lats)?.1;
                 trials += 1;
                 cache.insert(b, bpp);
                 Ok(bpp)
@@ -913,7 +929,22 @@ impl Encoder {
                 &mut cached,
             )?
         };
-        let (stream, estimate) = code_with(best_model, beta, true, &best_lats)?;
+        // `find_UV_beta_with_hyperopt` (`independent_beta_UV = 0`): an independent chroma
+        // displacement, searched over decode-scored trials — the reference's path crashes on
+        // `import hyperopt`, so this deterministic sweep completes it. Off by default; the
+        // chroma beta then equals the luma's (`independent_beta_UV = 1`, shipped).
+        let beta_uv = if params.uv_beta_search {
+            let mut trial = |b: [i32; 2]| -> Result<(Vec<u8>, f64)> {
+                stop.check()?;
+                let r = code_with(best_model, b, false, &best_lats)?;
+                trials += 1;
+                Ok(r)
+            };
+            self.find_uv_beta(src, &meta, target_bpp, beta, best_model, &mut trial, stop)?
+        } else {
+            beta
+        };
+        let (stream, estimate) = code_with(best_model, [beta, beta_uv], true, &best_lats)?;
         trials += 1;
         let bpp = stream.len() as f64 * 8.0 / pixels;
         Ok((
@@ -927,6 +958,91 @@ impl Encoder {
                 trials,
             },
         ))
+    }
+
+    /// `find_UV_beta_with_hyperopt` + `find_loss`: the chroma displacement search
+    /// `independent_beta_UV = 0` asks for. Upstream drives a hyperopt `fmin` that crashes on
+    /// `import hyperopt`; this is the same objective searched deterministically — up to nine
+    /// (`max_iterations_stage2`) evenly spread integer displacements inside
+    /// `[min(beta_min_mult·βY, 0.1·βY), max(beta_max_mult·βY, 3·βY)]`
+    /// (`beta_min_mult` = 1/32, `beta_max_mult` = 5).
+    ///
+    /// Each trial encodes at `[βY, βUV]`, decodes the stream and scores the reference's
+    /// `find_loss`: `10·distortion·(βY+2048)/2048·base_model_beta + bpp`, where `distortion`
+    /// is the 0.8/0.1/0.1 Y/U/V-weighted MSE against the source (the reference's
+    /// `_calculate_mssim_distortion` collapses to weighted MSE at `MSSSIMweight = 0`), times
+    /// 5000. The best loss under `bits_mismatch < 0.09` wins; when nothing qualifies the
+    /// coupled luma beta is kept.
+    fn find_uv_beta(
+        &self,
+        src: &SourceImage,
+        meta: &SourceMeta,
+        target_bpp: f64,
+        beta_y: i32,
+        model: usize,
+        trial: &mut impl FnMut([i32; 2]) -> Result<(Vec<u8>, f64)>,
+        stop: &dyn enough::Stop,
+    ) -> Result<i32> {
+        let dir = self.models_dir.as_ref().ok_or(Error::Unsupported(
+            "uv_beta_search: the decoder needs an Encoder built from a models directory",
+        ))?;
+        let decoder = crate::decoder::Decoder::new(dir);
+        let source = colour::source_planes(src, meta)?;
+        let base_beta: f64 = model::MODEL_BETAS[model]
+            .parse()
+            .map_err(|_| Error::InvalidData("model beta"))?;
+        // `best_beta_Y == 0 -> -0.01`: keep the bounds non-degenerate.
+        let beta_y = if beta_y == 0 { -0.01 } else { beta_y as f64 };
+        let v1 = (beta_y / 32.0).max(0.1 * beta_y);
+        let v2 = (5.0 * beta_y).min(3.0 * beta_y);
+        let (lo, hi) = (v1.min(v2).ceil() as i32, v1.max(v2).floor() as i32);
+        let span = (hi - lo + 1).max(1) as usize;
+        let cand: Vec<i32> = if span <= 9 {
+            (lo..=hi).collect()
+        } else {
+            (0..9)
+                .map(|k| lo + ((hi - lo) * k as i32 + 4) / 8)
+                .collect()
+        };
+        let mut best = (beta_y as i32, f64::INFINITY);
+        for b in cand {
+            stop.check()?;
+            let (stream, bpp) = trial([beta_y as i32, b])?;
+            let reco = match decoder
+                .decode_picture(&stream)
+                .map_err(|_| Error::InvalidData("uv_beta_search: trial decode failed"))?
+            {
+                crate::Picture::Yuv(y) => SourceImage::Yuv(y),
+                crate::Picture::Rgb(r) => SourceImage::Rgb(r),
+            };
+            let reco = colour::source_planes(&reco, meta)?;
+            let mse = |a: &[f32], b: &[f32]| -> f64 {
+                a.iter()
+                    .zip(b)
+                    .map(|(x, y)| {
+                        let d = *x as f64 - *y as f64;
+                        d * d
+                    })
+                    .sum::<f64>()
+                    / a.len().max(1) as f64
+            };
+            if reco.luma.len() != source.luma.len() || reco.u.len() != source.u.len() {
+                return Err(Error::InvalidData(
+                    "uv_beta_search: decoded plane size mismatch",
+                ));
+            }
+            let distortion = 5000.0
+                * (0.8 * mse(&source.luma, &reco.luma)
+                    + 0.1 * mse(&source.u, &reco.u)
+                    + 0.1 * mse(&source.v, &reco.v));
+            let mismatch = (bpp - target_bpp) / target_bpp;
+            let loss = 10.0 * distortion * (beta_y + 2048.0) / 2048.0 * base_beta + bpp;
+            // `bits_mismatch < 0.09` — the reference's signed bound.
+            if mismatch < 0.09 && loss < best.1 {
+                best = (b, loss);
+            }
+        }
+        Ok(best.0)
     }
 
     /// The analysis tile grid [`Encoder::encode`] would use for component `ccs` of a

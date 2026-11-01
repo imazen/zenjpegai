@@ -76,6 +76,10 @@ OPTIONS:
     --clipping         encode: the reference's `clipping_mode` — apply the checkpoint's
                        `clip_thres` per-channel clamp after every analysis and
                        hyper-encoder conv (a no-op on shipped weights, which carry none)
+    --uv-beta-search   encode --bpp only: the reference's `independent_beta_UV = 0` — search
+                       a chroma quantiser displacement independently of the luma's by the
+                       decode-scored `find_loss` objective (deterministic; upstream's
+                       hyperopt run crashes)
     --max-channels <y,uv>  progressive decode: read only the first latent channels
     --single-thread    do not use the thread pool
     --scalar           no SIMD (for debugging; every tier produces identical pixels)
@@ -129,6 +133,7 @@ struct Args {
     regions: Option<zenjpegai::encoder::RegionMode>,
     rdlr: bool,
     clipping: bool,
+    uv_beta_search: bool,
     precision: zenjpegai::nn::fast::Precision,
     num_chs: Option<(u16, u16)>,
     quality_map: Option<PathBuf>,
@@ -174,6 +179,7 @@ fn parse_args() -> Result<Args, String> {
         regions: None,
         rdlr: false,
         clipping: false,
+        uv_beta_search: false,
         precision: zenjpegai::nn::fast::Precision::Exact,
         num_chs: None,
         quality_map: None,
@@ -232,6 +238,7 @@ fn parse_args() -> Result<Args, String> {
             "--qp-map" => a.qp_map = Some(value("--qp-map")?),
             "--rdlr" => a.rdlr = true,
             "--clipping" => a.clipping = true,
+            "--uv-beta-search" => a.uv_beta_search = true,
             "--rvs" => a.rvs = true,
             "--grfs" => a.grfs = true,
             "--lsbs" => a.lsbs = true,
@@ -505,6 +512,7 @@ fn run() -> Result<(), String> {
             params.regions = args.regions;
             params.rdlr |= args.rdlr;
             params.clipping |= args.clipping;
+            params.uv_beta_search |= args.uv_beta_search;
             params.precision = args.precision;
             params.c_ver = args.c_ver;
             params.c_hor = args.c_hor;
