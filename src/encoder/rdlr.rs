@@ -698,7 +698,7 @@ pub(crate) fn backward_uv(
     original: &Tensor<f32>,
     area: Area,
     pixels: f64,
-    stop: &dyn enough::Stop,
+    _stop: &dyn enough::Stop,
 ) -> Result<Tensor<f32>> {
     let d_resi = rate_vjp(up.d_rate / pixels, y, &rp.y_hat, &rp.residual_q, scale_log);
     // `d(rec)`: the U and V PSNR gradients stacked into the two-plane map.

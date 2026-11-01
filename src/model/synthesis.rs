@@ -1151,3 +1151,80 @@ pub struct SecondaryTape {
     /// The output before `denormalize` (its clamp's backward).
     pre_denorm: Tensor<f32>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `ZENJPEGAI_REF`'s `models/` dir, when the reference checkout is present —
+    /// the finite-diff test skips silently otherwise (it runs via `just test-ref`).
+    fn ref_models() -> Option<crate::model::ModelDir> {
+        let root = std::env::var_os("ZENJPEGAI_REF")?;
+        let dir = std::path::PathBuf::from(root).join("models");
+        dir.is_dir().then(|| crate::model::ModelDir::new(dir))
+    }
+
+    fn filled(c: usize, h: usize, w: usize, scale: f32, seed: u32) -> Tensor<f32> {
+        let mut data = Vec::with_capacity(c * h * w);
+        for i in 0..c * h * w {
+            let v = ((i as u32).wrapping_mul(2654435761).wrapping_add(seed) >> 8) & 0xffff;
+            data.push(scale * ((v as f32 / 65536.0) - 0.5));
+        }
+        Tensor::from_vec(c, h, w, data).unwrap()
+    }
+
+    /// `SynthesisSecondary::backward`'s `d(y_hat_chroma)` vs a central finite
+    /// difference of `forward_with` — the chroma RDLR's synthesis VJP. The luma
+    /// `sup` input is detached upstream, so `backward` only returns the 96
+    /// chroma channels.
+    #[test]
+    fn synthesis_secondary_backward_finite_diff() {
+        let Some(models) = ref_models() else { return };
+        let eng = Engine::new();
+        let stop = enough::Unstoppable;
+        let (lh, lw) = (8usize, 8usize);
+        let (h, w) = (64usize, 64usize);
+        let sup = BTensor::from_planar(&filled(160, lh, lw, 1.0, 11), eng.tier.block()).unwrap();
+        let yhat = BTensor::from_planar(&filled(96, lh, lw, 1.0, 23), eng.tier.block()).unwrap();
+        for op in [
+            OperatingPoint::Sop,
+            OperatingPoint::Bop,
+            OperatingPoint::Hop,
+        ] {
+            let Ok(synth) = crate::model::load_synthesis_secondary(&models, 1, op, &eng) else {
+                continue;
+            };
+            let (rec, tape) = synth.forward_tape(&eng, &sup, &yhat, h, w, &stop).unwrap();
+            let d_rec = filled(2, rec.h, rec.w, 0.5, 37);
+            let d_yhat = synth.backward(&eng, &tape, &d_rec).unwrap();
+            let loss = |y2: &BTensor| {
+                let r = synth.forward_with(&eng, &sup, y2, h, w, &stop).unwrap();
+                r.data
+                    .iter()
+                    .zip(&d_rec.data)
+                    .map(|(&a, &b)| (a as f64) * (b as f64))
+                    .sum::<f64>()
+            };
+            let eps = 5e-3f32;
+            for &(ch, yy, xx) in &[
+                (0usize, 3usize, 4usize),
+                (1, 0, 7),
+                (47, 5, 2),
+                (63, 7, 6),
+                (95, 2, 1),
+            ] {
+                let bump = |delta: f32| {
+                    let mut p = yhat.to_planar().unwrap();
+                    p.data[(ch * lh + yy) * lw + xx] += delta;
+                    BTensor::from_planar(&p, eng.tier.block()).unwrap()
+                };
+                let numeric = (loss(&bump(eps)) - loss(&bump(-eps))) / (2.0 * eps) as f64;
+                let got = d_yhat.data[(ch * lh + yy) * lw + xx] as f64;
+                assert!(
+                    (got - numeric).abs() <= 0.02 * (1.0 + numeric.abs()),
+                    "{op:?} ch{ch} y{yy} x{xx}: backward {got} vs numeric {numeric}"
+                );
+            }
+        }
+    }
+}
