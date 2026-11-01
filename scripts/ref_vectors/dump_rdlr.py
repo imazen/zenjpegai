@@ -127,6 +127,30 @@ def main():
     BitstreamStructure.encode_init = _bs_encode_init
     BitstreamStructure.encode_term = _bs_encode_term
 
+    # Seventh stale call: `RDLRCompUV.get_current_rate_point` builds
+    # `ec = ECModule(ECLibLH())` — the luma path uses `ECModule(BitstreamStructure(ECLibLH))`
+    # (a bare `ECLibLH` has no `get_ec`). Reroute the chroma call through a
+    # `BitstreamStructure` exactly as `RDLRCompY` does, keeping the UV body otherwise.
+    import inspect as _inspect
+    import src.codec.coding_tools.rdlr.rdlr_comp_UV as _rcuv_mod  # noqa: E402
+    _uv_gcrp_src = _inspect.getsource(_rcuv_mod.RDLRCompUV.get_current_rate_point)
+    _uv_gcrp_src = _uv_gcrp_src.replace(
+        "        ac = ECLibLH()\n        ec = ECModule(ac)\n        ac.encode_init()",
+        "        bs = BitstreamStructure(ECLibLH)\n        bs.encode_init()\n        ec = ECModule(bs)")
+    _uv_gcrp_src = _uv_gcrp_src.replace(
+        "        test_numBits_UV = ac.get_total_bits() + rate_uv",
+        "        test_numBits_UV = bs.encode_term() + rate_uv")
+    _uv_gcrp_src = _uv_gcrp_src.replace(
+        "        if decisions['scale_lin'] is not None:",
+        "        if decisions.get('scale_lin') is not None:")
+    _uv_gcrp_src = _uv_gcrp_src.replace(
+        "        resi_hat, resi_dq, y_hat = tool.common_modules._compress_ar_scale(y.clone(), params, scale_log, True, scale_lin)",
+        "        resi_hat, resi_dq, y_hat = tool.common_modules._compress_ar_scale(y.clone(), decisions)")
+    _uv_ns = dict(_rcuv_mod.__dict__)
+    _uv_ns["BitstreamStructure"] = BitstreamStructure
+    exec(_uv_gcrp_src.replace("    def ", "def ", 1), _uv_ns)
+    _rcuv_mod.RDLRCompUV.get_current_rate_point = _uv_ns["get_current_rate_point"]
+
     calls = []
 
     def put(name, t):
@@ -381,6 +405,56 @@ def main():
         return r
 
     RDLRCompY.rdlr_y_iteration = y_iter
+
+    # Same capture for `RDLRCompUV.rdlr_y_iteration` — the chroma iteration
+    # (`numIteYChroma > 0` cfg). `ref` is `(joint_rate, psnrU, psnrV, rate_ref_Y_part)`;
+    # `sup_info` is the refined luma `y_hat`; `loss` is `(lossU+lossV)/2`. Dumps get
+    # a `uv.` prefix, mirrored per-iteration.
+    from src.codec.coding_tools.rdlr.rdlr_comp_UV import RDLRCompUV as _RUV  # noqa: E402
+    _orig_uv_iter = _RUV.rdlr_y_iteration
+    _uv_count = [0]
+
+    def _uv_iter(self, tool, y_comp, original, decisions, optimizer, scheduler,
+                 area, ref, sup_info, calc_additional_rate=None):
+        i = _uv_count[0]
+        _uv_count[0] += 1
+        put(f"rdlr.uv.{i}.y", y_comp)
+        put(f"rdlr.uv.{i}.original", original)
+        if sup_info is not None:
+            put(f"rdlr.uv.{i}.sup_info", sup_info)
+        try:
+            put("rdlr.uv.area", [area.position.y, area.position.x,
+                                 area.size.height, area.size.width])
+        except AttributeError:
+            put("rdlr.uv.area", list(area))
+        for j, tag in enumerate(("joint_rate_ref", "psnrU_ref", "psnrV_ref", "rate_ref_Y_part")):
+            try:
+                put(f"rdlr.uv.{i}.{tag}", float(ref[j]))
+            except (TypeError, IndexError):
+                pass
+        _sl = self.current_bpp_curve_slopes
+        for name in ("psnrU", "psnrV"):
+            try:
+                v = _sl.get(name) if isinstance(_sl, dict) else getattr(_sl, name)
+                put(f"rdlr.uv.slope.{name}", float(v))
+            except (AttributeError, TypeError):
+                pass
+        if calc_additional_rate is not None:
+            try:
+                put(f"rdlr.uv.{i}.additional_rate", float(calc_additional_rate(tool, decisions)))
+            except Exception:
+                pass
+        put(f"rdlr.uv.{i}.lr", float(optimizer.param_groups[0]["lr"]))
+        leaf = optimizer.param_groups[0]["params"][0]
+        put(f"rdlr.uv.{i}.optimized_part", leaf)
+        r = _orig_uv_iter(self, tool, y_comp, original, decisions, optimizer,
+                          scheduler, area, ref, sup_info, calc_additional_rate)
+        put(f"rdlr.uv.{i}.loss", float(r))
+        if leaf.grad is not None:
+            put(f"rdlr.uv.{i}.y_grad", leaf.grad)
+        return r
+
+    _RUV.rdlr_y_iteration = _uv_iter
 
     base_parser = enc_mod.def_base_parser()
     coder = RecoEncoder(base_parser, enc_mod.def_encoder_parser_decorator(base_parser))
