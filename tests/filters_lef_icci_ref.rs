@@ -214,6 +214,17 @@ fn lef_img30_base_lef_bpp050() {
     check_lef("img30_base_lef_bpp050");
 }
 
+/// LEF on `model_id` 0 and 3 — the two `adptive_sharpness` constant rows the
+/// existing m1/m2 vectors do not reach.
+#[test]
+fn lef_enc_img30_bop_m0_b0_lef() {
+    check_lef("enc_img30_bop_m0_b0_lef");
+}
+#[test]
+fn lef_enc_img30_bop_m3_b0_lef() {
+    check_lef("enc_img30_bop_m3_b0_lef");
+}
+
 #[test]
 fn lef_img30_base_on_bpp025() {
     check_lef("img30_base_on_bpp025");
@@ -234,6 +245,13 @@ fn icci_img30_base_eicci_bpp050() {
 #[test]
 fn icci_enc_img30_hop_m2_b0_eicci() {
     check_icci("enc_img30_hop_m2_b0_eicci", true);
+}
+
+/// Simple-profile eICCI: `model_id 0` selects the *SOP* bank via the short list
+/// (`base (0,'sop')`, `short_list 1`) — the third operating point's branch.
+#[test]
+fn icci_enc_img30_sop_m0_b0_eicci() {
+    check_icci("enc_img30_sop_m0_b0_eicci", true);
 }
 
 #[test]
