@@ -61,8 +61,9 @@ impl QualityMap {
     /// 4 times the mean variance — `qp = -(var > 0.8*mean) - (var > 1.5*mean) - (var > 2.5*mean)
     /// - (var > 4*mean)`. Upstream crashes on this path (`img` is an unbound name where the
     /// source tensor belongs); this takes `plane` = the source image in `[0, 2^bit_depth)`.
-    pub fn from_variance(plane: &Tensor<f32>, h: usize, w: usize, align: usize) -> Result<Self> {
-        if plane.c != 1 || h == 0 || w == 0 {
+    /// The map lands on the `align`-cell latent grid — `ceil(h/align) x ceil(w/align)`.
+    pub fn from_variance(plane: &Tensor<f32>, align: usize) -> Result<Self> {
+        if plane.c != 1 || align < 4 || plane.h == 0 || plane.w == 0 {
             return Err(Error::InvalidArgument("quality map: variance source"));
         }
         // `cal_var(img, 4)` over the source padded with replicate to a multiple of `align`,
@@ -368,7 +369,7 @@ mod tests {
     fn variance_map_marks_texture() {
         // 4x4 window, alignment 4 → one latent cell per 4x4 source window.
         let flat = Tensor::from_vec(1, 8, 8, alloc::vec![128.0; 64]).unwrap();
-        let m = QualityMap::from_variance(&flat, 2, 2, 4).unwrap();
+        let m = QualityMap::from_variance(&flat, 4).unwrap();
         assert!(m.qp.data.iter().all(|&q| q == 0), "flat image: {m:?}");
         // One half of the image alternates 0/255 (high variance), the other is flat.
         let mut data = alloc::vec![128.0; 8 * 8];
@@ -378,7 +379,7 @@ mod tests {
             }
         }
         let img = Tensor::from_vec(1, 8, 8, data).unwrap();
-        let m = QualityMap::from_variance(&img, 2, 2, 4).unwrap();
+        let m = QualityMap::from_variance(&img, 4).unwrap();
         assert!(
             m.qp.data.iter().any(|&q| q < 0),
             "textured region should dip below 0: {m:?}"
