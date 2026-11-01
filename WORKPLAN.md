@@ -9,6 +9,12 @@ construction, and say so in `PORTING.md`.
 
 ## Landed
 
+- [x] **UV-beta search** (`independent_beta_UV = 0`, upstream crashes on `import
+  hyperopt`): `EncodeParams::uv_beta_search` + `--uv-beta-search` (`--bpp` only);
+  `Encoder::find_uv_beta` sweeps ≤9 ints in `[min(βY/32,0.1·βY), max(5·βY,3·βY)]`,
+  decode-scored `find_loss` (`10·distortion·(βY+2048)/2048·base_beta + bpp`,
+  `bits_mismatch<0.09`). `Encoder::models_dir` retained for the trial `Decoder`.
+  Commit `b0182c1`.
 - [x] **feature_clipping** (`clipping_mode`): `weights` nested-dict flatten → `clip_thres.*`
   lists, `model::load::clip_bounds`/`clip_channels`, `forward_clip` on analysis prim/sec +
   hyper_encoder (E1B..E5B / E1H..E5H / HE1..HE5), `EncodeParams::clipping` + `--clipping`,
@@ -19,15 +25,6 @@ construction, and say so in `PORTING.md`.
 
 ## Next up
 
-- [ ] **UV-beta search** (`bitrate_matcher.py::find_UV_beta_with_hyperopt`, upstream crashes on
-  `import hyperopt` when `independent_beta_UV = 0`; shipped config uses `1` = coupled UV=Y
-  beta, already matched). Port: `EncodeParams` knob → after `rate_match` picks `beta_Y`, sweep
-  `beta_UV` in `[min(beta_min_mult·βY, 0.1·βY), max(beta_max_mult·βY, 3·βY)]`
-  (`beta_min/max_mult` defaults need reading); per trial `encode_from_latents([beta_Y,beta_uv])`
-  → stream bpp → `Decoder::decode` → reco planes → `distortion = Σ_c MSE(reco_c, orig_c)·
-  [0.8,0.1,0.1]·5000` → `loss = 10·distortion·(βY+2048)/2048·base_beta + bpp`; keep argmin with
-  `bits_mismatch < 0.09`. `find_loss` in `bitrate_matcher.py:307–390` is the spec. Deterministic
-  grid/golden search replaces hyperopt `fmin`/`atpe`. No oracle → self-consistency.
 - [ ] **chroma / z RDLR** (`cfg/tools/RDLR.json`: `numIteYLuma=8` shipped, `numIteYChroma`,
   `numIteZLuma`, `numIteZChroma = 0`; `rdlr_comp_base.py::process_z/process_y` and
   `rdlr.py::RDLRCompUV/RDLRCompZ/optimize_z/rate_point_z/rate_point_uv` exist but are

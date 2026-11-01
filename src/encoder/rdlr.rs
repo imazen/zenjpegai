@@ -420,6 +420,12 @@ pub(crate) fn optimize_y(
     // `psi` is `z_hat`'s hyper-decoder output — `z_hat` is fixed, so iter 0's
     // `psi` serves all iterations (the hyper-decoder isn't re-run).
     let mut psi = None;
+    // `Precision::Approximate` experiment knob: stop the search once the best iterate has
+    // not improved for `EARLY_EXIT_ITERS` straight iterations — `Exact` always runs the
+    // full `num_ite`. This is parity-breaking by construction (a different `best`), so it
+    // stays behind the opt-in enum.
+    const EARLY_EXIT_ITERS: usize = 4;
+    let mut nochange = 0usize;
     for _ in 0..num_ite {
         let rp = rate_point_y(
             eng,
@@ -468,6 +474,13 @@ pub(crate) fn optimize_y(
         if up.loss < best_loss {
             best.clone_from(&leaf);
             best_loss = up.loss;
+            nochange = 0;
+        } else {
+            nochange += 1;
+        }
+        if eng.precision == crate::nn::fast::Precision::Approximate && nochange == EARLY_EXIT_ITERS
+        {
+            break;
         }
     }
     Ok((best, best_loss))
