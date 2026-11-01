@@ -170,6 +170,13 @@ pub struct EncodeParams {
     /// (default) the chroma displacement equals the luma's, as `independent_beta_UV = 1`
     /// ships. Ignored without a rate target and needs a `models_dir` [`Encoder`].
     pub uv_beta_search: bool,
+    /// `numIteYChroma` of `cfg/tools/RDLR.json` (shipped `0`, arg default `40`): chroma
+    /// `process_y` — `RDLRCompUV` refining the chroma latent by the same Adagrad loop the
+    /// luma `rdlr` uses, but scoring per-plane PSNR and a joined luma+chroma rate term
+    /// (`sup_info` = the refined luma `y_hat` inside the secondary synthesis). `0` (the
+    /// default) disables it, matching the shipped config. Ignored without the source planes
+    /// (a `with_source`/`encode` path supplies them; `rate_match` trial encodes have none).
+    pub num_ite_uv: usize,
 }
 
 /// How a region's residual reaches the codestream
@@ -228,6 +235,7 @@ impl Default for EncodeParams {
             precision: crate::nn::fast::Precision::Exact,
             clipping: false,
             uv_beta_search: false,
+            num_ite_uv: 0,
         }
     }
 }
@@ -323,6 +331,10 @@ struct ComponentPass {
     rvs_enabled: bool,
     grfs_channel_flags: Option<Vec<bool>>,
     cube_flags: Option<Vec<bool>>,
+    /// `test_bpp_Y` of the (refined) luma decisions — `(z_bits + rate_y) / pixels` —
+    /// kept only when chroma RDLR needs it as `tile_rate_ref_Y_part`/`additional_rate`
+    /// (`num_ite_uv > 0`).
+    rate_bits: Option<f64>,
     efe_residual: Option<Tensor<f32>>,
     efe_likely: Option<Tensor<u16>>,
     lef_channel: Option<u8>,
@@ -652,6 +664,7 @@ impl Encoder {
                 None,
                 None,
                 None,
+                None,
             )
             .map_err(|e| at!(e))?;
         Self::trace(stream, components, quality_map).map_err(|e| at!(e))
@@ -708,6 +721,10 @@ impl Encoder {
         let rdlr_planes = (params.rdlr && efe_org.is_none())
             .then(|| efe_source_planes(src, &meta))
             .transpose()?;
+        // The chroma RDLR's `org_img_i` (`to_420_()`) — the chroma planes at 4:2:0.
+        let uv_org = (params.num_ite_uv > 0)
+            .then(|| Self::uv_rdlr_planes(src, &meta))
+            .transpose()?;
         self.encode_from_latents(
             [&ys[0], &ys[1]],
             Some(z),
@@ -721,6 +738,7 @@ impl Encoder {
             efe_org.as_ref(),
             icci_org.as_ref(),
             rdlr_planes.as_ref().or(efe_org.as_ref()).map(|p| &p.y),
+            uv_org.as_ref(),
         )
     }
 
@@ -825,8 +843,12 @@ impl Encoder {
                 efe_nonlinear: final_run && base_params.efe_nonlinear,
                 eicci: if final_run { base_params.eicci } else { None },
                 rdlr: final_run && base_params.rdlr,
+                num_ite_uv: if final_run { base_params.num_ite_uv } else { 0 },
                 ..base_params
             };
+            let uv_org = (params.num_ite_uv > 0)
+                .then(|| Self::uv_rdlr_planes(src, &meta))
+                .transpose()?;
             let (stream, components) = self.encode_from_latents(
                 [&y[0], &y[1]],
                 Some([z[0].clone(), z[1].clone()]),
@@ -846,6 +868,7 @@ impl Encoder {
                     .or(efe_org.as_ref())
                     .map(|p| &p.y)
                     .filter(|_| final_run),
+                uv_org.as_ref().filter(|_| final_run),
             )?;
             let bpp = match params.rate_estimate {
                 RateEstimate::Likelihood => {
@@ -1217,6 +1240,7 @@ impl Encoder {
         efe_org: Option<&crate::decoder::reconstruct::Planes>,
         icci_org: Option<&crate::decoder::reconstruct::Planes>,
         rdlr_org: Option<&Tensor<f32>>,
+        uv_org: Option<&Tensor<f32>>,
     ) -> Result<(Vec<u8>, Vec<Component>)> {
         let set = self.model_set(self.check_params(w, h, params)?, params.op)?;
         let eng_owned = self.engine.with_precision(params.precision);
@@ -1282,7 +1306,7 @@ impl Encoder {
         // payload run concurrently with the whole chroma pass. Results come back in
         // `ComponentPass`es; header fields are applied in ccs order afterwards, exactly the
         // sequential values.
-        let pass = |ccs: usize| {
+        let pass = |ccs: usize, uv: Option<(&BTensor, f64, &Tensor<f32>)>| {
             self.component_pass(
                 eng,
                 &set,
@@ -1296,13 +1320,33 @@ impl Encoder {
                 keep_trace,
                 stop,
                 (ccs == 0).then_some(rdlr_org).flatten(),
+                uv,
             )
         };
-        #[cfg(feature = "parallel")]
-        let (a, b) = rayon::join(|| pass(0), || pass(1));
-        #[cfg(not(feature = "parallel"))]
-        let (a, b) = (pass(0), pass(1));
-        let (a, b) = (a?, b?);
+        // `RDLRCompUV`: chroma RDLR (`num_ite_uv > 0`) needs the *refined* luma's
+        // `y_hat` (`sup_info`) and `test_bpp_Y` (`additional_rate`), so the luma
+        // pass must finish first — run sequentially instead of `rayon::join`.
+        let uv_gates = params.num_ite_uv > 0 && hdr.regions.is_none() && uv_org.is_some();
+        let (a, b) = if uv_gates {
+            let a = pass(0, None)?;
+            let sup = BTensor::from_planar(
+                a.y_hat
+                    .as_ref()
+                    .ok_or(Error::InvalidArgument("RDLR: no luma y_hat for sup"))?,
+                eng.tier.block(),
+            )?;
+            let y_rate_part = a
+                .rate_bits
+                .ok_or(Error::InvalidArgument("RDLR: no luma rate for UV"))?;
+            let b = pass(1, Some((&sup, y_rate_part, uv_org.unwrap())))?;
+            (a, b)
+        } else {
+            #[cfg(feature = "parallel")]
+            let (a, b) = rayon::join(|| pass(0, None), || pass(1, None));
+            #[cfg(not(feature = "parallel"))]
+            let (a, b) = (pass(0, None), pass(1, None));
+            (a?, b?)
+        };
         hdr.components[0].rvs_enabled = a.rvs_enabled;
         hdr.components[0].grfs_channel_flags = a.grfs_channel_flags;
         hdr.components[0].cube_flags = a.cube_flags;
@@ -1522,6 +1566,22 @@ impl Encoder {
         Ok((out.finish(), components))
     }
 
+    /// The chroma RDLR's `org_img_i` (`to_420_()`): the source chroma planes at
+    /// 4:2:0 resolution, stacked into a `[2, h/2, w/2]` tensor at `0..255`.
+    fn uv_rdlr_planes(src: &SourceImage, meta: &SourceMeta) -> Result<Tensor<f32>> {
+        let p = colour::source_planes(src, meta)?;
+        let (mut u, v, tch, tcw) = colour::to_coded_format(
+            p.u,
+            p.v,
+            p.chroma_height,
+            p.chroma_width,
+            (meta.s_ver, meta.s_hor),
+            (2, 2),
+        )?;
+        u.extend(v);
+        Tensor::from_vec(2, tch, tcw, u)
+    }
+
     /// Steps 4–7a of the encode for one component: scales, the threshold skip mask, the
     /// residual quantisation with its cube-flag decision, the final mask, and the entropy
     /// coding of the residual payload. Everything a parallel sibling pass could observe
@@ -1541,6 +1601,7 @@ impl Encoder {
         keep_trace: bool,
         stop: &dyn enough::Stop,
         rdlr_org: Option<&Tensor<f32>>,
+        uv_ctx: Option<(&BTensor, f64, &Tensor<f32>)>,
     ) -> Result<ComponentPass> {
         stop.check()?;
         let model = &set.common[ccs];
@@ -1572,10 +1633,11 @@ impl Encoder {
             quality_map,
         };
         let num_chs = hdr.components[ccs].num_chs as usize;
-        // RDLR (`rdlr/process_y`): refine the luma latent through `numIteYLuma`
+        // RDLR (`rdlr/process_y`): refine the latent through `numIteY{Luma,Chroma}`
         // Adagrad iterations toward a better rate/distortion point, then quantise
         // the refined latent's residual as usual.
         let refined;
+        let refined_uv;
         // `RDLR._process` gates on `num_samples < numSamples` (4.2 MP): larger
         // pictures return their decisions unchanged — no RDLR at all.
         let latent = if ccs == 0
@@ -1611,6 +1673,41 @@ impl Encoder {
                 stop,
             )?;
             &refined
+        } else if ccs == 1
+            && params.num_ite_uv > 0
+            && hdr.regions.is_none()
+            && (hdr.width as usize) * (hdr.height as usize) < 4_200_000
+            && let Some((sup, y_rate_part, original)) = uv_ctx
+        {
+            // `RDLRCompUV.process_y` — chroma RDLR scoring per-plane PSNR against the
+            // source chroma plus the joined luma rate term (`get_luma_tile_rate`).
+            let synth_op = hdr
+                .synthesis_transforms
+                .first()
+                .copied()
+                .unwrap_or(params.op);
+            refined_uv = rdlr::chroma(
+                eng,
+                &*self.models,
+                params.model_id,
+                synth_op,
+                hdr,
+                model,
+                &set.lh[ccs],
+                sup,
+                latent,
+                z_hat,
+                &scales.scale_log,
+                &mask,
+                &q,
+                num_chs,
+                original,
+                y_rate_part,
+                (hdr.width as f64) * (hdr.height as f64),
+                params.num_ite_uv,
+                stop,
+            )?;
+            &refined_uv
         } else {
             latent
         };
@@ -1653,6 +1750,12 @@ impl Encoder {
             None
         };
         let efe_likely = (post_filters && params.lsbs).then(|| scales.likely.clone());
+        // `get_luma_tile_rate` / `additional_rate`: `test_bpp_Y` of the refined luma
+        // decisions — the chroma RDLR's joined-rate reference and Y-part reference.
+        let rate_bits = (params.num_ite_uv > 0 && ccs == 0).then(|| {
+            let rate_y = rdlr::gm_rate(latent, &y_hat, &residual_q, &scales.scale_log);
+            (set.lh[0].z_bits(z_hat) + rate_y) / (hdr.width as f64 * hdr.height as f64)
+        });
         // `ResVarScale.encode_header` writes `cwgf[:num_chs]` — the derived flags keep
         // their full length inside `scales` (`analyzeCWG` ranks all channels, so a flag
         // can land on an uncoded channel and is then simply not written).
@@ -1689,10 +1792,12 @@ impl Encoder {
         Ok(ComponentPass {
             component: c,
             payload,
-            y_hat: post_filters.then_some(y_hat),
+            // `sup_info` for the chroma RDLR is this y_hat too.
+            y_hat: (post_filters || params.num_ite_uv > 0).then_some(y_hat),
             rvs_enabled: params.rvs,
             grfs_channel_flags,
             cube_flags,
+            rate_bits,
             efe_residual,
             efe_likely,
             lef_channel,
@@ -2121,6 +2226,41 @@ fn compress_context_free<Q: mcm::Quantiser>(
         psi: Tensor::<f32>::zeros(1, 1, 1)?,
         tape: Vec::new(),
     })
+}
+
+/// `compress_context_free`'s input gradient (chroma RDLR VJP): the context-free
+/// path's `y_hat = mean + resi_dq` with `mean = upshuffle_psi(psi)` — `mean`
+/// carries no `y` dependence (psi is hyper-decoder output on fixed `z_hat`), so
+/// `d(y)` is only the STE-gated `resi` path `ste_gain·(d_resi + d(y_hat)·deq_gain)`
+/// under `mask2 = skip_mask_or_cubes`; `d(mean)` would feed `psi`/`z`, which
+/// `process_y` does not optimise.
+pub(crate) fn compress_context_free_backward<Q: mcm::Quantiser>(
+    y: &Tensor<f32>,
+    mask: &Tensor<bool>,
+    cube_flag: &[bool],
+    num_chs: usize,
+    q: &Q,
+    d_out_yhat: &Tensor<f32>,
+    d_out_resihat: &Tensor<f32>,
+) -> Result<Tensor<f32>> {
+    let (c, h, w) = (y.c, y.h, y.w);
+    let (hh, hw) = (h.div_ceil(2), w.div_ceil(2));
+    let (cube_h, cube_w) = (hh.div_ceil(mcm::CUBE_SIZE), hw.div_ceil(mcm::CUBE_SIZE));
+    let mask2 = skip_mask_or_cubes(mask, cube_flag, cube_h, cube_w);
+    let mut d_y = Tensor::<f32>::zeros(c, h, w)?;
+    for ch in 0..num_chs.min(c) {
+        let (dyh, dr, m) = (
+            d_out_yhat.plane(ch),
+            d_out_resihat.plane(ch),
+            mask2.plane(ch),
+        );
+        for i in 0..h * w {
+            if m[i] {
+                d_y.plane_mut(ch)[i] = q.ste_gain(ch, i) * (dr[i] + dyh[i] * q.deq_gain(ch, i));
+            }
+        }
+    }
+    Ok(d_y)
 }
 
 /// `torch.logical_or(mask2, cube_flags_full)` at latent resolution.

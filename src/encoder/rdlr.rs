@@ -73,6 +73,39 @@ pub(crate) struct RatePoint {
     pub tape: Vec<mcm::StageTape>,
 }
 
+/// `rate_y`/`rate_uv` — `Σ -log2` of the `GMProbModel` likelihood of
+/// `resi = y - means_hat = y - y_hat + residual_q` (mixed units, the reference's
+/// own formula), over every position: no skip mask, no `num_chs` truncation —
+/// `_compress_ar_scale`'s continuous-residual rate term.
+pub(crate) fn gm_rate(
+    y: &Tensor<f32>,
+    y_hat: &Tensor<f32>,
+    residual_q: &Tensor<i16>,
+    scale_log: &Tensor<i32>,
+) -> f64 {
+    let log_k = log_k() as f32;
+    let inv = 1.0f32 / (1u32 << SIGMA_PRECISION) as f32;
+    let mut rate = 0.0f64;
+    for ch in 0..residual_q.c {
+        let (r, s, yq, yh) = (
+            residual_q.plane(ch),
+            scale_log.plane(ch),
+            y.plane(ch),
+            y_hat.plane(ch),
+        );
+        for i in 0..r.len() {
+            let resi = yq[i] - yh[i] + r[i] as f32;
+            let scale_lin = math::exp(s[i] as f32 * inv * log_k + LN_SIGMA_MIN);
+            let idx = (scale_lin + 64.0)
+                .mul_add(1.0 / 128.0, 0.0)
+                .clamp(0.0, 34.0);
+            let sigma = math::exp(idx * log_k + LN_SIGMA_MIN).max(SCALE_BOUND);
+            rate += gm_nbits(resi, sigma);
+        }
+    }
+    rate
+}
+
 /// `RDLRCompY.get_current_rate_point` for one luma latent tile: the rate point
 /// and both metrics. `original` is the source luma at 0..255 over `area` (the
 /// optimised part of the picture tile; the whole picture for a single tile).
@@ -123,26 +156,7 @@ pub(crate) fn rate_point_y(
     // `2^7` again, so the effective sigma is
     // `max(exp(clamp((scale_lin+64)/128, 0, 34)·log_k + ln σ_min), 0.11)` where
     // `scale_lin = exp(scale_log/2^7 · log_k + ln σ_min)`.
-    let log_k = log_k() as f32;
-    let inv = 1.0f32 / (1u32 << SIGMA_PRECISION) as f32;
-    let mut rate_y = 0.0f64;
-    for ch in 0..residual_q.c {
-        let (r, s, yq, yh) = (
-            residual_q.plane(ch),
-            scale_log.plane(ch),
-            y.plane(ch),
-            y_hat.plane(ch),
-        );
-        for i in 0..r.len() {
-            let resi = yq[i] - yh[i] + r[i] as f32;
-            let scale_lin = math::exp(s[i] as f32 * inv * log_k + LN_SIGMA_MIN);
-            let idx = (scale_lin + 64.0)
-                .mul_add(1.0 / 128.0, 0.0)
-                .clamp(0.0, 34.0);
-            let sigma = math::exp(idx * log_k + LN_SIGMA_MIN).max(SCALE_BOUND);
-            rate_y += gm_nbits(resi, sigma);
-        }
-    }
+    let rate_y = gm_rate(y, &y_hat, &residual_q, scale_log);
 
     // `tool.decoder(y_new2, h, w)` — the luma synthesis on the reconstructed
     // latent.
@@ -189,6 +203,11 @@ pub(crate) struct RatePointUV {
     pub rec: Tensor<f32>,
     #[allow(dead_code)]
     pub rate_uv: f64,
+    /// The cube flags — `compress_context_free_backward` rebuilds `mask2` from
+    /// them (the context-free path keeps no MCM tape).
+    pub cube_flag: Vec<bool>,
+    /// The secondary synthesis's VJP tape (`backward_uv` consumes it).
+    pub synth_tape: Option<crate::model::synthesis::SecondaryTape>,
     pub tape: Vec<mcm::StageTape>,
 }
 
@@ -226,34 +245,16 @@ pub(crate) fn rate_point_uv(
         residual_q,
         psi,
         y_hat,
+        cube_flag,
         tape: mcm_tape,
         ..
     } = out;
 
-    let log_k = log_k() as f32;
-    let inv = 1.0f32 / (1u32 << SIGMA_PRECISION) as f32;
-    let mut rate_uv = 0.0f64;
-    for ch in 0..residual_q.c {
-        let (r, s, yq, yh) = (
-            residual_q.plane(ch),
-            scale_log.plane(ch),
-            y.plane(ch),
-            y_hat.plane(ch),
-        );
-        for i in 0..r.len() {
-            let resi = yq[i] - yh[i] + r[i] as f32;
-            let scale_lin = math::exp(s[i] as f32 * inv * log_k + LN_SIGMA_MIN);
-            let idx = (scale_lin + 64.0)
-                .mul_add(1.0 / 128.0, 0.0)
-                .clamp(0.0, 34.0);
-            let sigma = math::exp(idx * log_k + LN_SIGMA_MIN).max(SCALE_BOUND);
-            rate_uv += gm_nbits(resi, sigma);
-        }
-    }
+    let rate_uv = gm_rate(y, &y_hat, &residual_q, scale_log);
 
     // `tool.decoder(cat(sup_info, y_hat), h, w)` — the secondary synthesis takes
     // the luma latent as its first-stage input planes.
-    let rec = synthesis_uv.forward_with(
+    let (rec, synth_tape) = synthesis_uv.forward_tape(
         eng,
         sup,
         &BTensor::from_planar(&y_hat, eng.tier.block())?,
@@ -275,6 +276,8 @@ pub(crate) fn rate_point_uv(
         y_hat,
         rec,
         rate_uv,
+        cube_flag,
+        synth_tape: Some(synth_tape),
         tape: mcm_tape,
     })
 }
@@ -305,13 +308,21 @@ fn psnr_plane(
 
 /// `PSNR`'s input gradient: `psnr = C - 10·log10(mse + eps)`, `mse =
 /// mean((a-b)²)` over `area` — `d(rec[i]) = d_psnr · (-10/(ln10·mse)) ·
-/// 2·(rec[i]-orig[i])/N` inside `area`, `0` outside.
-fn psnr_vjp(d_psnr: f64, rec: &Tensor<f32>, original: &Tensor<f32>, area: Area) -> Tensor<f32> {
+/// 2·(rec[i]-orig[i])/N` inside `area`, `0` outside. `plane` selects the
+/// channel of the multi-plane `rec`/`original` pair (luma `0`; chroma `0`/`1`
+/// for U/V).
+fn psnr_vjp(
+    d_psnr: f64,
+    rec: &Tensor<f32>,
+    original: &Tensor<f32>,
+    area: Area,
+    plane: usize,
+) -> Tensor<f32> {
     let n = (area.width * area.height) as f64;
     let mse = rec
-        .plane(0)
+        .plane(plane)
         .iter()
-        .zip(original.plane(0))
+        .zip(original.plane(plane))
         .enumerate()
         .filter(|(i, _)| {
             let (x, y) = (i % rec.w, i / rec.w);
@@ -329,7 +340,8 @@ fn psnr_vjp(d_psnr: f64, rec: &Tensor<f32>, original: &Tensor<f32>, area: Area) 
                 && (area.y..area.y + area.height).contains(&y)
             {
                 let i = y * rec.w + x;
-                out.plane_mut(0)[i] = (k * (rec.plane(0)[i] - original.plane(0)[i]) as f64) as f32;
+                out.plane_mut(0)[i] =
+                    (k * (rec.plane(plane)[i] - original.plane(plane)[i]) as f64) as f32;
             }
         }
     }
@@ -556,7 +568,6 @@ pub(crate) fn optimize_y(
     // not improved for `EARLY_EXIT_ITERS` straight iterations — `Exact` always runs the
     // full `num_ite`. This is parity-breaking by construction (a different `best`), so it
     // stays behind the opt-in enum.
-    const EARLY_EXIT_ITERS: usize = 4;
     let mut nochange = 0usize;
     for _ in 0..num_ite {
         let rp = rate_point_y(
@@ -621,6 +632,306 @@ pub(crate) fn optimize_y(
 /// `cfg/tools/RDLR.json`'s `numIteYLuma` — the luma Adagrad iteration count.
 /// (`numIteYChroma = 0` in the shipped config; chroma RDLR is a later item.)
 pub(crate) const NUM_ITE_Y: usize = 8;
+
+/// `optimize_*`'s early-exit plateau length — consecutive iterations without a
+/// new best-loss before `Precision::Approximate` gives up (Exact never does).
+const EARLY_EXIT_ITERS: usize = 4;
+
+/// The chroma RDLR's upstream scalars — `dL` through the direction-projection
+/// loss without touching the latent.
+pub(crate) struct LossUpstreamUV {
+    /// `loss.item()` — `(loss_psnrU + loss_psnrV) / 2`.
+    pub loss: f64,
+    /// `dL/d(rate_UV)` — `(sin sU + sin sV) / (2·joined)`, `joined =
+    /// rate_UV + rate_ref_Y_part`.
+    pub d_rate: f64,
+    /// `dL/d(psnrU)` — `-cos sU / 2`.
+    pub d_psnr_u: f64,
+    /// `dL/d(psnrV)` — `-cos sV / 2`.
+    pub d_psnr_v: f64,
+}
+
+/// `RDLRCompUV.rdlr_y_iteration`'s loss composition and upstream gradients.
+/// `rp` is the current chroma rate point; `refs` is `get_ref_rate_data`'s
+/// `(joint_rate_ref, psnrU_ref, psnrV_ref, rate_ref_Y_part)` where the joint
+/// reference and the Y part each carry `calc_additional_rate`'s luma bpp.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn loss_upstream_uv(
+    rp: &RatePointUV,
+    joint_rate_ref: f64,
+    psnr_u_ref: f64,
+    psnr_v_ref: f64,
+    rate_ref_y_part: f64,
+    slope_u: f64,
+    slope_v: f64,
+) -> LossUpstreamUV {
+    let joined = rp.bpp + rate_ref_y_part;
+    let rate_log_diff = joined.ln() - joint_rate_ref.ln();
+    let du = rp.psnr_u - psnr_u_ref;
+    let dv = rp.psnr_v - psnr_v_ref;
+    let loss_u = -(-slope_u.sin() * rate_log_diff + slope_u.cos() * du);
+    let loss_v = -(-slope_v.sin() * rate_log_diff + slope_v.cos() * dv);
+    LossUpstreamUV {
+        loss: (loss_u + loss_v) / 2.0,
+        d_rate: (slope_u.sin() + slope_v.sin()) / (2.0 * joined),
+        d_psnr_u: -slope_u.cos() / 2.0,
+        d_psnr_v: -slope_v.cos() / 2.0,
+    }
+}
+
+/// `RDLRCompUV.rdlr_y_iteration`'s backward: `d(chroma y)` — the leaf gradient —
+/// for one iteration's chroma rate point and upstream scalars. Mirrors
+/// [`backward`]; the luma `sup` input is detached inside the secondary
+/// synthesis's tape.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn backward_uv(
+    eng: &Engine,
+    synthesis_uv: &SynthesisSecondary,
+    up: &LossUpstreamUV,
+    rp: &RatePointUV,
+    y: &Tensor<f32>,
+    _z_hat: &Tensor<i8>,
+    scale_log: &Tensor<i32>,
+    mask: &Tensor<bool>,
+    q: &impl mcm::Quantiser,
+    num_chs: usize,
+    original: &Tensor<f32>,
+    area: Area,
+    pixels: f64,
+    stop: &dyn enough::Stop,
+) -> Result<Tensor<f32>> {
+    let d_resi = rate_vjp(up.d_rate / pixels, y, &rp.y_hat, &rp.residual_q, scale_log);
+    // `d(rec)`: the U and V PSNR gradients stacked into the two-plane map.
+    let du = psnr_vjp(up.d_psnr_u, &rp.rec, original, area, 0);
+    let dv = psnr_vjp(up.d_psnr_v, &rp.rec, original, area, 1);
+    let mut d_rec = Tensor::<f32>::zeros(2, rp.rec.h, rp.rec.w)?;
+    d_rec.plane_mut(0).copy_from_slice(&du.data);
+    d_rec.plane_mut(1).copy_from_slice(&dv.data);
+    // `d(y_hat)`: secondary synthesis backward minus the resi term's -means_hat.
+    let d_yhat_synth = synthesis_uv.backward(
+        eng,
+        rp.synth_tape
+            .as_ref()
+            .ok_or(Error::InvalidArgument("RDLR: no secondary tape"))?,
+        &d_rec,
+    )?;
+    let mut d_out_yhat = d_yhat_synth.clone();
+    for (a, &b) in d_out_yhat.data.iter_mut().zip(&d_resi.data) {
+        *a -= b;
+    }
+    // `d(y)`: the context-free STE-gated resi path plus the direct +1.
+    let mut d_y = crate::encoder::compress_context_free_backward(
+        y,
+        mask,
+        &rp.cube_flag,
+        num_chs,
+        q,
+        &d_out_yhat,
+        &d_resi,
+    )?;
+    for (a, &b) in d_y.data.iter_mut().zip(&d_resi.data) {
+        *a += b;
+    }
+    Ok(d_y)
+}
+
+/// `process_y`'s chroma driver for `numIteYChroma > 0`: `num_ite` Adagrad +
+/// StepLR iterations on the chroma latent, tracking the lowest-loss iterate.
+/// `sup` is `sup_info` — the refined luma `y_hat` at chroma-latent size;
+/// `refs` is `get_ref_rate_data` `(joint_rate, psnrU, psnrV, rate_ref_Y_part)`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn optimize_uv(
+    eng: &Engine,
+    hdr: &crate::header::PictureHeader,
+    model: &crate::model::common::CommonModel,
+    synthesis_uv: &SynthesisSecondary,
+    lh: &lh::Likelihood,
+    sup: &BTensor,
+    y: &Tensor<f32>,
+    z_hat: &Tensor<i8>,
+    scale_log: &Tensor<i32>,
+    mask: &Tensor<bool>,
+    q: &impl mcm::Quantiser,
+    num_chs: usize,
+    original: &Tensor<f32>,
+    area: Area,
+    pixels: f64,
+    num_ite: usize,
+    lr0: f32,
+    lr_decay: f32,
+    refs: (f64, f64, f64, f64),
+    slope_u: f64,
+    slope_v: f64,
+    stop: &dyn enough::Stop,
+) -> Result<(Tensor<f32>, f64)> {
+    let mut leaf = y.clone();
+    let mut sum_sq = vec![0.0f32; leaf.data.len()];
+    let mut lr = lr0;
+    let mut best = leaf.clone();
+    let mut best_loss = f64::INFINITY;
+    let mut psi = None;
+    let mut nochange = 0usize;
+    for _ in 0..num_ite {
+        let rp = rate_point_uv(
+            eng,
+            hdr,
+            model,
+            synthesis_uv,
+            lh,
+            &leaf,
+            z_hat,
+            scale_log,
+            mask,
+            q,
+            num_chs,
+            original,
+            sup,
+            area,
+            pixels,
+            psi.as_ref(),
+            stop,
+        )?;
+        psi.get_or_insert_with(|| rp.psi.clone());
+        let up = loss_upstream_uv(&rp, refs.0, refs.1, refs.2, refs.3, slope_u, slope_v);
+        let d_y = backward_uv(
+            eng,
+            synthesis_uv,
+            &up,
+            &rp,
+            &leaf,
+            z_hat,
+            scale_log,
+            mask,
+            q,
+            num_chs,
+            original,
+            area,
+            pixels,
+            stop,
+        )?;
+        for (i, (&g, acc)) in d_y.data.iter().zip(&mut sum_sq).enumerate() {
+            *acc += g * g;
+            leaf.data[i] -= lr * g / (acc.sqrt() + 1e-10);
+        }
+        lr *= lr_decay;
+        if up.loss < best_loss {
+            best.clone_from(&leaf);
+            best_loss = up.loss;
+            nochange = 0;
+        } else {
+            nochange += 1;
+        }
+        if eng.precision == crate::nn::fast::Precision::Approximate && nochange == EARLY_EXIT_ITERS
+        {
+            break;
+        }
+    }
+    Ok((best, best_loss))
+}
+
+/// `mean_psnrU_slopes` / `mean_psnrV_slopes` keyed by `int(target_bpp·100)`
+/// (degrees → radians) — the chroma `fixed_slopes` counterpart.
+fn fixed_slopes_uv(target_bpp_int: i32) -> (f64, f64) {
+    let deg = std::f64::consts::PI / 180.0;
+    let u = match target_bpp_int {
+        6 => 64.131075,
+        12 => 62.749463,
+        25 => 63.404102,
+        50 => 58.369855,
+        75 => 44.556739,
+        _ => 58.642247,
+    };
+    let v = match target_bpp_int {
+        6 => 64.006979,
+        12 => 62.568593,
+        25 => 62.318648,
+        50 => 56.189655,
+        75 => 42.682759,
+        _ => 57.553327,
+    };
+    (u * deg, v * deg)
+}
+
+/// `process_y`'s whole-picture chroma path for `EncodeParams::num_ite_uv > 0`:
+/// like [`luma`], but `RDLRCompUV` — `original` is the source chroma
+/// `[2, ch, cw]` at 0..255, `sup` the refined luma `y_hat`, `y_rate_part` the
+/// luma rate point's bpp (`calc_additional_rate`/`get_luma_tile_rate`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn chroma(
+    eng: &Engine,
+    models: &dyn crate::model::ModelSource,
+    model_id: u8,
+    synth_op: crate::header::OperatingPoint,
+    hdr: &crate::header::PictureHeader,
+    model: &crate::model::common::CommonModel,
+    lh: &lh::Likelihood,
+    sup: &BTensor,
+    latent: &Tensor<f32>,
+    z_hat: &Tensor<i8>,
+    scale_log: &Tensor<i32>,
+    mask: &Tensor<bool>,
+    q: &impl mcm::Quantiser,
+    num_chs: usize,
+    original: &Tensor<f32>,
+    y_rate_part: f64,
+    pixels: f64,
+    num_ite: usize,
+    stop: &dyn enough::Stop,
+) -> Result<Tensor<f32>> {
+    let synthesis_uv =
+        crate::model::load_synthesis_secondary(models, model_id as usize, synth_op, eng)?;
+    let area = Area::new(0, 0, original.w, original.h);
+    let refs = {
+        let r = rate_point_uv(
+            eng,
+            hdr,
+            model,
+            &synthesis_uv,
+            lh,
+            latent,
+            z_hat,
+            scale_log,
+            mask,
+            q,
+            num_chs,
+            original,
+            sup,
+            area,
+            pixels,
+            None,
+            stop,
+        )?;
+        // `ref_data[0]` (joint) and `ref_data[3]` (Y part) each get
+        // `additional_rate` — the luma bpp.
+        (r.bpp + y_rate_part, r.psnr_u, r.psnr_v, y_rate_part)
+    };
+    let (su, sv) = fixed_slopes_uv(target_bpp_centi(model_id));
+    let (best, _loss) = optimize_uv(
+        eng,
+        hdr,
+        model,
+        &synthesis_uv,
+        lh,
+        sup,
+        latent,
+        z_hat,
+        scale_log,
+        mask,
+        q,
+        num_chs,
+        original,
+        area,
+        pixels,
+        num_ite,
+        calc_lr(pixels),
+        0.7,
+        refs,
+        su,
+        sv,
+        stop,
+    )?;
+    Ok(best)
+}
 
 /// `__calc_lr` — the per-resolution learning rate (`LearningRateYAutomaticPerResolution`).
 fn calc_lr(num_samples: f64) -> f32 {
@@ -779,7 +1090,7 @@ pub(crate) fn rec_grad(
             d_rec.plane_mut(0)[(area.y + row) * rec.w + area.x + x] = dx.data[row * area.width + x];
         }
     }
-    let d_psnr_map = psnr_vjp(up.d_psnr, rec, original, area);
+    let d_psnr_map = psnr_vjp(up.d_psnr, rec, original, area, 0);
     for (a, &b) in d_rec.data.iter_mut().zip(&d_psnr_map.data) {
         *a += b;
     }

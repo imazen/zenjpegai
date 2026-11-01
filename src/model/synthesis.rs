@@ -771,6 +771,90 @@ impl HopSecondary {
         x = self.up4.forward(eng, &x)?;
         fast::pixel_shuffle_to_planar(&x, 2)
     }
+
+    /// [`Self::forward`] that records the intermediates its VJP needs.
+    fn forward_tape(
+        &self,
+        eng: &Engine,
+        x: &BTensor,
+        h: usize,
+        w: usize,
+        stop: &dyn Stop,
+    ) -> Result<(Tensor<f32>, HopSecTape)> {
+        let in_dims = (x.h, x.w);
+        let x = self.up2.forward(eng, x)?;
+        let (x, cab_t) = self.cab.forward_tape(eng, &x)?;
+        let cab_out = (x.h, x.w);
+        let x = x.crop_par(eng, h.div_ceil(8), w.div_ceil(8))?;
+        let crop8 = (x.h, x.w);
+        stop.check()?;
+        let (x, a2x, a2m) = self.act2.forward_tape(eng, x)?;
+        let x = self.conv3.forward(eng, &x)?;
+        let x = fast::pixel_shuffle(eng, &x, 2)?;
+        stop.check()?;
+        let (x, tam_t) = self.tam.forward_tape(eng, x)?;
+        let tam_out = (x.h, x.w);
+        let x = x.crop_par(eng, h.div_ceil(4), w.div_ceil(4))?;
+        let crop4 = (x.h, x.w);
+        stop.check()?;
+        let (x, a3x, a3m) = self.act3.forward_tape(eng, x)?;
+        stop.check()?;
+        let x = self.up4.forward(eng, &x)?;
+        let x = fast::pixel_shuffle_to_planar(&x, 2)?;
+        Ok((
+            x,
+            HopSecTape {
+                act: [(a2x, a2m), (a3x, a3m)],
+                cab_t,
+                tam_t,
+                cab_out,
+                tam_out,
+                crop8,
+                crop4,
+                in_dims,
+            },
+        ))
+    }
+
+    /// `d_out` (planar `[2,H,W]` post-`denormalize_backward`) → `d(x)` on the
+    /// 144-channel input (planar): pixel_shuffle(2) → up4 → act3 → pad → tam →
+    /// pixel_shuffle(2) → conv3 → act2 → pad → cab → up2.
+    fn backward(&self, eng: &Engine, tape: &HopSecTape, d: &Tensor<f32>) -> Result<Tensor<f32>> {
+        let d = pixel_shuffle_backward(d, 2)?;
+        let d = self.up4.backward(&d, tape.crop4.0, tape.crop4.1)?;
+        let d = self.act3.backward(&d, &tape.act[1].0, &tape.act[1].1)?;
+        // crop_par(h/4) backward: pad to tam's output dims.
+        let d = zero_pad(&d, tape.tam_out.0, tape.tam_out.1)?;
+        let d = self.tam.backward(eng, &d, &tape.tam_t)?;
+        // pixel_shuffle(2) backward -> conv3's [4c] output.
+        let d = pixel_shuffle_backward(&d, 2)?;
+        let d = self.conv3.backward(&d, tape.crop8.0, tape.crop8.1)?;
+        let d = self.act2.backward(&d, &tape.act[0].0, &tape.act[0].1)?;
+        // crop_par(h/8) backward: pad to cab's output dims.
+        let d = zero_pad(&d, tape.cab_out.0, tape.cab_out.1)?;
+        let d = self.cab.backward(&d, &tape.cab_t)?;
+        self.up2.backward(&d, tape.in_dims.0, tape.in_dims.1)
+    }
+}
+
+/// `HopSecondary::backward`'s forward intermediates.
+struct HopSecTape {
+    /// `act2`/`act3`'s `(x, mask)`.
+    act: [(BTensor, BTensor); 2],
+    /// `cab`'s tape.
+    cab_t: crate::model::attention::CabTape,
+    /// `tam`'s tape.
+    tam_t: crate::model::attention::TamTape,
+    /// `cab`'s output dims before `crop_par(h/8)` (the pad target).
+    cab_out: (usize, usize),
+    /// `tam`'s output dims before `crop_par(h/4)` (the pad target).
+    tam_out: (usize, usize),
+    /// `crop_par(h/8)` output dims (`conv3` input).
+    crop8: (usize, usize),
+    /// `crop_par(h/4)` output dims (`act3`/`up4` input).
+    crop4: (usize, usize),
+    /// The 144-channel input dims (`up2` backward).
+    in_dims: (usize, usize),
 }
 
 /// `DecoderSOPSec` / `DecoderBOPSec` behind the combine block.
@@ -823,6 +907,65 @@ impl LightSecondary {
         x = self.conv4.forward(eng, &x)?;
         fast::pixel_shuffle_to_planar(&x, 8)
     }
+
+    /// [`Self::forward`] that records the intermediates its VJP needs.
+    fn forward_tape(
+        &self,
+        eng: &Engine,
+        x: &BTensor,
+        h: usize,
+        w: usize,
+        stop: &dyn Stop,
+    ) -> Result<(Tensor<f32>, LightSecTape)> {
+        let in_dims = (x.h, x.w);
+        let x = self.up.forward(eng, x)?;
+        let up_out = (x.h, x.w);
+        let x = x.crop_par(eng, h.div_ceil(8), w.div_ceil(8))?;
+        let mid = (x.h, x.w);
+        stop.check()?;
+        let (x, a2x, a2m) = self.act2.forward_tape(eng, x)?;
+        stop.check()?;
+        let x = self.conv3.forward(eng, &x)?;
+        let (x, a3x, a3m) = self.act3.forward_tape(eng, x)?;
+        stop.check()?;
+        let x = self.conv4.forward(eng, &x)?;
+        let x = fast::pixel_shuffle_to_planar(&x, 8)?;
+        Ok((
+            x,
+            LightSecTape {
+                up_out,
+                act: [(a2x, a2m), (a3x, a3m)],
+                mid,
+                in_dims,
+            },
+        ))
+    }
+
+    /// `d_out` (planar `[2,H,W]` post-`denormalize_backward`) → `d(x)` on the
+    /// 144-channel input (planar): pixel_shuffle(8) → conv4 → act3 → conv3 →
+    /// act2 → pad → up.
+    fn backward(&self, tape: &LightSecTape, d: &Tensor<f32>) -> Result<Tensor<f32>> {
+        let d = pixel_shuffle_backward(d, 8)?;
+        let d = self.conv4.backward(&d, tape.mid.0, tape.mid.1)?;
+        let d = self.act3.backward(&d, &tape.act[1].0, &tape.act[1].1)?;
+        let d = self.conv3.backward(&d, tape.mid.0, tape.mid.1)?;
+        let d = self.act2.backward(&d, &tape.act[0].0, &tape.act[0].1)?;
+        // crop_par(h/8) backward: pad to up's output dims.
+        let d = zero_pad(&d, tape.up_out.0, tape.up_out.1)?;
+        self.up.backward(&d, tape.in_dims.0, tape.in_dims.1)
+    }
+}
+
+/// `LightSecondary::backward`'s forward intermediates.
+struct LightSecTape {
+    /// `up`'s output dims before `crop_par(h/8)` (the pad target).
+    up_out: (usize, usize),
+    /// `act2`/`act3`'s `(x, mask)`.
+    act: [(BTensor, BTensor); 2],
+    /// The `(h/8, w/8)` spatial dims conv3/conv4 and the ResAu's share.
+    mid: (usize, usize),
+    /// The 144-channel input dims (`up` backward).
+    in_dims: (usize, usize),
 }
 
 impl SynthesisSecondary {
@@ -893,4 +1036,118 @@ impl SynthesisSecondary {
         denormalize(&mut x);
         Ok(x)
     }
+
+    /// [`Self::forward_with`] that records the intermediates the chroma-RDLR
+    /// VJP needs.
+    pub fn forward_tape(
+        &self,
+        eng: &Engine,
+        y_hat_luma: &BTensor,
+        y_hat_chroma: &BTensor,
+        h: usize,
+        w: usize,
+        stop: &dyn Stop,
+    ) -> Result<(Tensor<f32>, SecondaryTape)> {
+        let (lh, lw) = (
+            y_hat_luma.h.min(y_hat_chroma.h),
+            y_hat_luma.w.min(y_hat_chroma.w),
+        );
+        if y_hat_chroma.h != lh || y_hat_chroma.w != lw {
+            return Err(Error::InvalidArgument(
+                "chroma latent larger than the luma latent",
+            ));
+        }
+        let luma_crop;
+        let x = if (y_hat_luma.h, y_hat_luma.w) == (lh, lw) {
+            BTensor::cat(&[y_hat_luma, y_hat_chroma])?
+        } else {
+            luma_crop = y_hat_luma.crop(lh, lw)?;
+            BTensor::cat(&[&luma_crop, y_hat_chroma])?
+        };
+        let info = self.combine.forward(eng, &x)?;
+        drop(x);
+        stop.check()?;
+        let x = BTensor::cat(&[&info, y_hat_chroma])?;
+        drop(info);
+        let (x, tail) = match &self.tail {
+            SecondaryTail::Light(m) => {
+                let (o, t) = m.forward_tape(eng, &x, h, w, stop)?;
+                (o, SecondaryTailTape::Light(alloc::boxed::Box::new(t)))
+            }
+            SecondaryTail::Hop(m) => {
+                let (o, t) = m.forward_tape(eng, &x, h, w, stop)?;
+                (o, SecondaryTailTape::Hop(alloc::boxed::Box::new(t)))
+            }
+        };
+        let mut x = x;
+        let pre_denorm = x.clone();
+        denormalize(&mut x);
+        Ok((
+            x,
+            SecondaryTape {
+                tail,
+                combine_in: (lh, lw),
+                pre_denorm,
+            },
+        ))
+    }
+
+    /// `d_rec` (planar `[2,H,W]` on the reconstructed chroma planes) →
+    /// `d(y_hat_chroma)` (planar `[96,lh,lw]`): the reverse of
+    /// [`Self::forward`]. The luma `sup` input is `detach`ed upstream, so the
+    /// combine backward's first 160 channels are dropped; `y_hat` receives its
+    /// direct gradient plus the combine path's channels 160..256.
+    pub fn backward(
+        &self,
+        eng: &Engine,
+        tape: &SecondaryTape,
+        d_rec: &Tensor<f32>,
+    ) -> Result<Tensor<f32>> {
+        let d = denormalize_backward(d_rec, &tape.pre_denorm);
+        let d144 = match (&self.tail, &tape.tail) {
+            (SecondaryTail::Light(m), SecondaryTailTape::Light(t)) => m.backward(t, &d)?,
+            (SecondaryTail::Hop(m), SecondaryTailTape::Hop(t)) => m.backward(eng, t, &d)?,
+            _ => {
+                return Err(Error::InvalidArgument(
+                    "RDLR VJP: tape / secondary mismatch",
+                ));
+            }
+        };
+        // `cat(info[48], y_hat[96])`: the first 48 channels are the combine
+        // output's gradient, the rest is y_hat's direct gradient.
+        let plane = d144.h * d144.w;
+        let d_info = Tensor::from_vec(48, d144.h, d144.w, d144.data[..48 * plane].to_vec())?;
+        let mut d_yhat = Tensor::from_vec(96, d144.h, d144.w, d144.data[48 * plane..].to_vec())?;
+        // `combine`: cat(luma_sup[160], y_hat[96]) → info[48]. The y_hat part is
+        // channels 160..256 of the input gradient.
+        let d_in = self
+            .combine
+            .backward(&d_info, tape.combine_in.0, tape.combine_in.1)?;
+        for (o, &v) in d_yhat
+            .data
+            .iter_mut()
+            .zip(&d_in.data[160 * plane..256 * plane])
+        {
+            *o += v;
+        }
+        Ok(d_yhat)
+    }
+}
+
+/// The tail's VJP tape variant (chroma RDLR).
+enum SecondaryTailTape {
+    /// `LightSecondary`'s tape.
+    Light(alloc::boxed::Box<LightSecTape>),
+    /// `HopSecondary`'s tape.
+    Hop(alloc::boxed::Box<HopSecTape>),
+}
+
+/// `SynthesisSecondary::backward`'s forward intermediates.
+pub struct SecondaryTape {
+    /// The tail's tape.
+    tail: SecondaryTailTape,
+    /// The combine conv's input dims `(lh, lw)` — the chroma latent size.
+    combine_in: (usize, usize),
+    /// The output before `denormalize` (its clamp's backward).
+    pre_denorm: Tensor<f32>,
 }

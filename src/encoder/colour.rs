@@ -341,7 +341,7 @@ fn replicate_pad(src: &[f32], w: usize, h: usize, pw: usize, ph: usize) -> Vec<f
 
 /// `Image.to_format_(coded)`: the chroma planes at the source subsampling to the coded one.
 /// The only conversion the reference's encoder can reach is 4:4:4 down-sampling.
-fn to_coded_format(
+pub(crate) fn to_coded_format(
     u: Vec<f32>,
     v: Vec<f32>,
     sch: usize,
