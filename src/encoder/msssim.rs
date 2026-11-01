@@ -127,6 +127,10 @@ fn avg_pool2(src: &[f32], h: usize, w: usize) -> (Vec<f32>, usize, usize) {
     (out, oh, ow)
 }
 
+fn sq(p: &[f32]) -> Vec<f32> {
+    p.iter().map(|&v| v * v).collect()
+}
+
 /// `_ssim` on one channel: the per-channel SSIM and CS means over the `h - 10` by `w - 10`
 /// valid-contraction map.
 fn ssim(
@@ -137,17 +141,33 @@ fn ssim(
     w: usize,
     win: &[f32; WIN],
 ) -> Result<(f32, f32)> {
-    // The unfiltered products live at the input's dims — keep them before the first filter
-    // call shrinks `h`/`w` to the valid-contraction size.
-    let (ih, iw) = (h, w);
-    let (mu1, h, w) = gaussian_filter(eng, x, ih, iw, win);
-    let (mu2, ..) = gaussian_filter(eng, y, ih, iw, win);
-    let sq = |p: &[f32]| p.iter().map(|&v| v * v).collect::<Vec<f32>>();
+    // `gaussian_filter` returns the shrunk valid-contraction dims — keep the
+    // input dims for `sq`/`prod`, which live at `h·w` before filtering.
+    let (mu1, ..) = gaussian_filter(eng, x, h, w, win);
+    let (vx, ..) = gaussian_filter(eng, &sq(x), h, w, win);
+    ssim_combine(eng, x, (&mu1, &vx), y, h, w, win)
+}
+
+/// `ssim` given `x`'s already-computed `mu1`/`vx` (the `MsOrig` cache's per-level
+/// values) — identical math, `x`'s two filters are just not re-derived. `h`/`w`
+/// are the *input* dims (the filters shrink them to the valid contraction).
+fn ssim_combine(
+    eng: &Engine,
+    x: &[f32],
+    (mu1, vx): (&[f32], &[f32]),
+    y: &[f32],
+    h: usize,
+    w: usize,
+    win: &[f32; WIN],
+) -> Result<(f32, f32)> {
+    // `h`/`w` stay the *input* dims for the `sq`/`prod` filters — `gaussian_filter`
+    // returns the shrunk contraction size; all of `mu1`/`mu2`/`vx`/`vy`/`cxy`
+    // share it, so `n` is just `mu2.len()`.
+    let (mu2, ..) = gaussian_filter(eng, y, h, w, win);
     let prod: Vec<f32> = x.iter().zip(y).map(|(&a, &b)| a * b).collect();
-    let (vx, ..) = gaussian_filter(eng, &sq(x), ih, iw, win);
-    let (vy, ..) = gaussian_filter(eng, &sq(y), ih, iw, win);
-    let (cxy, ..) = gaussian_filter(eng, &prod, ih, iw, win);
-    let n = h * w;
+    let (vy, ..) = gaussian_filter(eng, &sq(y), h, w, win);
+    let (cxy, ..) = gaussian_filter(eng, &prod, h, w, win);
+    let n = mu2.len();
     if n == 0 {
         return Err(Error::InvalidArgument("MS-SSIM: empty plane"));
     }
@@ -206,6 +226,85 @@ pub fn ms_ssim(eng: &Engine, x: &Tensor<f32>, y: &Tensor<f32>) -> Result<f32> {
         }
     }
     // `torch.prod(mcs_and_ssim ** weights)`: pow per level, then the product in level order.
+    let mut ms = 1.0f32;
+    for (i, &v) in mcs.iter().enumerate() {
+        ms *= v.powf(WEIGHTS[i]);
+    }
+    Ok(ms * ssim_last.powf(WEIGHTS[4]))
+}
+
+/// `ms_ssim`'s `x` side across the five levels, precomputed once — the raw
+/// level inputs (`x`, needed for the `x·y` cross-term filter), `mu1` and `vx`
+/// (`gaussian_filter(x)` / `gaussian_filter(x²)`), and the level dims. The RDLR
+/// optimiser evaluates `ms_ssim(rec, original)` once per iteration with `x =
+/// original` fixed, so this skips its half of the filter and pooling work.
+pub struct MsOrig {
+    x: Vec<Vec<f32>>,
+    mu1: Vec<Vec<f32>>,
+    vx: Vec<Vec<f32>>,
+    dims: Vec<(usize, usize)>,
+}
+
+/// The `x = original` side of `ms_ssim` over all five levels — see [`MsOrig`].
+pub fn ms_ssim_precompute_orig(eng: &Engine, x: &Tensor<f32>) -> Result<MsOrig> {
+    if x.c != 1 {
+        return Err(Error::InvalidArgument("MS-SSIM: one-channel plane"));
+    }
+    if x.h.min(x.w) <= (WIN - 1) * 16 {
+        return Err(Error::InvalidArgument(
+            "MS-SSIM: side below the 5-level minimum of 161",
+        ));
+    }
+    let win = gaussian_window();
+    let (mut xb, mut h, mut w) = (x.data.clone(), x.h, x.w);
+    let mut out = MsOrig {
+        x: Vec::new(),
+        mu1: Vec::new(),
+        vx: Vec::new(),
+        dims: Vec::new(),
+    };
+    for i in 0..WEIGHTS.len() {
+        out.x.push(xb.clone());
+        out.dims.push((h, w));
+        out.mu1.push(gaussian_filter(eng, &xb, h, w, &win).0);
+        out.vx.push(gaussian_filter(eng, &sq(&xb), h, w, &win).0);
+        if i + 1 < WEIGHTS.len() {
+            (xb, h, w) = avg_pool2(&xb, h, w);
+        }
+    }
+    Ok(out)
+}
+
+/// `ms_ssim(orig, y)` where `orig` holds `x`'s per-level side from
+/// [`ms_ssim_precompute_orig`] — identical result, `x`'s filters and pools
+/// skipped. `y` must match `orig`'s plane size.
+pub fn ms_ssim_with_orig(eng: &Engine, orig: &MsOrig, y: &Tensor<f32>) -> Result<f32> {
+    if y.c != 1 || orig.dims[0] != (y.h, y.w) {
+        return Err(Error::InvalidArgument(
+            "MS-SSIM: one-channel plane matching the cached original",
+        ));
+    }
+    let win = gaussian_window();
+    let (mut yb, mut h, mut w) = (y.data.clone(), y.h, y.w);
+    let mut mcs = [0.0f32; 4];
+    let mut ssim_last = 0.0f32;
+    for i in 0..WEIGHTS.len() {
+        let (spc, cs) = ssim_combine(
+            eng,
+            &orig.x[i],
+            (&orig.mu1[i], &orig.vx[i]),
+            &yb,
+            h,
+            w,
+            &win,
+        )?;
+        if i + 1 == WEIGHTS.len() {
+            ssim_last = relu(spc);
+        } else {
+            mcs[i] = relu(cs);
+            (yb, h, w) = avg_pool2(&yb, h, w);
+        }
+    }
     let mut ms = 1.0f32;
     for (i, &v) in mcs.iter().enumerate() {
         ms *= v.powf(WEIGHTS[i]);
@@ -547,6 +646,21 @@ mod tests {
         let eng = Engine::new();
         let a = plane(200, 224, |y, x| (((x * 7 + y * 13) % 251) as f32) / 255.0);
         assert_eq!(ms_ssim(&eng, &a, &a).unwrap(), 1.0);
+    }
+
+    /// `ms_ssim_with_orig(precompute(x), y)` caches `x`'s side of the cascade but
+    /// must return `ms_ssim(x, y)` exactly — same filters, same math.
+    #[test]
+    fn precomputed_orig_matches_full() {
+        let eng = Engine::new();
+        let x = plane(200, 224, |y, x| (((x * 37 + y * 91) % 251) as f32) / 251.0);
+        let y = plane(200, 224, |y, x| {
+            (((x * 53 + y * 17 + 11) % 241) as f32) / 241.0
+        });
+        let orig = ms_ssim_precompute_orig(&eng, &x).unwrap();
+        let got = ms_ssim_with_orig(&eng, &orig, &y).unwrap();
+        let want = ms_ssim(&eng, &x, &y).unwrap();
+        assert_eq!(got.to_bits(), want.to_bits(), "{got} vs {want}");
     }
 
     /// `avg_pool2d(x, 2, padding = [h % 2, w % 2])` on an odd-sized plane: the

@@ -91,6 +91,7 @@ pub(crate) fn rate_point_y(
     original: &Tensor<f32>,
     area: Area,
     pixels: f64,
+    orig_ms: Option<&msssim::MsOrig>,
     stop: &dyn enough::Stop,
 ) -> Result<RatePoint> {
     // `_compress_ar_scale(y, decisions)`: residual quantisation per region. The
@@ -146,7 +147,7 @@ pub(crate) fn rate_point_y(
         original.w,
         stop,
     )?;
-    let (psnr, msssim) = distortion(eng, &rec, original, area)?;
+    let (psnr, msssim) = distortion(eng, &rec, original, area, orig_ms)?;
 
     let z_bits = lh.z_bits(z_hat);
     let bpp = (z_bits + rate_y) / pixels;
@@ -405,10 +406,26 @@ pub(crate) fn optimize_y(
     let mut lr = lr0;
     let mut best = leaf.clone();
     let mut best_loss = f64::INFINITY;
+    // `ms_ssim`'s `x = original` side is the same every iteration — compute it once.
+    let orig_ms = orig_ms(eng, original, area)?;
     for _ in 0..num_ite {
         let rp = rate_point_y(
-            eng, hdr, model, synthesis, lh, &leaf, z_hat, scale_log, mask, q, num_chs, original,
-            area, pixels, stop,
+            eng,
+            hdr,
+            model,
+            synthesis,
+            lh,
+            &leaf,
+            z_hat,
+            scale_log,
+            mask,
+            q,
+            num_chs,
+            original,
+            area,
+            pixels,
+            Some(&orig_ms),
+            stop,
         )?;
         let up = loss_upstream(&rp, refs.0, refs.1, refs.2, slope_psnr, slope_msssim, ratio);
         let d_y = backward(
@@ -510,7 +527,7 @@ pub(crate) fn luma(
     let refs = {
         let r = rate_point_y(
             eng, hdr, model, &synthesis, lh, latent, z_hat, scale_log, mask, q, num_chs, original,
-            area, pixels, stop,
+            area, pixels, None, stop,
         )?;
         (r.bpp, r.psnr, r.msssim)
     };
@@ -630,6 +647,20 @@ pub(crate) fn rate_vjp(
 // matching the forward path's op-order/FMA policy; `math::` kernels reused
 // where a forward op already has a fixed implementation.
 
+/// `distortion`'s scaled `x = original` crop as an [`MsOrig`] — `ms_ssim`'s
+/// `x` side is fixed across `optimize_y`'s iterations, so it is precomputed once.
+fn orig_ms(eng: &Engine, original: &Tensor<f32>, area: Area) -> Result<msssim::MsOrig> {
+    const INV: f32 = 1.0 / 255.0;
+    let (ah, aw) = (area.height, area.width);
+    let mut a = Vec::with_capacity(ah * aw);
+    for row in 0..ah {
+        for x in 0..aw {
+            a.push(original.plane(0)[(area.y + row) * original.w + area.x + x] * INV);
+        }
+    }
+    msssim::ms_ssim_precompute_orig(eng, &Tensor::from_vec(1, ah, aw, a)?)
+}
+
 /// `calc_distortion_loss` for the luma tile: `mean((a-b)²)` over `area` (+1e-10),
 /// `ms_ssim(a, b, data_range = 255)`.
 fn distortion(
@@ -637,29 +668,34 @@ fn distortion(
     rec: &Tensor<f32>,
     original: &Tensor<f32>,
     area: Area,
+    orig_ms: Option<&msssim::MsOrig>,
 ) -> Result<(f64, f64)> {
     // MS-SSIM's `data_range = 255` is `data_range = 1` on inputs scaled by 1/255
     // (the C1/C2 constants are the only place the range enters).
     const INV: f32 = 1.0 / 255.0;
     let (ah, aw) = (area.height, area.width);
-    let (mut a, mut b) = (Vec::with_capacity(ah * aw), Vec::with_capacity(ah * aw));
+    let (mut a, mut b) = (Vec::new(), Vec::with_capacity(ah * aw));
     let mut mse = 0.0f64;
     for row in 0..ah {
         for x in 0..aw {
             let o = original.plane(0)[(area.y + row) * original.w + area.x + x];
             let r = rec.plane(0)[(area.y + row) * rec.w + area.x + x];
-            a.push(o * INV);
+            if orig_ms.is_none() {
+                a.push(o * INV);
+            }
             b.push(r * INV);
             mse += ((o - r) as f64) * ((o - r) as f64);
         }
     }
     mse /= (ah * aw) as f64;
     let psnr = 20.0 * (255.0f64).log10() - 10.0 * (mse + 1e-10).log10();
-    let (ta, tb) = (
-        Tensor::from_vec(1, ah, aw, a)?,
-        Tensor::from_vec(1, ah, aw, b)?,
-    );
-    let msssim = crate::encoder::msssim::ms_ssim(eng, &ta, &tb)? as f64;
+    let tb = Tensor::from_vec(1, ah, aw, b)?;
+    let msssim = match orig_ms {
+        // `x = original` is fixed across the optimiser's iterations — its side
+        // of the cascade was computed once.
+        Some(orig) => msssim::ms_ssim_with_orig(eng, orig, &tb)? as f64,
+        None => msssim::ms_ssim(eng, &Tensor::from_vec(1, ah, aw, a)?, &tb)? as f64,
+    };
     Ok((psnr, msssim))
 }
 
@@ -897,6 +933,7 @@ mod oracle {
                 &original,
                 area,
                 pixels,
+                None,
                 &enough::Unstoppable,
             )
             .unwrap();
