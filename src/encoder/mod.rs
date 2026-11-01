@@ -1490,7 +1490,7 @@ impl Encoder {
         let out = stage!(
             "compress",
             compress_regions(
-                eng, hdr, ccs, model, z_hat, latent, &mask, &q, num_chs, lh, lw, stop,
+                eng, hdr, ccs, model, z_hat, latent, &mask, &q, num_chs, lh, lw, None, stop,
             )
         )?;
         let mcm::Compressed {
@@ -1712,6 +1712,7 @@ fn compress_regions<Q: mcm::Quantiser>(
     num_chs: usize,
     lh: usize,
     lw: usize,
+    psi_in: Option<&Tensor<f32>>,
     stop: &dyn enough::Stop,
 ) -> Result<mcm::Compressed> {
     let chs = model.chs;
@@ -1724,10 +1725,18 @@ fn compress_regions<Q: mcm::Quantiser>(
     let v = eng.tier.block();
     let (pic_h, pic_w) = (hdr.height as usize, hdr.width as usize);
 
-    // 1. psi per region, merged (identical to the decoder's first loop).
-    let mut psi = Tensor::<f32>::zeros(4 * chs, lh.div_ceil(2), lw.div_ceil(2))?;
+    // 1. psi per region, merged (identical to the decoder's first loop). `psi_in`
+    // is a precomputed `psi` — `z_hat` is fixed across RDLR iterations, so the
+    // hyper-decoder is skipped when the caller passes its first iteration's `psi`.
+    let mut psi = match psi_in {
+        Some(p) => p.clone(),
+        None => Tensor::<f32>::zeros(4 * chs, lh.div_ceil(2), lw.div_ceil(2))?,
+    };
     let mut psi_single = None;
     for r in 0..n {
+        if psi_in.is_some() {
+            break;
+        }
         stop.check()?;
         let (it, zt) = (img.extended[r], zg.extended[r]);
         let (th, tw, divider) = if ccs == 0 {

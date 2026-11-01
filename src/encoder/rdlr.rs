@@ -92,13 +92,15 @@ pub(crate) fn rate_point_y(
     area: Area,
     pixels: f64,
     orig_ms: Option<&msssim::MsOrig>,
+    psi_in: Option<&Tensor<f32>>,
     stop: &dyn enough::Stop,
 ) -> Result<RatePoint> {
     // `_compress_ar_scale(y, decisions)`: residual quantisation per region. The
     // straight-through step the gradient path replaces with identity lives
-    // inside (residual_q vs residual_dq).
+    // inside (residual_q vs residual_dq). `psi` is `z_hat`'s hyper-decoder output —
+    // fixed across `optimize_y`'s iterations — precomputed once by the caller.
     let out = compress_regions(
-        eng, hdr, 0, model, z_hat, y, mask, q, num_chs, y.h, y.w, stop,
+        eng, hdr, 0, model, z_hat, y, mask, q, num_chs, y.h, y.w, psi_in, stop,
     )?;
     let mcm::Compressed {
         residual_q,
@@ -409,6 +411,9 @@ pub(crate) fn optimize_y(
     let mut best_loss = f64::INFINITY;
     // `ms_ssim`'s `x = original` side is the same every iteration — compute it once.
     let orig_ms = orig_ms(eng, original, area)?;
+    // `psi` is `z_hat`'s hyper-decoder output — `z_hat` is fixed, so iter 0's
+    // `psi` serves all iterations (the hyper-decoder isn't re-run).
+    let mut psi = None;
     for _ in 0..num_ite {
         let rp = rate_point_y(
             eng,
@@ -426,8 +431,10 @@ pub(crate) fn optimize_y(
             area,
             pixels,
             Some(&orig_ms),
+            psi.as_ref(),
             stop,
         )?;
+        psi.get_or_insert_with(|| rp.psi.clone());
         let up = loss_upstream(&rp, refs.0, refs.1, refs.2, slope_psnr, slope_msssim, ratio);
         let d_y = backward(
             eng,
@@ -542,7 +549,7 @@ pub(crate) fn luma(
     let refs = {
         let r = rate_point_y(
             eng, hdr, model, &synthesis, lh, latent, z_hat, scale_log, mask, q, num_chs, original,
-            area, pixels, None, stop,
+            area, pixels, None, None, stop,
         )?;
         (r.bpp, r.psnr, r.msssim)
     };
@@ -958,6 +965,7 @@ mod oracle {
                 &original,
                 area,
                 pixels,
+                None,
                 None,
                 &enough::Unstoppable,
             )
