@@ -219,6 +219,7 @@ pub(crate) fn backward(
     original: &Tensor<f32>,
     area: Area,
     pixels: f64,
+    orig_ms: Option<&msssim::MsOrig>,
     stop: &dyn enough::Stop,
 ) -> Result<Tensor<f32>> {
     let psi_b = BTensor::from_planar(&rp.psi, eng.tier.block())?;
@@ -226,7 +227,7 @@ pub(crate) fn backward(
     let d_resi = rate_vjp(up.d_rate / pixels, y, &rp.y_hat, &rp.residual_q, scale_log);
     // d(rec) — psnr + ms-ssim (ms-ssim on the [0,1]-scaled `area` crop, as
     // `distortion` builds it).
-    let d_rec = rec_grad(eng, up, &rp.rec, original, area)?;
+    let d_rec = rec_grad(eng, up, &rp.rec, original, area, orig_ms)?;
     // d(y_hat) — synthesis backward minus the resi term's -means_hat.
     let d_yhat_synth = synthesis.backward(
         eng,
@@ -429,8 +430,22 @@ pub(crate) fn optimize_y(
         )?;
         let up = loss_upstream(&rp, refs.0, refs.1, refs.2, slope_psnr, slope_msssim, ratio);
         let d_y = backward(
-            eng, ctx, synthesis, &up, &rp, &leaf, z_hat, scale_log, mask, q, num_chs, original,
-            area, pixels, stop,
+            eng,
+            ctx,
+            synthesis,
+            &up,
+            &rp,
+            &leaf,
+            z_hat,
+            scale_log,
+            mask,
+            q,
+            num_chs,
+            original,
+            area,
+            pixels,
+            Some(&orig_ms),
+            stop,
         )?;
         for (i, (&g, acc)) in d_y.data.iter().zip(&mut sum_sq).enumerate() {
             *acc += g * g;
@@ -569,6 +584,7 @@ pub(crate) fn rec_grad(
     rec: &Tensor<f32>,
     original: &Tensor<f32>,
     area: Area,
+    orig_ms: Option<&msssim::MsOrig>,
 ) -> Result<Tensor<f32>> {
     let (dx, _dy) = {
         const INV: f32 = 1.0 / 255.0;
@@ -582,13 +598,22 @@ pub(crate) fn rec_grad(
         }
         // `ms_ssim` runs on 1/255-scaled inputs, so `dx` is d/d(rec/255) — the
         // rec-domain gradient is smaller by a further 1/255: fold that into the
-        // upstream scalar.
-        msssim::ms_ssim_vjp(
-            eng,
-            &Tensor::from_vec(1, ah, aw, b)?,
-            &Tensor::from_vec(1, ah, aw, a)?,
-            up.d_msssim as f32 * INV,
-        )?
+        // upstream scalar. `y = original` is fixed across iterations — its side
+        // is in `orig_ms` (`x = rec` is `ms_ssim_vjp`'s first arg here).
+        match orig_ms {
+            Some(orig) => msssim::ms_ssim_vjp_with_orig(
+                eng,
+                orig,
+                &Tensor::from_vec(1, ah, aw, b)?,
+                up.d_msssim as f32 * INV,
+            )?,
+            None => msssim::ms_ssim_vjp(
+                eng,
+                &Tensor::from_vec(1, ah, aw, b)?,
+                &Tensor::from_vec(1, ah, aw, a)?,
+                up.d_msssim as f32 * INV,
+            )?,
+        }
     };
     let mut d_rec = Tensor::<f32>::zeros(1, rec.h, rec.w)?;
     for row in 0..area.height {
@@ -1070,6 +1095,7 @@ mod oracle {
                 &original,
                 area,
                 pixels,
+                None,
                 &enough::Unstoppable,
             )
             .unwrap();
@@ -1333,7 +1359,7 @@ mod oracle {
                         "pre_denorm/ps",
                     );
                 }
-                let my_dr = rec_grad(eng, &up, &rp.rec, &original, area).unwrap();
+                let my_dr = rec_grad(eng, &up, &rp.rec, &original, area, None).unwrap();
                 let (mut s_xy, mut s_xx, mut s_yy) = (0.0f64, 0.0f64, 0.0f64);
                 for k in 0..my_dr.data.len() {
                     let (a, b) = (my_dr.data[k] as f64, want_dr.data[k] as f64);
@@ -1373,8 +1399,8 @@ mod oracle {
                         d_rate: 0.0,
                         loss: 0.0,
                     };
-                    let mg = rec_grad(eng, &u(1.0, 0.0), &rp.rec, &original, area).unwrap();
-                    let pg = rec_grad(eng, &u(0.0, 1.0), &rp.rec, &original, area).unwrap();
+                    let mg = rec_grad(eng, &u(1.0, 0.0), &rp.rec, &original, area, None).unwrap();
+                    let pg = rec_grad(eng, &u(0.0, 1.0), &rp.rec, &original, area, None).unwrap();
                     let (mut mm, mut pp, mut mp, mut mw, mut pw) =
                         (0.0f64, 0.0f64, 0.0f64, 0.0f64, 0.0f64);
                     for k in 0..mg.data.len() {

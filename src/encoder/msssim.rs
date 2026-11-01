@@ -413,21 +413,52 @@ pub fn ms_ssim_vjp(
     y: &Tensor<f32>,
     d: f32,
 ) -> Result<(Tensor<f32>, Tensor<f32>)> {
+    ms_ssim_vjp_impl(eng, None, x, y, d)
+}
+
+/// [`ms_ssim_vjp`] with `y = original`'s side precomputed ([`MsOrig`]) — the
+/// `yb`/`mu2`/`vy` cascade is not re-derived; identical gradient. `x` is the
+/// reconstructed picture (`rec`) the caller wants `d_x` on.
+pub fn ms_ssim_vjp_with_orig(
+    eng: &Engine,
+    orig: &MsOrig,
+    x: &Tensor<f32>,
+    d: f32,
+) -> Result<(Tensor<f32>, Tensor<f32>)> {
+    let y = Tensor::from_vec(1, orig.dims[0].0, orig.dims[0].1, orig.x[0].clone())?;
+    ms_ssim_vjp_impl(eng, Some(orig), x, &y, d)
+}
+
+fn ms_ssim_vjp_impl(
+    eng: &Engine,
+    orig: Option<&MsOrig>,
+    x: &Tensor<f32>,
+    y: &Tensor<f32>,
+    d: f32,
+) -> Result<(Tensor<f32>, Tensor<f32>)> {
     let win = gaussian_window();
-    // Forward: per-level intermediates.
+    // Forward: per-level intermediates. `y = original`'s `yb`/`mu2`/`vy` come
+    // from `orig` when the caller precomputed them (fixed across iterations).
     let (mut h, mut w) = (x.h, x.w);
     let (mut xb, mut yb) = (x.data.clone(), y.data.clone());
     let mut levels: Vec<SsimLevel> = Vec::with_capacity(WEIGHTS.len());
     for i in 0..WEIGHTS.len() {
         let (ih, iw) = (h, w);
-        let sq = |p: &[f32]| p.iter().map(|&v| v * v).collect::<Vec<f32>>();
+        let (mu2, vy);
+        if let Some(o) = orig {
+            (h, w) = o.dims[i];
+            yb = o.x[i].clone();
+            mu2 = o.mu1[i].clone();
+            vy = o.vx[i].clone();
+        } else {
+            mu2 = gaussian_filter(eng, &yb, ih, iw, &win).0;
+            vy = gaussian_filter(eng, &sq(&yb), ih, iw, &win).0;
+        }
         let prod: Vec<f32> = xb.iter().zip(&yb).map(|(&a, &b)| a * b).collect();
-        let (mu1, h2, w2) = gaussian_filter(eng, &xb, ih, iw, &win);
-        let (mu2, ..) = gaussian_filter(eng, &yb, ih, iw, &win);
+        let (mu1, ..) = gaussian_filter(eng, &xb, ih, iw, &win);
         let (vx, ..) = gaussian_filter(eng, &sq(&xb), ih, iw, &win);
-        let (vy, ..) = gaussian_filter(eng, &sq(&yb), ih, iw, &win);
         let (cxy, ..) = gaussian_filter(eng, &prod, ih, iw, &win);
-        let n = h2 * w2;
+        let n = mu1.len();
         let (mut ssum, mut csum) = (0.0f64, 0.0f64);
         for k in 0..n {
             let (m1, m2) = (mu1[k], mu2[k]);
@@ -661,6 +692,21 @@ mod tests {
         let got = ms_ssim_with_orig(&eng, &orig, &y).unwrap();
         let want = ms_ssim(&eng, &x, &y).unwrap();
         assert_eq!(got.to_bits(), want.to_bits(), "{got} vs {want}");
+    }
+
+    /// `ms_ssim_vjp_with_orig(precompute(y), x)` must return `ms_ssim_vjp(x, y)`
+    /// exactly — the cached `yb`/`mu2`/`vy` are identical to the recomputed side.
+    #[test]
+    fn vjp_with_orig_matches_full() {
+        let eng = Engine::new();
+        let x = plane(200, 224, |y, x| (((x * 37 + y * 91) % 251) as f32) / 251.0);
+        let y = plane(200, 224, |y, x| {
+            (((x * 53 + y * 17 + 11) % 241) as f32) / 241.0
+        });
+        let orig = ms_ssim_precompute_orig(&eng, &y).unwrap();
+        let (gx, _gy) = ms_ssim_vjp_with_orig(&eng, &orig, &x, 1.0).unwrap();
+        let (wx, _wy) = ms_ssim_vjp(&eng, &x, &y, 1.0).unwrap();
+        assert_eq!(gx.data, wx.data);
     }
 
     /// `avg_pool2d(x, 2, padding = [h % 2, w % 2])` on an odd-sized plane: the
