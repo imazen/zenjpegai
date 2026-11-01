@@ -5,6 +5,24 @@ Port of the JPEG AI reference software ("VM") to safe Rust. Goal set by the user
 magetypes and forbidunsafe, but make it faster".
 
 Read `PORTING.md` first: it is the honest status table (module → upstream source → parity gate).
+Read `WORKPLAN.md` next: it is the durable work queue (what is done, what is next).
+
+## Never stop (the single most important rule here)
+
+- The goal is open-ended by design: complete the port, the dead paths and the speed work. Do not
+  end a turn while a `WORKPLAN.md` item remains. A turn ends only on a verified blocker needing
+  the user, or when the queue is empty — and then say so in one line.
+- A finished chunk is not a checkpoint. Commit, push, update `WORKPLAN.md`, start the next item.
+  Status text belongs inside a message that is already doing the next thing, never as the turn's
+  last action.
+- "Dead" or "crashes upstream" means "incomplete research: port it correctly", never "documented,
+  won't port". `feature_clipping` and `qp_map_type` 0/1/2 are precedent — both crashed upstream,
+  both are now ported and verified.
+- Context, token, budget and compaction warnings are harness business, not a reason to wind down,
+  summarize, or "leave it for a later turn". On a context warning mid-work: write the durable
+  record to `WORKPLAN.md`, commit, push, and keep working in the same turn.
+- `WORKPLAN.md`, not memory, is what survives compaction. Keep it current (mark done in place,
+  add newly discovered gaps) and re-read it whenever the task is unclear.
 
 ## Hard rules for this repo
 
