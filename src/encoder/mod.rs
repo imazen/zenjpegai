@@ -1488,6 +1488,7 @@ impl Encoder {
             residual,
             cube_flag,
             psi,
+            ..
         } = out;
 
         // 6. `encoder_skip_and_cubeflag_for_tiles`: the final mask is the threshold mask
@@ -1752,6 +1753,7 @@ fn compress_regions<Q: mcm::Quantiser>(
     // 2. the residual per region, merged by cores.
     let mut residual_q = Tensor::<i16>::zeros(chs, lh, lw)?;
     let mut residual = Tensor::<f32>::zeros(chs, lh, lw)?;
+    let mut y_hat = Tensor::<f32>::zeros(chs, lh, lw)?;
     let (cube_h, cube_w) = (
         lh.div_ceil(2).div_ceil(mcm::CUBE_SIZE),
         lw.div_ceil(2).div_ceil(mcm::CUBE_SIZE),
@@ -1795,6 +1797,7 @@ fn compress_regions<Q: mcm::Quantiser>(
         };
         assign(&mut residual_q, core, &out.residual_q, offset);
         assign(&mut residual, core, &out.residual, offset);
+        assign(&mut y_hat, core, &out.y_hat, offset);
         // The cube flags of a region are merged whole, at the latent area downscaled by 16.
         let (rh, rw) = (
             lt.height.div_ceil(2).div_ceil(mcm::CUBE_SIZE),
@@ -1815,6 +1818,7 @@ fn compress_regions<Q: mcm::Quantiser>(
         residual,
         cube_flag,
         psi,
+        y_hat,
     })
 }
 
@@ -1943,18 +1947,21 @@ fn compress_context_free<Q: mcm::Quantiser>(
     // Pass 2: with the cubes that must not be skipped. Uncoded channels stay zero
     // (`resi_q_full[:, num_chs:] = 0` / `resi_dq_full[:, num_chs:] = 0`).
     let mask2 = skip_mask_or_cubes(mask, &cube_flag, cube_h, cube_w);
+    let mut y_hat = Tensor::<f32>::zeros(c, h, w)?;
     for ch in 0..num_chs.min(c) {
         for i in 0..h * w {
             let d = y.plane(ch)[i] - mean.plane(ch)[i];
             let (sym, dq) = q.quantise(ch, i, d, mask2.plane(ch)[i]);
             residual_q.plane_mut(ch)[i] = sym;
             residual.plane_mut(ch)[i] = dq;
+            y_hat.plane_mut(ch)[i] = mean.plane(ch)[i] + dq;
         }
     }
     Ok(mcm::Compressed {
         residual_q,
         residual,
         cube_flag,
+        y_hat,
         psi: Tensor::<f32>::zeros(1, 1, 1)?,
     })
 }

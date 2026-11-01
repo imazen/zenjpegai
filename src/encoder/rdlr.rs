@@ -101,15 +101,10 @@ pub(crate) fn rate_point_y(
     )?;
     let mcm::Compressed {
         residual_q,
-        residual,
         psi,
+        y_hat,
         ..
     } = out;
-    let ctx = model.context.as_ref().ok_or(Error::InvalidArgument(
-        "RDLR: luma component has no context model",
-    ))?;
-    let psi_b = BTensor::from_planar(&psi, eng.tier.block())?;
-    let y_hat = ctx.decompress_with(eng, &residual, &psi_b, stop)?;
 
     // `means_hat = y_hat - resi_hat`; `resi = y - means_hat = y - y_hat + resi_q`
     // (the residual's quantiser *index* — mixed units is the reference's own

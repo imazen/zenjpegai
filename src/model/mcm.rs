@@ -306,6 +306,11 @@ pub struct Compressed {
     /// The merged hyper-decoder output the quantisation was measured against (diagnostics only;
     /// a one-sample placeholder where the caller does not fill it in).
     pub psi: Tensor<f32>,
+    /// The reconstructed latent `mu + resi_dq` — identical to what
+    /// [`Mcm::decompress_with`] re-derives, so callers that only need `y_hat`
+    /// can skip the second context-model pass. A one-sample placeholder where
+    /// the caller does not fill it in.
+    pub y_hat: Tensor<f32>,
 }
 
 /// Maximum of `err` over each `CUBE_SIZE x CUBE_SIZE` block of every channel, thresholded:
@@ -375,6 +380,10 @@ impl ContextModel {
         let v = psi.v;
         let mut residual_q = Tensor::<i16>::zeros(c, h, w)?;
         let mut residual = Tensor::<f32>::zeros(c, h, w)?;
+        // `stage` becomes `mu + resi_dq` per phase — the reconstruction
+        // `decompress_with` re-derives. Scatter it to `y_hat` so the caller can
+        // skip that second context-model pass (bit-identical values).
+        let mut y_hat = Tensor::<f32>::zeros(c, h, w)?;
         let (cube_h, cube_w) = (hh.div_ceil(CUBE_SIZE), hw.div_ceil(CUBE_SIZE));
         let mut cube_flag = alloc::vec![true; 4 * cube_h * cube_w];
         let mut err = Tensor::<f32>::zeros(c, hh, hw)?;
@@ -452,6 +461,7 @@ impl ContextModel {
                         if inside {
                             residual_q.data[(ch * h + sy) * w + sx] = sym;
                             residual.data[(ch * h + sy) * w + sx] = dq;
+                            y_hat.data[(ch * h + sy) * w + sx] = *val;
                         }
                     }
                 }
@@ -466,6 +476,7 @@ impl ContextModel {
             residual,
             cube_flag,
             psi: Tensor::<f32>::zeros(1, 1, 1)?,
+            y_hat,
         })
     }
 
