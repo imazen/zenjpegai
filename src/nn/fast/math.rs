@@ -18,7 +18,10 @@ use alloc::vec::Vec;
 
 use archmage::prelude::*;
 
-use super::{Engine, for_each_row};
+use magetypes::simd::backends::{F32x8Convert, F32x16Convert};
+use magetypes::simd::generic::{f32x8, f32x16, i32x8, i32x16};
+
+use super::{Engine, Tier, for_each_row};
 use crate::error::{Error, Result};
 use crate::tensor::Tensor;
 
@@ -58,7 +61,9 @@ pub fn exp(x: f32) -> f32 {
     y * scale
 }
 
-#[autoversion]
+// Scalar `sigmoid`/`elu_gate` per element — the Scalar-tier impl and the
+// sub-lane tail of the `f32x` slice kernels below. Same `exp` per element
+// so the tail is bit-identical to the vectorised lanes.
 fn sigmoid_slice(data: &mut [f32]) {
     for v in data {
         *v = 1.0 / (1.0 + exp(-*v));
@@ -66,12 +71,149 @@ fn sigmoid_slice(data: &mut [f32]) {
 }
 
 /// `elu(a) * b` into `a`: `a > 0 ? a : exp(a) - 1`, times `b`.
-#[autoversion]
 fn elu_gate_slice(a: &mut [f32], b: &[f32]) {
     for (x, &g) in a.iter_mut().zip(b) {
         let e = exp(*x) - 1.0;
         let elu = if *x > 0.0 { *x } else { e };
         *x = elu * g;
+    }
+}
+
+/// Lane-vectorised `sigmoid`/`elu_gate` kernels. Each is bit-identical to the
+/// scalar [`exp`] / [`sigmoid_slice`] / [`elu_gate_slice`] on every element:
+/// the Cephes `exp` is straight IEEE ops in the same order — *unfused* `*`/`+`
+/// (Rust does not auto-contract `a*b+c` to FMA), `floor`, `to_i32`, an integer
+/// `2^n` scale and `blend` selects — so every lane is per-lane deterministic.
+/// The sub-lane tail falls back to the scalar slices, which are bit-identical
+/// for the same reason. Modelled on `zenmetrics-math`'s `expf_libm_lanes!`.
+macro_rules! exp_lanes {
+    ($cexp:ident, $sig:ident, $elu:ident, $F:ident, $I:ident, $conv:ident) => {
+        /// Cephes `exp` on one `$F` lane vector, bit-identical to [`exp`].
+        #[inline(always)]
+        fn $cexp<T: $conv>(t: T, x: $F<T>) -> $F<T> {
+            let s = $F::<T>::splat_t;
+            let x = x.max(s(t, -87.0)).min(s(t, 88.0));
+            let n = (x * s(t, LOG2E) + s(t, 0.5)).floor();
+            let r = x - n * s(t, LN2_HI);
+            let r = r - n * s(t, LN2_LO);
+            let mut p = s(t, P[0]);
+            p = p * r + s(t, P[1]);
+            p = p * r + s(t, P[2]);
+            p = p * r + s(t, P[3]);
+            p = p * r + s(t, P[4]);
+            p = p * r + s(t, P[5]);
+            let y = p * (r * r) + r + s(t, 1.0);
+            // `2^n`, `n` integral in [-126,127]: `(n + 127) << 23`, reinterpreted.
+            let n_i = n.to_i32();
+            let scale = (n_i + $I::<T>::splat_t(t, 127))
+                .shl_const::<23>()
+                .bitcast_to_f32();
+            y * scale
+        }
+
+        /// `data[i] = 1 / (1 + exp(-data[i]))` — lane chunks + scalar tail.
+        #[inline(always)]
+        fn $sig<T: $conv>(t: T, data: &mut [f32]) {
+            let s = $F::<T>::splat_t;
+            let (chunks, tail) = $F::<T>::partition_slice_mut_t(t, data);
+            for c in chunks.iter_mut() {
+                let x = $F::<T>::load_t(t, c);
+                let e = $cexp(t, s(t, 0.0) - x);
+                (s(t, 1.0) / (s(t, 1.0) + e)).store(c);
+            }
+            sigmoid_slice(tail);
+        }
+
+        /// `a[i] = (a[i] > 0 ? a[i] : exp(a[i]) - 1) * b[i]` — lanes + scalar tail.
+        #[inline(always)]
+        fn $elu<T: $conv>(t: T, a: &mut [f32], b: &[f32]) {
+            let s = $F::<T>::splat_t;
+            let (ac, at) = $F::<T>::partition_slice_mut_t(t, a);
+            let (bc, bt) = $F::<T>::partition_slice_t(t, b);
+            for (x, g) in ac.iter_mut().zip(bc.iter()) {
+                let xv = $F::<T>::load_t(t, x);
+                let e = $cexp(t, xv) - s(t, 1.0);
+                let elu = $F::<T>::blend(xv.simd_gt(s(t, 0.0)), xv, e);
+                (elu * $F::<T>::load_t(t, g)).store(x);
+            }
+            elu_gate_slice(at, bt);
+        }
+    };
+}
+
+exp_lanes!(cephes_exp8, sigmoid8, elu8, f32x8, i32x8, F32x8Convert);
+exp_lanes!(
+    cephes_exp16,
+    sigmoid16,
+    elu16,
+    f32x16,
+    i32x16,
+    F32x16Convert
+);
+
+#[arcane]
+fn sigmoid_v4(t: X64V4Token, data: &mut [f32]) {
+    sigmoid16::<X64V4Token>(t, data)
+}
+#[arcane]
+fn sigmoid_v3(t: X64V3Token, data: &mut [f32]) {
+    sigmoid8::<X64V3Token>(t, data)
+}
+#[arcane]
+fn sigmoid_neon(t: NeonToken, data: &mut [f32]) {
+    sigmoid8::<NeonToken>(t, data)
+}
+#[cfg(target_arch = "wasm32")]
+#[arcane]
+fn sigmoid_wasm(t: Wasm128Token, data: &mut [f32]) {
+    sigmoid8::<Wasm128Token>(t, data)
+}
+
+#[arcane]
+fn elu_v4(t: X64V4Token, a: &mut [f32], b: &[f32]) {
+    elu16::<X64V4Token>(t, a, b)
+}
+#[arcane]
+fn elu_v3(t: X64V3Token, a: &mut [f32], b: &[f32]) {
+    elu8::<X64V3Token>(t, a, b)
+}
+#[arcane]
+fn elu_neon(t: NeonToken, a: &mut [f32], b: &[f32]) {
+    elu8::<NeonToken>(t, a, b)
+}
+#[cfg(target_arch = "wasm32")]
+#[arcane]
+fn elu_wasm(t: Wasm128Token, a: &mut [f32], b: &[f32]) {
+    elu8::<Wasm128Token>(t, a, b)
+}
+
+/// `sigmoid` slice on `tier`'s lanes — bit-identical to scalar on every element.
+fn run_sigmoid_slice(tier: Tier, data: &mut [f32]) {
+    match tier {
+        #[cfg(all(target_arch = "x86_64", feature = "avx512"))]
+        Tier::V4(t) => sigmoid_v4(t, data),
+        #[cfg(target_arch = "x86_64")]
+        Tier::V3(t) => sigmoid_v3(t, data),
+        #[cfg(target_arch = "aarch64")]
+        Tier::Neon(t) => sigmoid_neon(t, data),
+        #[cfg(target_arch = "wasm32")]
+        Tier::Wasm128(t) => sigmoid_wasm(t, data),
+        Tier::Scalar => sigmoid_slice(data),
+    }
+}
+
+/// `elu_gate` slice on `tier`'s lanes — bit-identical to scalar on every element.
+fn run_elu_gate_slice(tier: Tier, a: &mut [f32], b: &[f32]) {
+    match tier {
+        #[cfg(all(target_arch = "x86_64", feature = "avx512"))]
+        Tier::V4(t) => elu_v4(t, a, b),
+        #[cfg(target_arch = "x86_64")]
+        Tier::V3(t) => elu_v3(t, a, b),
+        #[cfg(target_arch = "aarch64")]
+        Tier::Neon(t) => elu_neon(t, a, b),
+        #[cfg(target_arch = "wasm32")]
+        Tier::Wasm128(t) => elu_wasm(t, a, b),
+        Tier::Scalar => elu_gate_slice(a, b),
     }
 }
 
@@ -86,7 +228,7 @@ const CHUNK: usize = 1 << 14;
 
 /// `1 / (1 + exp(-x))` in place.
 pub fn sigmoid(eng: &Engine, data: &mut [f32]) {
-    for_each_row(eng, data, CHUNK, |_, row| sigmoid_slice(row));
+    for_each_row(eng, data, CHUNK, |_, row| run_sigmoid_slice(eng.tier, row));
 }
 
 /// `a = elu(a) * b`.
@@ -96,7 +238,7 @@ pub fn elu_gate(eng: &Engine, a: &mut [f32], b: &[f32]) -> Result<()> {
     }
     for_each_row(eng, a, CHUNK, |i, row| {
         let n = row.len();
-        elu_gate_slice(row, &b[i * CHUNK..][..n]);
+        run_elu_gate_slice(eng.tier, row, &b[i * CHUNK..][..n]);
     });
     Ok(())
 }

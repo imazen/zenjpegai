@@ -111,7 +111,17 @@ construction, and say so in `PORTING.md`.
   BT.709 for raw latents (correct — raw latents carry no source metadata). `gpu_encode` RGB
   path unchanged (0-diff). Verified compiling + no regression; a Yuv-source GPU-encode parity
   test is a reasonable follow-up.
-- **D2 SIMD `exp` — spec for next pass (ops verified available, not yet implemented):** the
+- **D2 SIMD `exp` — IMPLEMENTED + verified bit-identical:** the scalar Cephes `exp` was called
+  per-element inside `sigmoid_slice`/`elu_gate_slice`; `#[autoversion]` vectorised the loop but
+  not the `exp` (its `floor`/`to_i32`/int-scale). Now an `exp_lanes!` macro generates the exact
+  Cephes algorithm on `f32x8`/`f32x16` lanes (unfused `mul`+`add` — Rust doesn't auto-contract;
+  `pow2` via `to_i32`→`+127`→`shl<23>`→`bitcast_to_f32`, token `self.1`; exact `/` not `recip`;
+  `blend` for `x>0`), dispatched via `#[arcane]` tier fns like `conv_row_*` on `eng.tier`, scalar
+  `sigmoid_slice`/`elu_gate_slice` kept for `Tier::Scalar` + sub-lane tails. Modelled on
+  `zenmetrics-math`'s `expf_libm_lanes!` (`F32x8Convert`/`F32x16Convert`). Verified:
+  `tiers_and_threads_agree_bit_for_bit` + `analysis_tiers_agree_bit_for_bit` both pass —
+  bit-identical across V4/V3/Neon/Wasm/Scalar.
+- **[spec retained] original D2 SIMD `exp` spec:** the
   scalar Cephes `exp` (`nn/fast/math.rs:44`) is called per-element inside the `#[autoversion]`
   `sigmoid_slice`/`elu_gate_slice` loops — autoversion vectorizes the loop but can't vectorize
   the scalar `exp` (its `floor`/`from_bits`/int-cast), so the ELU/sigmoid exp stays scalar.
