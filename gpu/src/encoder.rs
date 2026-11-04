@@ -12,10 +12,18 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use zenjpegai::encoder::{EncodeParams, Encoder, SourceImage, preprocess};
-use zenjpegai::header::OperatingPoint;
+use zenjpegai::encoder::{
+    EncodeParams, Encoder, HYPER_DOWNSCALE, LATENT_DOWNSCALE, SourceImage, analysis_tiles_with,
+    preprocess,
+};
+use zenjpegai::header::{LATENT_CHANNELS, OperatingPoint};
 use zenjpegai::model::ModelSource;
+use zenjpegai::model::common::Z_OFFSET;
+use zenjpegai::model::hyper_encoder::HyperEncoder;
+use zenjpegai::model::load_hyper_encoder;
+use zenjpegai::nn::fast::{BTensor, Engine};
 use zenjpegai::tensor::Tensor;
+use zenjpegai::tools::regions::Area;
 
 use crate::analysis::GpuAnalysis;
 use crate::context::GpuContext;
@@ -27,7 +35,9 @@ use crate::plan::{Graph, Plan, Pool, T};
 pub struct GpuEncoder {
     ctx: Arc<GpuContext>,
     cpu: Encoder,
+    eng: Engine,
     models: Box<dyn ModelSource + Send + Sync>,
+    hypers: Mutex<HashMap<(usize, OperatingPoint), Arc<[HyperEncoder; 2]>>>,
     analyses: Mutex<HashMap<(usize, OperatingPoint), Arc<GpuAnalysis>>>,
     pool: Arc<Mutex<Pool>>,
 }
@@ -43,7 +53,9 @@ impl GpuEncoder {
         Self {
             ctx,
             cpu,
+            eng: Engine::new(),
             models,
+            hypers: Mutex::new(HashMap::new()),
             analyses: Mutex::new(HashMap::new()),
             pool: Arc::new(Mutex::new(Pool::default())),
         }
@@ -69,6 +81,60 @@ impl GpuEncoder {
             .unwrap()
             .insert((model_id, op), a.clone());
         Ok(a)
+    }
+
+    /// The `[HyperEncoder; 2]` for `(model_id, op)`, loading on first use.
+    /// `GpuEncoder` owns its own — `Encoder`'s `hyper` is private and the
+    /// per-tile `z_hat` path needs the nets directly (they stay on the CPU;
+    /// they are small compared to the analysis transforms).
+    fn hyper(&self, model_id: usize, op: OperatingPoint) -> Result<Arc<[HyperEncoder; 2]>> {
+        if let Some(h) = self.hypers.lock().unwrap().get(&(model_id, op)) {
+            return Ok(h.clone());
+        }
+        let load = |ccs: usize| load_hyper_encoder(&*self.models, model_id, ccs, &self.eng);
+        let h: Arc<[HyperEncoder; 2]> = Arc::new([
+            load(0).map_err(GpuError::Codec)?,
+            load(1).map_err(GpuError::Codec)?,
+        ]);
+        self.hypers
+            .lock()
+            .unwrap()
+            .insert((model_id, op), h.clone());
+        Ok(h)
+    }
+
+    /// Run one analysis forward (`luma` or `chroma`) on a planar `[C, h, w]`
+    /// input tile, returning the latent as planar `[C, H, W]`. The multi-tile
+    /// path runs it per tile — one graph + submission per tile (the reference
+    /// tiles the analysis, so each tile is its own forward).
+    fn analyse_one(
+        &self,
+        input: &Tensor<f32>,
+        ccs: usize,
+        model_id: usize,
+        op: OperatingPoint,
+    ) -> Result<Tensor<f32>> {
+        let analysis = self.analysis(model_id, op)?;
+        let (h, w) = (input.h, input.w);
+        let mut g = Graph::new(&self.ctx);
+        let x = g.input(input.c, h, w)?;
+        let lat = if ccs == 0 {
+            analysis.luma(&mut g, x, h, w)?
+        } else {
+            analysis.chroma(&mut g, x, h, w)?
+        };
+        g.output(lat);
+        let plan = g.finish(&self.pool)?;
+        let norm: Vec<f32> = input.data.iter().map(|&v| (v - 127.5) / 128.0).collect();
+        plan.write(&self.ctx, x, &norm)?;
+        let mut enc = self
+            .ctx
+            .device()
+            .create_command_encoder(&Default::default());
+        plan.encode(&mut enc, None);
+        self.ctx.queue().submit([enc.finish()]);
+        let data = self.read_latent(&plan, lat)?;
+        Tensor::from_vec(lat.c, lat.h, lat.w, data).map_err(|e| GpuError::Shape(e.to_string()))
     }
 
     /// Copy `t`'s HWC4 buffer back and unpack to planar `[C, H, W]`.
@@ -106,22 +172,6 @@ impl GpuEncoder {
     /// bit-identical to `Encoder::encode`.
     pub fn encode(&self, src: impl Into<SourceImage>, params: EncodeParams) -> Result<Vec<u8>> {
         let src = src.into();
-        // The GPU analysis is whole-picture: if the encoder would split either
-        // component into more than one analysis tile, the full CPU encode —
-        // which tiles the analysis natively — is the correct path, not a
-        // diverging whole-picture GPU pass.
-        for ccs in 0..2 {
-            if Encoder::analysis_tile_grid(src.width(), src.height(), ccs, params)
-                .map_err(GpuError::Codec)?
-                .len()
-                != 1
-            {
-                return self
-                    .cpu
-                    .encode(src, params)
-                    .map_err(|e| GpuError::Codec(e.error().clone()));
-            }
-        }
         let meta = src
             .meta(params.c_ver, params.c_hor)
             .map_err(GpuError::Codec)?;
@@ -153,9 +203,7 @@ impl GpuEncoder {
                 .len()
                 != 1
             {
-                return Err(GpuError::Shape(format!(
-                    "tiled GPU analysis not implemented (ccs {ccs} is multi-tile)"
-                )));
+                return self.encode_tiled(luma, chroma, model_id, params);
             }
         }
         let analysis = self.analysis(model_id, params.op)?;
@@ -196,5 +244,104 @@ impl GpuEncoder {
             .encode_latents([&y, &uv], None, w, h, params, None)
             .map(|(stream, _)| stream)
             .map_err(|e| GpuError::Codec(e.error().clone()))
+    }
+
+    /// Per-tile encode: the reference analysis is *tiled* (`analysis_tiles`),
+    /// so each tile runs `GpuAnalysis` on its `window`ed plane, the
+    /// `HyperEncoder`s produce per-tile `z_hat`s on the CPU, and the kept
+    /// cores merge via `assign`. Produces the same `(y, z_hat)` merge the CPU
+    /// `analyse_component` does, then `encode_latents` with the real z_hats.
+    fn encode_tiled(
+        &self,
+        luma: &Tensor<f32>,
+        chroma: &Tensor<f32>,
+        model_id: usize,
+        params: EncodeParams,
+    ) -> Result<Vec<u8>> {
+        let hyper = self.hyper(model_id, params.op)?;
+        let mut parts: [Option<(Tensor<f32>, Tensor<i8>)>; 2] = [None, None];
+        for (ccs, plane) in [luma, chroma].iter().enumerate() {
+            let (ph, pw) = (plane.h, plane.w);
+            let d = LATENT_DOWNSCALE[ccs];
+            let (lh, lw) = (ph.div_ceil(d), pw.div_ceil(d));
+            let (hz, wz) = (
+                ph.div_ceil(HYPER_DOWNSCALE[ccs]),
+                pw.div_ceil(HYPER_DOWNSCALE[ccs]),
+            );
+            let chs = LATENT_CHANNELS[ccs];
+            let grid =
+                analysis_tiles_with(ccs, ph, pw, lh, lw, hz, wz, None).map_err(GpuError::Codec)?;
+            let mut yy =
+                Tensor::<f32>::zeros(chs, lh, lw).map_err(|e| GpuError::Shape(e.to_string()))?;
+            let mut zz =
+                Tensor::<i8>::zeros(chs, hz, wz).map_err(|e| GpuError::Shape(e.to_string()))?;
+            for t in &grid {
+                let tile = plane
+                    .window(t.image.x, t.image.y, t.image.width, t.image.height)
+                    .map_err(|e| GpuError::Shape(e.to_string()))?;
+                let yt = self.analyse_one(&tile, ccs, model_id, params.op)?;
+                let bt = BTensor::from_planar_par(&self.eng, &yt, self.eng.tier.block())
+                    .map_err(|e| GpuError::Shape(e.to_string()))?;
+                let zt = hyper[ccs]
+                    .forward_clip(
+                        &self.eng,
+                        &bt,
+                        t.image.height,
+                        t.image.width,
+                        d,
+                        params.experimental.clipping,
+                        &enough::Unstoppable,
+                    )
+                    .map_err(GpuError::Codec)?
+                    .to_planar()
+                    .map_err(|e| GpuError::Shape(e.to_string()))?;
+                let max = (Z_OFFSET - 1) as f32;
+                let zq = Tensor::from_vec(
+                    zt.c,
+                    zt.h,
+                    zt.w,
+                    zt.data
+                        .iter()
+                        .map(|&v| v.clamp(-(Z_OFFSET as f32), max).round_ties_even() as i8)
+                        .collect(),
+                )
+                .map_err(|e| GpuError::Shape(e.to_string()))?;
+                assign(&mut yy, t.latent_core, &yt, t.latent_core_offset);
+                assign(&mut zz, t.hyper_core, &zq, t.hyper_core_offset);
+            }
+            parts[ccs] = Some((yy, zz));
+        }
+        let (y, zy) = parts[0].take().unwrap();
+        let (uv, zuv) = parts[1].take().unwrap();
+        self.cpu
+            .encode_latents([&y, &uv], Some([&zy, &zuv]), luma.w, luma.h, params, None)
+            .map(|(stream, _)| stream)
+            .map_err(|e| GpuError::Codec(e.error().clone()))
+    }
+}
+
+/// `assign` from `encoder/mod.rs` — copy the kept core of a tile's latent
+/// into the merged latent (the parts the overlap discards are dropped).
+fn assign<T: Copy + Default>(
+    dst: &mut Tensor<T>,
+    core: Area,
+    src: &Tensor<T>,
+    (ox, oy): (usize, usize),
+) {
+    let h = core
+        .height
+        .min(src.h.saturating_sub(oy))
+        .min(dst.h.saturating_sub(core.y));
+    let w = core
+        .width
+        .min(src.w.saturating_sub(ox))
+        .min(dst.w.saturating_sub(core.x));
+    let (dw, sw) = (dst.w, src.w);
+    for c in 0..dst.c.min(src.c) {
+        for y in 0..h {
+            let s: &[T] = &src.plane(c)[(oy + y) * sw + ox..][..w];
+            let d = (core.y + y) * dw + core.x;
+            dst.plane_mut(c)[d..d + w].copy_from_slice(s);
+        }
     }
 }

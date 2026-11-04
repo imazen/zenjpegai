@@ -40,7 +40,9 @@ pub use colour::{AnalysisInput, SourceImage, SourceMeta, preprocess, preprocess_
 pub use filters::icci::{EicciConfig, EicciLoss};
 pub use limits::{EncodeLimits, estimate_encode_memory};
 pub use rate::{BDL_SEARCH_RANGE, RateEstimate, RateMatch, search_beta};
-pub use tiles::{AnalysisTile, analysis_tiles};
+pub use tiles::{
+    AnalysisTile, HYPER_DOWNSCALE, LATENT_DOWNSCALE, analysis_tiles, analysis_tiles_with,
+};
 
 use alloc::vec::Vec;
 use std::collections::HashMap;
