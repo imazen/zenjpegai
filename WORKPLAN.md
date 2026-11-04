@@ -74,9 +74,21 @@ construction, and say so in `PORTING.md`.
   non-subsampled streams stay bit-exact. The reference's `img30_base_off_c420`
   `y.psi` is byte-identical to `img30_base_off` (444) — chroma subsample must not
   touch luma — so our coded-420/subsampled decode's luma `y.psi` is wrong, not an
-  env/dump artefact. Real bug in the subsampled luma decode path (dims/stride or
-  a chroma-shaped buffer indexed into luma); surfaced when the format vectors'
-  decode dumps were populated. Everything else: `decode_ref` 42/50,
+  env/dump artefact. **Localized to the `ccs=0` entropy decode, not the psi
+  synthesis**: for `img30_base_off_c420` our `ent[0].z_hat`/`residual`/`ly.psi`
+  diverge from the 444 decode (`z_hat` nonzero 696 vs 1391, `residual` nonzero
+  7869 vs 48375, `z_sum` -610 vs -378) while `ent[0]`/`ent[1]` dims are identical
+  (`z_hat 14x9`, `residual 56x35`, `num_chs` 160/96) — `ent[0]` (luma) reads
+  different/wrong data. `s_ver`/`s_hor`/`c_ver`/`c_hor` bleeds into the `ccs=0`
+  entropy path (`decode_z`/`decode_y`/`component_scales_impl`/`num_chs`/
+  `num_decode`/`channel_step`/`num_threads`/`cube_flag_count`/`num_regions`/
+  `region_grid`/`hyper_latent_size`/`latent_size`/`component_size`/`num_decode`/
+  `max_channels`/`channel_step`/`num_threads`/`cube_flag_count`/`num_regions`/
+  `region_grid`/`hyper_latent_size`/`latent_size`/`component_size` at
+  `src/decoder/entropy.rs`/`mod.rs`/`tools/regions.rs`/`header.rs`). The luma
+  dims are right; the luma entropy *values* are wrong — the residual/substream
+  decode for `ccs=0` reads a different count or offset for `c_ver`/`c_hor`/`s_ver`/
+  `s_hor != 1`. Everything else: `decode_ref` 42/50,
   `entropy_ref` 37/37, `weights_ref` 4/4, `api_ref` 6/6, `filters_efe` 17/17,
   `filters_lef_icci` 19/19, `formats`/`efe_nl`/`eicci`/`msssim`/`encoder_end_to_end`
   (26/27) — all bit-exact.
