@@ -121,7 +121,9 @@ pub fn sharpen(
     if !(1..=16).contains(&bit_depth) {
         return Err(Error::InvalidArgument("LEF: bit depth"));
     }
-    let range = ((1u32 << bit_depth) - 1) as f32;
+    // The plane is the codec's 8-bit *core* image (`[0, 255]`); a `bit_depth > 8`
+    // source's extra precision rides in the LSB plane, recombined only at output.
+    let range = 255.0;
     let region = scale_log.plane(channel);
     let (rw, row_of, col_of) = (
         scale_log.w,

@@ -244,7 +244,11 @@ pub fn filter(
             "eICCI: tile count does not match the tiling",
         ));
     }
-    let range = ((1u32 << hdr.bit_depth) - 1) as f32;
+    // The post-filter planes are the codec's 8-bit *core* image (`[0, 255]`) — the
+    // extra precision of a `bit_depth > 8` source rides in the LSB plane and is only
+    // recombined at output. The filter normalizes by the internal range, 255, not by
+    // `2^bit_depth - 1` (the reference's `Image.data_range` is `[0, 255]` here).
+    let range = 255.0;
 
     for p in [&mut image.y, &mut image.u, &mut image.v] {
         for s in &mut p.data {

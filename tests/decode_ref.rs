@@ -292,6 +292,7 @@ vectors! {
     img30yuv444_base_off_bpp050 => "img30yuv444_base_off_bpp050",
     img30yuv420b10_base_off_bpp050 => "img30yuv420b10_base_off_bpp050",
     img30yuv444b10_base_off_bpp050 => "img30yuv444b10_base_off_bpp050",
+    img30yuv444b10_base_lef_eicci_bpp050 => "img30yuv444b10_base_lef_eicci_bpp050",
     img30cropyuv420_base_off_bpp075 => "img30cropyuv420_base_off_bpp075",
     img30_base_off_c420_bpp050 => "img30_base_off_c420_bpp050",
     img30_base_off_c422_bpp050 => "img30_base_off_c422_bpp050",

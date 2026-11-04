@@ -117,13 +117,23 @@ construction, and say so in `PORTING.md`.
   correction for `bit_depth = 10`. Next: compare our `chroma_corrections`/`tile_output`
   U output to the dump's `eicci.out.b`. (Two `img30yuv444b10_*` tests were written and
   isolated this; kept out of `check!`/`check_icci` registration so main stays green.)
-  Ruled out: `tile_output`'s `plane * BANDS` indexing and `write_core` are correct
-  and luma works through the same `Trunk::load`/`folded_conv` path; `scaleU/V` are
-  loaded scalars like `scaleY`. Remaining suspects: (a) the chroma planes' stored
-  representation at 10-bit (signed/centered vs luma's unsigned — check what
-  `image.u`/`v` hold vs the reference's `eicci.in.b/c`), (b) the
-  `conv_firstUV`/`hidden_layer_UV` checkpoint's expected input ordering, (c) the
-  4:4:4-vs-subsampled chroma resample path for a 10-bit YUV source.
+  **Root cause found — `data_range` convention, not eICCI.** The reference's
+  reconstruction `rec.*`/`out.*`/`eicci.in.*` planes are all at **`[0,255]`
+  (8-bit scale)** for this 10-bit source — luma max exactly 255, chroma centered
+  ~128 (8-bit neutral): the codec's internal `Image` is the 8-bit *core*, and the
+  extra 2 bits ride in the LSB plane (`LSBS`). Our `range = (1<<bit_depth)-1`
+  uses `hdr.bit_depth = 10` → 1023, but the reference filters at `data_range
+  [0,255]` → `s/255`. `check_icci` ran our `filter` on the dump's `[0,255]` planes
+  with `range=1023` → normalized to `[0,0.25]` not `[0,1]` → chroma out ~4x off
+  (the 208/732). Two layers to fix: (1) **the post-filter `range`/`data_range`
+  must be the coded-core scale (255 for ≤8-bit, `2^bd-1` only when the internal
+  image actually holds >8 bits — determine the `LSBS`/internal range the decoder
+  stores for `bit_depth > 8`)**, in both `filters/icci.rs:247` and
+  `filters/lef.rs:124`; (2) whether our reconstructed *planes* store `[0,1023]`
+  (true 10-bit) vs the reference's `[0,255]` core — if ours hold 1023 the
+  normalization matches internally but the plane convention differs from
+  reference; confirm what `Decoder` stores for a 10-bit `LSBS` stream. The dump
+  shows reference in/out planes at `[0,255]` — our planes should match that scale.
 - [~] GPU work (separate workspace): shader-f16 conv *weights* landed (`GpuContext` requests `SHADER_F16`, `GpuConv` packs `mat4x4<f16>`, `conv()`/`conv_tiled()` widen to `mat4x4<f32>` — activations stay f32); conv_transpose/depthwise and f16 *activations* still f32. GPU pool ledger — parity-breaking.
 - [ ] Sweep `PORTING.md` after every landing: row update + what remains missing.
 

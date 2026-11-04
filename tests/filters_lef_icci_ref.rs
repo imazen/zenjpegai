@@ -259,9 +259,20 @@ fn icci_img30_base_on_bpp025() {
     check_icci("img30_base_on_bpp025", true);
 }
 
-// 10-bit 4:4:4 (img30yuv444b10_base_lef_eicci_bpp050): eICCI's *chroma* path diverges —
-// `icci` U max abs diff ~208 (Y exact ~1.5e-5); LEF luma diff ~1.19. See WORKPLAN; the
-// tests below are registered once the chroma-at-10-bit bug is fixed.
+// 10-bit 4:4:4 (img30yuv444b10_base_lef_eicci_bpp050): the post-filter planes are the
+// 8-bit *core* image (`[0, 255]`, the extra 2 bits ride in the LSB plane) — `range`
+// must be 255, not `2^bit_depth - 1` (the `data_range` convention, fixed in
+// `filters/icci.rs` + `filters/lef.rs`).
+
+#[test]
+fn lef_img30yuv444b10_base_lef_eicci_bpp050() {
+    check_lef("img30yuv444b10_base_lef_eicci_bpp050");
+}
+
+#[test]
+fn icci_img30yuv444b10_base_lef_eicci_bpp050() {
+    check_icci("img30yuv444b10_base_lef_eicci_bpp050", true);
+}
 
 /// All three planes unfiltered: the filter still clamps the picture to its range.
 #[test]
