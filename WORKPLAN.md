@@ -131,6 +131,19 @@ ALL RDLR dead-paths now ported (`process_y` luma+chroma, `process_z` luma+chroma
   `ratio != 0`). Our `numSamples`=4.2M gate (vs reference 30M) is the deliberate
   bound making this unreachable — a resource/design choice, not an unported
   feature per se. A full per-tile RDLR port is a large restructure.
+  - **Per-tile RDLR concrete plan** (for a fresh session): `tools::tiles`'s
+    `SynthesisTile { image, latent, core, core_offset }` is the exact analog of
+    the reference's `image_tile`/`latent_tile`/`optimized_part_of_imgtile_rel_to_overlap`
+    — `image` = tile region w/ overlap, `latent` = the latent tile, `core` =
+    optimized part. `synthesis_tiles`/`region_tiles` already produce the grid;
+    reuse them for `numSamplesPerLumaTile`/`numSamplesPerChromaTile`-sized RDLR
+    tiles + apply the ported `_adjust_boundary_tiles` (`filters/icci.rs`) when
+    `minimum_tile_size` is set (`ratio != 0`). Then `optimize_y`/`optimize_uv`/
+    `optimize_z`/`rate_point_*`/`distortion`/`ms_ssim`/`compress` each take the
+    tile's `latent`/`image`/`core` (per-tile `ms_ssim`/`psnr` on `core`,
+    per-tile `Substract`/Adagrad on `latent`), with refined tile latents
+    scattered back into the whole latent — `numSamples` gate raised to 30M
+    alongside. ~500 lines across `rdlr.rs` + `mod.rs`.
 Next high-value (unstarted):
 - **`d_psi` finite-diff** — `d(psi_s)` extraction in `compress_backward` is a
   subset of the oracle-verified `d_y` path but has NO reference oracle
