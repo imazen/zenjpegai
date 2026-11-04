@@ -219,6 +219,8 @@ impl GpuConvTranspose {
 #[derive(Clone, Debug)]
 pub struct GpuDepthwise {
     pub ch: usize,
+    /// `weight` holds `vec4<f16>` bits (`SHADER_F16` devices only).
+    pub(crate) w16: bool,
     pub(crate) weight: wgpu::Buffer,
 }
 
@@ -240,9 +242,20 @@ impl GpuDepthwise {
                 w[((ch / 4) * 9 + k) * 4 + ch % 4] = c.weight[ch * 9 + k];
             }
         }
+        let w16 = ctx.has_f16();
+        let weight = if w16 {
+            let bits: Vec<u16> = w
+                .iter()
+                .map(|&v| half::f16::from_f32(v).to_bits())
+                .collect();
+            storage16(ctx, "depthwise weight", &bits)
+        } else {
+            storage(ctx, "depthwise weight", &w)
+        };
         Ok(Self {
             ch: c.in_ch,
-            weight: storage(ctx, "depthwise weight", &w),
+            w16,
+            weight,
         })
     }
 }

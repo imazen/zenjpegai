@@ -63,7 +63,9 @@ fn conv_transpose_parses() {
 
 #[test]
 fn pointwise_and_pad_parse() {
-    parses(&depthwise3x3(4), "depthwise3x3");
+    for w16 in [false, true] {
+        parses(&depthwise3x3(4, w16), "depthwise3x3");
+    }
     parses(&copy_channels(), "copy_channels");
     parses(&pad(), "pad");
     parses(&elu_gate(), "elu_gate");

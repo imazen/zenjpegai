@@ -479,13 +479,15 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{
 /// so it is bound by nothing else. Out-of-picture halo samples are stored as zero and their taps
 /// still added, which is bit-identical to skipping them: adding an exact `w * 0.0` changes no
 /// finite accumulator.
-pub fn depthwise3x3(zc: u32) -> String {
+pub fn depthwise3x3(zc: u32, w16: bool) -> String {
     let halo = WG + 2;
+    let en = f16_enable(w16);
+    let ty = if w16 { "f16" } else { "f32" };
     format!(
-        "{params}
+        "{en}{params}
 @group(0) @binding(1) var<storage, read> src: array<vec4<f32>>;
 @group(0) @binding(2) var<storage, read_write> dst: array<vec4<f32>>;
-@group(0) @binding(3) var<storage, read> wt: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read> wt: array<vec4<{ty}>>;
 const HALO: u32 = {halo}u;
 const ZC: u32 = {zc}u;
 // lid.x is the channel block within the workgroup's ZC-group — the fastest-varying lane
@@ -521,7 +523,7 @@ fn main(
   var acc = vec4<f32>(0.0);
   for (var ky = 0u; ky < 3u; ky++) {{
     for (var kx = 0u; kx < 3u; kx++) {{
-      acc += wt[cb * 9u + ky * 3u + kx] * tile[((lid.z + ky) * HALO + lid.y + kx) * ZC + lid.x];
+      acc += {wload} * tile[((lid.z + ky) * HALO + lid.y + kx) * ZC + lid.x];
     }}
   }}
   dst[(py * p.w + px) * p.c4 + cb] = acc;
@@ -532,6 +534,11 @@ fn main(
         zc = zc,
         tile_sq = halo * halo * zc,
         lanes = WG * WG * zc,
+        wload = if w16 {
+            "vec4<f32>(wt[cb * 9u + ky * 3u + kx])"
+        } else {
+            "wt[cb * 9u + ky * 3u + kx]"
+        },
     )
 }
 

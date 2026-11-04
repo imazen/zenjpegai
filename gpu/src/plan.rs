@@ -450,8 +450,8 @@ impl<'a> Graph<'a> {
         };
         let (gx, gy) = grid2(x.w, x.h);
         self.push(
-            &format!("depthwise3x3_z{zc}"),
-            || kernels::depthwise3x3(zc),
+            &format!("depthwise3x3_z{zc}_w{}", l.w16 as u8),
+            || kernels::depthwise3x3(zc, l.w16),
             &[x.h as u32, x.w as u32, c4],
             vec![
                 Bind::Tensor(x.id),
