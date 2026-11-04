@@ -516,3 +516,42 @@ fn int_conv_matches_scalar_loops() {
         }
     }
 }
+#[test]
+fn conv2d_s2_phase_edge() {
+    let mut rng = Rng(0xED6E);
+    for &(in_ch, out_ch, h, w) in &[
+        (32usize, 32usize, 1usize, 1usize),
+        (32, 32, 1, 4),
+        (32, 32, 4, 1),
+        (32, 32, 3, 3),
+        (32, 32, 2, 7),
+        (32, 32, 7, 2),
+        (8, 8, 1, 64),
+    ] {
+        let conv = Conv2d::new(
+            in_ch,
+            out_ch,
+            (3, 3),
+            2,
+            (1, 1),
+            1,
+            rng.vec(out_ch * in_ch * 9),
+            Some(rng.vec(out_ch)),
+        )
+        .unwrap();
+        let x = Tensor::from_vec(in_ch, h, w, rng.vec(in_ch * h * w)).unwrap();
+        for eng in engines() {
+            let v = eng.tier.block();
+            let packed = PackedConv::new(&conv, v, [0; 4]).unwrap();
+            let bx = BTensor::from_planar(&x, v).unwrap();
+            let want = packed.forward(&eng, &bx).unwrap();
+            unsafe { std::env::set_var("ZENJPEGAI_CONV_S2_PHASE", "1") };
+            let got = packed.forward(&eng, &bx).unwrap();
+            unsafe { std::env::remove_var("ZENJPEGAI_CONV_S2_PHASE") };
+            assert_eq!(
+                want.data, got.data,
+                "s2 phase {in_ch}->{out_ch} {h}x{w} {eng:?}"
+            );
+        }
+    }
+}

@@ -185,13 +185,16 @@ Next high-value (unstarted):
   13.4× (→11.8 ms, ~40 % util) — latency-bound with a bandwidth ceiling,
   not compute-bound; ~2× off peak even threaded. Root cause: the conv
   re-reads the whole input per output-channel block (ocb) — a ~92 MB working
-  set per ocb — so every splat-load misses L2/LLC (~17 cycles/step). **The
-  real fix is ocb-tiling** (N-block the output channels: accumulate
-  `acc[OC_B][B]` over several output blocks at once, so one input read feeds
-  `OC_B` FMAs — input traffic ÷OC_B, the same miss-avoidance GEMM
-  N-blocking does). Neither Winograd nor phase-decompose helps a
-  latency-bound kernel — only fewer misses (tiling) or fewer FLOPs
-  (F(4,3)/implicit-GEMM) or GPU do. The `phase` path's repack only added
-  traffic.
+  set per ocb — so every splat-load misses L2/LLC (~17 cycles/step).
+  **ocb-sweep tested: ~12x SLOWER** (`forward_ocb_sweep`, opt-in
+  `ZENJPEGAI_CONV_SWEEP`) — iterating position-blocks outer / ocbs inner
+  keeps the input strip hot but thrashes the *weights*: the full ~590KB
+  weight set cycles through L1 each position block, where the default
+  driver keeps each ocb's ~37KB weight L1-resident across all position
+  blocks (plus ~16x the per-`block` setup). The default loop order is
+  already well-tiled for this hierarchy: weights L1, input strip L2,
+  ~L2-latency-bound input reads that no loop reorder beats. The real
+  remaining levers are prefetch (needs intrinsics magetypes doesn't yet
+  expose), a BLIS-style 3-level packed-tile kernel, or GPU.
 - f16-weight kernels, niche coverage vectors (per-tile eICCI, single-chroma
   tiles, 10-bit LEF/eICCI), GPU (separate workspace).
