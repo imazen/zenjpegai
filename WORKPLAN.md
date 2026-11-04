@@ -100,8 +100,21 @@ construction, and say so in `PORTING.md`.
 
 ## Also queued
 
-- [ ] Niche coverage vectors: per-tile-different eICCI selections, single-chroma tiles,
+- [~] Niche coverage vectors: per-tile-different eICCI selections, single-chroma tiles,
   10-bit eICCI/LEF (needs reference decode support check first).
+  **10-bit LEF/eICCI — real bug found.** Reference env unblocked on this box
+  (built `src/codec/entropy_coding/lib_wrappers/{mans,direct}` ANS `.so`s;
+  import via `src.codec…` not `codec…` — see CLAUDE.md). Generated vector
+  `img30yuv444b10_base_lef_eicci_bpp050` (10-bit 4:4:4 + LEF + eICCI, bpp50,
+  in `/mnt/v/output/zenjpegai/reference/vectors/` + `filters_lef_icci` oracle
+  with `eicci.out.*`, `lef.{in,out}.*`, `lef.scale_log`). Registering it in
+  `tests/decode_ref.rs` (`check!` macro) decodes but diverges massively:
+  **994350/1491840 samples differ, worst by 732** — a genuine 10-bit decode
+  bug, not a bound issue. Next: isolate LEF vs eICCI via the
+  `filters_lef_icci` dump; suspects are the `range = (1<<bit_depth)-1`
+  normalization (`filters/icci.rs`) and LEF's `2^bit_depth-1` luma scale
+  (`filters/lef.rs`) — a 4x-off scaling (1023 vs 255) would look like this.
+  Test registration reverted until fixed (must not ship a failing test).
 - [~] GPU work (separate workspace): shader-f16 conv *weights* landed (`GpuContext` requests `SHADER_F16`, `GpuConv` packs `mat4x4<f16>`, `conv()`/`conv_tiled()` widen to `mat4x4<f32>` — activations stay f32); conv_transpose/depthwise and f16 *activations* still f32. GPU pool ledger — parity-breaking.
 - [ ] Sweep `PORTING.md` after every landing: row update + what remains missing.
 
