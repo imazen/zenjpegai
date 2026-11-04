@@ -94,7 +94,7 @@ pub use decoder::output::{Picture, RgbImage, YuvImage};
 #[cfg(feature = "std")]
 pub use decoder::{BudgetGuard, BudgetPolicy, MemoryBudget};
 #[cfg(feature = "std")]
-pub use encoder::{EncodeLimits, EncodeParams, Encoder, estimate_encode_memory};
+pub use encoder::{EncodeLimits, EncodeParams, Encoder, Experimental, estimate_encode_memory};
 pub use error::Error;
 pub use mem::MemoryReport;
 #[cfg(feature = "std")]

@@ -526,12 +526,12 @@ fn run() -> Result<(), String> {
             params.num_threads_r = args.ans_threads;
             params.regions = args.regions;
             params.rdlr |= args.rdlr;
-            params.clipping |= args.clipping;
-            params.uv_beta_search |= args.uv_beta_search;
-            params.num_ite_uv = params.num_ite_uv.max(args.num_ite_uv);
-            params.num_ite_z = params.num_ite_z.max(args.num_ite_z);
+            params.experimental.clipping |= args.clipping;
+            params.experimental.uv_beta_search |= args.uv_beta_search;
+            params.experimental.num_ite_uv = params.experimental.num_ite_uv.max(args.num_ite_uv);
+            params.experimental.num_ite_z = params.experimental.num_ite_z.max(args.num_ite_z);
             if args.num_ite_uv > 0 {
-                params.num_ite_uv = args.num_ite_uv;
+                params.experimental.num_ite_uv = args.num_ite_uv;
             }
             params.precision = args.precision;
             params.c_ver = args.c_ver;

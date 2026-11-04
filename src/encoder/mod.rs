@@ -158,18 +158,22 @@ pub struct EncodeParams {
     /// tier- and reference-bit-identical; [`Precision::Approximate`] is `f32`
     /// accumulation — faster, opt-in, and *not* reference-parity.
     pub precision: crate::nn::fast::Precision,
-    /// `clipping_mode` of the reference encoder: when the checkpoint carries `clip_thres`
-    /// (no shipped model does), clamp each analysis / hyper-encoder conv output channel to
-    /// its `MinList`/`MaxList` — `base_layers/utils.py::feature_clipping`. A no-op on
-    /// shipped weights.
-    pub clipping: bool,
-    /// `independent_beta_UV = 0` of the reference bitrate matcher (`--bpp` only): search a
-    /// chroma quantiser displacement independently of the luma's, by
-    /// `find_UV_beta_with_hyperopt`'s objective — a deterministic sweep over encode+decode
-    /// trials minimising `10·distortion·(βY+2048)/2048·base_beta + bpp`. When `false`
-    /// (default) the chroma displacement equals the luma's, as `independent_beta_UV = 1`
-    /// ships. Ignored without a rate target and needs a `models_dir` [`Encoder`].
-    pub uv_beta_search: bool,
+    /// Opt-in knobs for upstream's shipped-disabled research paths
+    /// (`numIteYChroma`, `numIteZLuma`/`numIteZChroma`, `independent_beta_UV`,
+    /// `clipping_mode` — all `0`/`false` in the shipped `cfg/`). These refine
+    /// the encoded latent beyond the shipped encoder's behavior; every one is
+    /// dead or crash-dead code upstream. `Experimental::default()` is all-off —
+    /// a stock `EncodeParams` reproduces the shipped encoder exactly.
+    pub experimental: Experimental,
+}
+
+/// The upstream shipped-disabled research paths, ported. Upstream ships every
+/// one at `0`/`false` (`cfg/tools/RDLR.json`, `independent_beta_UV`,
+/// `clipping_mode`) and most are crash-dead on top of that — these are
+/// *intended-semantics* ports, not stream-parity defaults.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Experimental {
     /// `numIteYChroma` of `cfg/tools/RDLR.json` (shipped `0`, arg default `40`): chroma
     /// `process_y` — `RDLRCompUV` refining the chroma latent by the same Adagrad loop the
     /// luma `rdlr` uses, but scoring per-plane PSNR and a joined luma+chroma rate term
@@ -177,10 +181,22 @@ pub struct EncodeParams {
     /// default) disables it, matching the shipped config. Ignored without the source planes
     /// (a `with_source`/`encode` path supplies them; `rate_match` trial encodes have none).
     pub num_ite_uv: usize,
-    /// `numIteZChroma` — `process_z` hyper-latent refinement iterations on the
-    /// chroma `z_hat` (`0` ships upstream → opt-in; `~14` matches the reference
-    /// `process_z` default).
+    /// `numIteZLuma`/`numIteZChroma` (shipped `0`, arg default `14`): `process_z`
+    /// hyper-latent refinement iterations on `z_Y` and `z_UV`. `0` disables it,
+    /// matching the shipped config.
     pub num_ite_z: usize,
+    /// `independent_beta_UV = 0` of the reference bitrate matcher (`--bpp` only): search a
+    /// chroma quantiser displacement independently of the luma's, by
+    /// `find_UV_beta_with_hyperopt`'s objective — a deterministic sweep over encode+decode
+    /// trials minimising `10·distortion·(βY+2048)/2048·base_beta + bpp`. When `false`
+    /// (default) the chroma displacement equals the luma's, as `independent_beta_UV = 1`
+    /// ships. Ignored without a rate target and needs a `models_dir` [`Encoder`].
+    pub uv_beta_search: bool,
+    /// `clipping_mode` of the reference encoder (shipped `0`): when the checkpoint carries `clip_thres`
+    /// (no shipped model does), clamp each analysis / hyper-encoder conv output channel to
+    /// its `MinList`/`MaxList` — `base_layers/utils.py::feature_clipping`. A no-op on
+    /// shipped weights.
+    pub clipping: bool,
 }
 
 /// How a region's residual reaches the codestream
@@ -237,10 +253,7 @@ impl Default for EncodeParams {
             num_chs: LATENT_CHANNELS.map(|c| c as u16),
             rdlr: false,
             precision: crate::nn::fast::Precision::Exact,
-            clipping: false,
-            uv_beta_search: false,
-            num_ite_uv: 0,
-            num_ite_z: 0,
+            experimental: Experimental::default(),
         }
     }
 }
@@ -336,10 +349,6 @@ struct ComponentPass {
     rvs_enabled: bool,
     grfs_channel_flags: Option<Vec<bool>>,
     cube_flags: Option<Vec<bool>>,
-    /// `test_bpp_Y` of the (refined) luma decisions — `(z_bits + rate_y) / pixels` —
-    /// kept only when chroma RDLR needs it as `tile_rate_ref_Y_part`/`additional_rate`
-    /// (`num_ite_uv > 0`).
-    rate_bits: Option<f64>,
     /// `get_luma_tile_rate` per UV tile — the co-located luma-tile rate for each
     /// chroma RDLR tile (`additional_rate` per `latent_UV_tile`); one entry per
     /// `numSamplesPerChromaTile` tile. `Some` only on the luma pass with
@@ -706,7 +715,14 @@ impl Encoder {
         // The two analyses are independent (the chroma transform reads its own plane and its
         // own checkpoints); the luma and chroma passes run concurrently.
         let analyse = |ccs| {
-            self.analyse_component(&set, ccs, planes[ccs], independent, params.clipping, stop)
+            self.analyse_component(
+                &set,
+                ccs,
+                planes[ccs],
+                independent,
+                params.experimental.clipping,
+                stop,
+            )
         };
         #[cfg(feature = "parallel")]
         let (a, b) = rayon::join(|| analyse(0), || analyse(1));
@@ -732,7 +748,7 @@ impl Encoder {
             .then(|| efe_source_planes(src, &meta))
             .transpose()?;
         // The chroma RDLR's `org_img_i` (`to_420_()`) — the chroma planes at 4:2:0.
-        let uv_org = (params.num_ite_uv > 0)
+        let uv_org = (params.experimental.num_ite_uv > 0)
             .then(|| Self::uv_rdlr_planes(src, &meta))
             .transpose()?;
         self.encode_from_latents(
@@ -827,7 +843,7 @@ impl Encoder {
                     ccs,
                     [&input.luma, &input.chroma][ccs],
                     independent,
-                    params.clipping,
+                    params.experimental.clipping,
                     stop,
                 )
             };
@@ -853,11 +869,22 @@ impl Encoder {
                 efe_nonlinear: final_run && base_params.efe_nonlinear,
                 eicci: if final_run { base_params.eicci } else { None },
                 rdlr: final_run && base_params.rdlr,
-                num_ite_uv: if final_run { base_params.num_ite_uv } else { 0 },
-                num_ite_z: if final_run { base_params.num_ite_z } else { 0 },
+                experimental: Experimental {
+                    num_ite_uv: if final_run {
+                        base_params.experimental.num_ite_uv
+                    } else {
+                        0
+                    },
+                    num_ite_z: if final_run {
+                        base_params.experimental.num_ite_z
+                    } else {
+                        0
+                    },
+                    ..base_params.experimental
+                },
                 ..base_params
             };
-            let uv_org = (params.num_ite_uv > 0)
+            let uv_org = (params.experimental.num_ite_uv > 0)
                 .then(|| Self::uv_rdlr_planes(src, &meta))
                 .transpose()?;
             let (stream, components) = self.encode_from_latents(
@@ -967,7 +994,7 @@ impl Encoder {
         // displacement, searched over decode-scored trials — the reference's path crashes on
         // `import hyperopt`, so this deterministic sweep completes it. Off by default; the
         // chroma beta then equals the luma's (`independent_beta_UV = 1`, shipped).
-        let beta_uv = if params.uv_beta_search {
+        let beta_uv = if params.experimental.uv_beta_search {
             let mut trial = |b: [i32; 2]| -> Result<(Vec<u8>, f64)> {
                 stop.check()?;
                 let r = code_with(best_model, b, false, &best_lats)?;
@@ -1276,7 +1303,15 @@ impl Encoder {
             let divider = if ccs == 0 { 16 } else { 8 };
             let latent = BTensor::from_planar(latent, eng.tier.block())?;
             let z = set.hyper[ccs]
-                .forward_clip(eng, &latent, ph, pw, divider, params.clipping, stop)?
+                .forward_clip(
+                    eng,
+                    &latent,
+                    ph,
+                    pw,
+                    divider,
+                    params.experimental.clipping,
+                    stop,
+                )?
                 .to_planar()?;
             let max = (Z_OFFSET - 1) as f32;
             let data = z
@@ -1337,7 +1372,8 @@ impl Encoder {
         // `RDLRCompUV`: chroma RDLR (`num_ite_uv > 0`) needs the *refined* luma's
         // `y_hat` (`sup_info`) and `test_bpp_Y` (`additional_rate`), so the luma
         // pass must finish first — run sequentially instead of `rayon::join`.
-        let uv_gates = params.num_ite_uv > 0 && hdr.regions.is_none() && uv_org.is_some();
+        let uv_gates =
+            params.experimental.num_ite_uv > 0 && hdr.regions.is_none() && uv_org.is_some();
         let (a, b) = if uv_gates {
             let a = pass(0, None)?;
             let sup = BTensor::from_planar(
@@ -1686,7 +1722,7 @@ impl Encoder {
             )?;
             &refined
         } else if ccs == 1
-            && params.num_ite_uv > 0
+            && params.experimental.num_ite_uv > 0
             && hdr.regions.is_none()
             && (hdr.width as usize) * (hdr.height as usize) < 30_000_001
             && let Some((sup, y_rate_parts, original)) = uv_ctx
@@ -1716,7 +1752,7 @@ impl Encoder {
                 original,
                 y_rate_parts,
                 (hdr.width as f64) * (hdr.height as f64),
-                params.num_ite_uv,
+                params.experimental.num_ite_uv,
                 stop,
             )?;
             &refined_uv
@@ -1730,7 +1766,7 @@ impl Encoder {
         // `component_scales` inside the residual coding sees only the new `z_hat`.
         let z_opt;
         let scales_opt;
-        let (z_hat, scales, mask) = if params.num_ite_z > 0
+        let (z_hat, scales, mask) = if params.experimental.num_ite_z > 0
             && hdr.regions.is_none()
             && (hdr.width as usize) * (hdr.height as usize) < 30_000_001
         {
@@ -1746,7 +1782,7 @@ impl Encoder {
                 num_chs,
                 lh,
                 lw,
-                params.num_ite_z,
+                params.experimental.num_ite_z,
                 stop,
             )?;
             scales_opt = stage!(
@@ -1774,61 +1810,62 @@ impl Encoder {
         // (`additional_rate`), for chroma RDLR's joint-rate loss. Computed on
         // the luma pass (ccs == 0) over the UV tile grid upscaled 2x to luma
         // res; `latent`/`z_hat`/`scales`/`mask`/`q` are the refined decisions.
-        let y_rate_parts = if ccs == 0 && params.num_ite_uv > 0 && hdr.regions.is_none() {
-            let (uh, uw) = hdr.component_size(1);
-            let (ulh, ulw) = hdr.latent_size(1);
-            let uv_tiles = crate::tools::tiles::rdlr_tiles(
-                uh as usize,
-                uw as usize,
-                ulh as usize,
-                ulw as usize,
-                (ulh / 4) as usize,
-                (ulw / 4) as usize,
-                rdlr::NUM_SAMPLES_PER_CHROMA_TILE,
-                rdlr::RDLR_TILE_OVERLAP,
-                rdlr::RDLR_ALIGN,
-                Some(rdlr::TILE_MIN_FOR_MSSSIM + rdlr::RDLR_TILE_OVERLAP),
-            )?;
-            let mut parts = Vec::with_capacity(uv_tiles.len());
-            for t in &uv_tiles {
-                // `latent_Y_tile = latent_UV_tile.upscale(2)` — the UV latent is
-                // half the luma latent for the RDLR's 4:2:0 chroma view.
-                let (ly, iy, zy) = (
-                    Area::new(
-                        t.latent.x * 2,
-                        t.latent.y * 2,
-                        t.latent.width * 2,
-                        t.latent.height * 2,
-                    ),
-                    Area::new(
-                        t.image.x * 2,
-                        t.image.y * 2,
-                        t.image.width * 2,
-                        t.image.height * 2,
-                    ),
-                    Area::new(t.z.x * 2, t.z.y * 2, t.z.width * 2, t.z.height * 2),
-                );
-                parts.push(rdlr::luma_tile_rate(
-                    eng,
-                    hdr,
-                    model,
-                    &set.lh[0],
-                    &latent.window(ly.x, ly.y, ly.width, ly.height)?,
-                    &z_hat.window(zy.x, zy.y, zy.width, zy.height)?,
-                    &scales.scale_log.window(ly.x, ly.y, ly.width, ly.height)?,
-                    &mask.window(ly.x, ly.y, ly.width, ly.height)?,
-                    &q,
-                    num_chs,
-                    iy.height,
-                    iy.width,
-                    (t.core_img_rel.width * t.core_img_rel.height * 4) as f64,
-                    stop,
-                )?);
-            }
-            Some(parts)
-        } else {
-            None
-        };
+        let y_rate_parts =
+            if ccs == 0 && params.experimental.num_ite_uv > 0 && hdr.regions.is_none() {
+                let (uh, uw) = hdr.component_size(1);
+                let (ulh, ulw) = hdr.latent_size(1);
+                let uv_tiles = crate::tools::tiles::rdlr_tiles(
+                    uh as usize,
+                    uw as usize,
+                    ulh as usize,
+                    ulw as usize,
+                    (ulh / 4) as usize,
+                    (ulw / 4) as usize,
+                    rdlr::NUM_SAMPLES_PER_CHROMA_TILE,
+                    rdlr::RDLR_TILE_OVERLAP,
+                    rdlr::RDLR_ALIGN,
+                    Some(rdlr::TILE_MIN_FOR_MSSSIM + rdlr::RDLR_TILE_OVERLAP),
+                )?;
+                let mut parts = Vec::with_capacity(uv_tiles.len());
+                for t in &uv_tiles {
+                    // `latent_Y_tile = latent_UV_tile.upscale(2)` — the UV latent is
+                    // half the luma latent for the RDLR's 4:2:0 chroma view.
+                    let (ly, iy, zy) = (
+                        Area::new(
+                            t.latent.x * 2,
+                            t.latent.y * 2,
+                            t.latent.width * 2,
+                            t.latent.height * 2,
+                        ),
+                        Area::new(
+                            t.image.x * 2,
+                            t.image.y * 2,
+                            t.image.width * 2,
+                            t.image.height * 2,
+                        ),
+                        Area::new(t.z.x * 2, t.z.y * 2, t.z.width * 2, t.z.height * 2),
+                    );
+                    parts.push(rdlr::luma_tile_rate(
+                        eng,
+                        hdr,
+                        model,
+                        &set.lh[0],
+                        &latent.window(ly.x, ly.y, ly.width, ly.height)?,
+                        &z_hat.window(zy.x, zy.y, zy.width, zy.height)?,
+                        &scales.scale_log.window(ly.x, ly.y, ly.width, ly.height)?,
+                        &mask.window(ly.x, ly.y, ly.width, ly.height)?,
+                        &q,
+                        num_chs,
+                        iy.height,
+                        iy.width,
+                        (t.core_img_rel.width * t.core_img_rel.height * 4) as f64,
+                        stop,
+                    )?);
+                }
+                Some(parts)
+            } else {
+                None
+            };
         let (ch, cw) = hdr.component_size(ccs);
         let out = stage!(
             "compress",
@@ -1883,12 +1920,6 @@ impl Encoder {
             None
         };
         let efe_likely = (post_filters && params.lsbs).then(|| scales.likely.clone());
-        // `get_luma_tile_rate` / `additional_rate`: `test_bpp_Y` of the refined luma
-        // decisions — the chroma RDLR's joined-rate reference and Y-part reference.
-        let rate_bits = (params.num_ite_uv > 0 && ccs == 0).then(|| {
-            let rate_y = rdlr::gm_rate(latent, &y_hat, &residual_q, &scales.scale_log);
-            (set.lh[0].z_bits(z_hat) + rate_y) / (hdr.width as f64 * hdr.height as f64)
-        });
         // `ResVarScale.encode_header` writes `cwgf[:num_chs]` — the derived flags keep
         // their full length inside `scales` (`analyzeCWG` ranks all channels, so a flag
         // can land on an uncoded channel and is then simply not written).
@@ -1926,11 +1957,10 @@ impl Encoder {
             component: c,
             payload,
             // `sup_info` for the chroma RDLR is this y_hat too.
-            y_hat: (post_filters || params.num_ite_uv > 0).then_some(y_hat),
+            y_hat: (post_filters || params.experimental.num_ite_uv > 0).then_some(y_hat),
             rvs_enabled: params.rvs,
             grfs_channel_flags,
             cube_flags,
-            rate_bits,
             y_rate_parts,
             efe_residual,
             efe_likely,
