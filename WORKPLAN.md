@@ -227,38 +227,19 @@ Next high-value (unstarted):
   `ResAu`/`Tam`/`Cab`/`ResidualBlock`/`TransformerBlock` promoted to
   `pub(crate)` in `synthesis.rs`). `encode(SourceImage, params)` mirrors
   `Encoder::encode`: GPU analysis -> CPU `encode_latents` (the parity
-  seam). Whole-picture; produces a valid, not bit-identical, codestream
-  (~1e-4 latent gap like the reference tolerates). `gpu/tests/analysis.rs`
-  compares `GpuAnalysis` luma/chroma to the CPU transforms (BOP+HOP, ~3e-4
-  bound; needs `ZENJPEGAI_REF` + a GPU). `analyse_component` *tiles*
-  the analysis (`tiles::analysis_tiles_with` + `plane.window` + merge
-  into `y`), so `encode` falls back to the wrapped CPU `Encoder::encode`
-  (tiled, correct) on multi-tile pictures; the raw-tensor `encode_input`
-  still rejects multi-tile (`GpuError::Shape`). Still missing: per-tile
-  GPU analysis — the mapped recipe (mirroring `analyse_component`,
-  encoder/mod.rs:1147-1234): per component `ccs`, `grid =
-  Encoder::analysis_tile_grid(pic_w, pic_h, ccs, params)`; merged
-  `y = Tensor::<f32>::zeros(LATENT_CHANNELS[ccs], lh, lw)`, `z_hat =
-  Tensor::<i8>::zeros(..., hz, wz)` with `d = LATENT_DOWNSCALE[ccs]`
-  (=`[16,8]`), `lh = ph.div_ceil(d)`, `hz = ph.div_ceil(4*d)`
-  (HYPER_DOWNSCALE `[64,32]` = 4×d; both `pub` in `encoder::tiles`,
-  `LATENT_CHANNELS=[160,96]` `pub` in `header`). Per tile `t`:
-  `tile = plane.window(t.image.{x,y,width,height})`; `yt` = GPU
-  `GpuAnalysis::luma/chroma` on the tile → planar `Tensor<f32>`;
-  `bt = BTensor::from_planar_par(eng, &yt, eng.tier.block())`;
-  `zt = hyper[ccs].forward_clip(eng, &bt, t.image.height, t.image.width,
-  d, clip, &Unstoppable)?.to_planar()`; quantize `v.clamp(-(Z_OFFSET as
-  f32), (Z_OFFSET-1) as f32).round_ties_even() as i8` (Z_OFFSET=31,
-  `model::common`, pub); merge `assign(&mut y, t.latent_core, &yt,
-  t.latent_core_offset)` + `assign(&mut z_hat, t.hyper_core, &zq,
-  t.hyper_core_offset)` — `assign` is encoder-private (mod.rs:2321),
-  replicate ~20 lines in the gpu crate. Then `encode_latents([&y,&uv],
-  Some([&z_y,&z_uv]), w, h, params, None)`. Blockers to wire:
-  `GpuEncoder` needs an `Engine` field (hyper is CPU) + `[HyperEncoder;2]`
-  via `model::load_hyper_encoder(&models, model_id, ccs, op, eng)` —
-  Encoder's own `hyper` is private so it loads its own. `clip_thres`
-  (dormant upstream — no shipped model
-  carries it); a GPU-vs-reference *bitstream* check.
+  seam); produces a valid, not bit-identical, codestream (~1e-4 latent
+  gap like the reference tolerates). Single-tile pictures run the
+  whole-picture shared-graph analysis; multi-tile pictures run
+  `encode_tiled` — per-component `analysis_tiles_with`, per-tile
+  `GpuAnalysis` on the `window`ed plane, the caller-owned
+  `[HyperEncoder;2]` (CPU, `GpuEncoder`'s `Engine` + private `hyper`
+  workaround) for `z_hats`, `assign` merge, then `encode_latents` with
+  the real z_hats — so GPU analysis covers every picture size.
+  `gpu/tests/analysis.rs` compares `GpuAnalysis` luma/chroma to the CPU
+  transforms (BOP+HOP, ~3e-4 bound; needs `ZENJPEGAI_REF` + a GPU).
+  Compile-verified everywhere; the GPU-run + a GPU-vs-reference
+  *bitstream* check are for the RTX 2080. `clip_thres` is dormant
+  upstream (no shipped model carries it).
 - **f16 shaders (B3):** conv *weights* f16-packed on `SHADER_F16` devices
   (activations f32); `conv_transpose`/depthwise + f16 activations still
   to do.
