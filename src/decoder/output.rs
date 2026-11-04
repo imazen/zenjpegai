@@ -167,17 +167,35 @@ pub(crate) fn to_source_format_par(
     if c == s {
         return Ok(planes);
     }
-    if s != (1, 1) || !matches!(c, (2, 2) | (1, 2)) {
-        return Err(Error::Unsupported(
-            "chroma format conversion other than 4:2:0 / 4:2:2 to 4:4:4",
-        ));
-    }
     let (h, w) = (planes.y.h, planes.y.w);
-    let (u, v) = crate::decoder::stats::join2(
-        parallel,
-        || resize_bicubic_par(parallel, &planes.u, h, w),
-        || resize_bicubic_par(parallel, &planes.v, h, w),
-    );
+    // `Image.to_format_`: coded → source chroma format. `to_444_` upsamples
+    // 420/422 with bicubic (`align_corners=True`, explicit luma size);
+    // `to_420_`/`to_422_` downsample 444 with bilinear to
+    // `calc_chroma_size_444_to_{420,422}` = `scale_size(0.5, comp_count)` —
+    // `(ceil(h/2), ceil(w/2))` and `(h, ceil(w/2))` respectively. 420↔422 is a
+    // `NotImplementedError` upstream.
+    let (u, v) = match (c, s) {
+        ((2, 2) | (1, 2), (1, 1)) => crate::decoder::stats::join2(
+            parallel,
+            || resize_bicubic_par(parallel, &planes.u, h, w),
+            || resize_bicubic_par(parallel, &planes.v, h, w),
+        ),
+        ((1, 1), (2, 2)) => crate::decoder::stats::join2(
+            parallel,
+            || crate::nn::resize_bilinear(&planes.u, h.div_ceil(2), w.div_ceil(2)),
+            || crate::nn::resize_bilinear(&planes.v, h.div_ceil(2), w.div_ceil(2)),
+        ),
+        ((1, 1), (1, 2)) => crate::decoder::stats::join2(
+            parallel,
+            || crate::nn::resize_bilinear(&planes.u, h, w.div_ceil(2)),
+            || crate::nn::resize_bilinear(&planes.v, h, w.div_ceil(2)),
+        ),
+        _ => {
+            return Err(Error::Unsupported(
+                "chroma format conversion other than 4:2:0 / 4:2:2 to 4:4:4 or 4:4:4 to 4:2:0 / 4:2:2",
+            ));
+        }
+    };
     Ok(Planes {
         u: u?,
         v: v?,
@@ -417,4 +435,85 @@ pub(crate) fn quantize_par(parallel: bool, rgb: &RgbPlanes, bit_depth: u8) -> Re
         bit_depth,
         data,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// PIH of a 560x888 8-bit stream; `s`/`c` chroma fields are overridden per case.
+    fn hdr() -> PictureHeader {
+        let bytes: alloc::vec::Vec<u8> = "011103401f00338000008a32c5001800"
+            .as_bytes()
+            .chunks(2)
+            .map(|p| u8::from_str_radix(core::str::from_utf8(p).unwrap(), 16).unwrap())
+            .collect();
+        PictureHeader::parse(&bytes).unwrap()
+    }
+
+    fn planes(yh: usize, yw: usize, ch: usize, cw: usize) -> Planes {
+        let mk = |h: usize, w: usize, seed: u32| {
+            Tensor::<f32>::from_vec(
+                1,
+                h,
+                w,
+                (0..h * w)
+                    .map(|i| ((i as u32 * 97 + seed) % 256) as f32)
+                    .collect(),
+            )
+            .unwrap()
+        };
+        Planes {
+            y: mk(yh, yw, 3),
+            u: mk(ch, cw, 11),
+            v: mk(ch, cw, 17),
+        }
+    }
+
+    /// `to_source_format_par` covers every `Image.to_format_` arm the decoder's
+    /// `decompress` can call: 420/422 → 444 (`to_444_` bicubic up to luma res),
+    /// 444 → 420/422 (`to_420_`/`to_422_` bilinear to `scale_size(0.5,..)`),
+    /// `c == s` no-op, and 420↔422 → `Unsupported` (`NotImplementedError` upstream).
+    #[test]
+    fn to_source_format_all_arms() {
+        let mut h = hdr();
+        // `c == s` → unchanged.
+        (h.s_ver, h.s_hor, h.c_ver, h.c_hor) = (2, 2, 2, 2);
+        let p = planes(32, 48, 16, 24);
+        let out = to_source_format_par(false, &h, p).unwrap();
+        assert_eq!((out.u.h, out.u.w), (16, 24));
+
+        // coded 420 → source 444: `to_444_` bicubic up to luma res.
+        (h.s_ver, h.s_hor, h.c_ver, h.c_hor) = (1, 1, 2, 2);
+        let p = planes(32, 48, 16, 24);
+        let out = to_source_format_par(false, &h, p).unwrap();
+        assert_eq!((out.u.h, out.u.w), (32, 48));
+        assert_eq!((out.v.h, out.v.w), (32, 48));
+
+        // coded 444 → source 420: `to_420_` bilinear to `ceil(h/2), ceil(w/2)`
+        // (`scale_size(0.5, comp_count=2)`), incl. odd dims.
+        (h.s_ver, h.s_hor, h.c_ver, h.c_hor) = (2, 2, 1, 1);
+        let p = planes(33, 47, 33, 47);
+        let out = to_source_format_par(false, &h, p).unwrap();
+        assert_eq!((out.u.h, out.u.w), (17, 24));
+        assert_eq!((out.v.h, out.v.w), (17, 24));
+
+        // coded 444 → source 422: `to_422_` bilinear to `h, ceil(w/2)`
+        // (`scale_size(0.5, comp_count=1)`).
+        (h.s_ver, h.s_hor, h.c_ver, h.c_hor) = (1, 2, 1, 1);
+        let p = planes(32, 47, 32, 47);
+        let out = to_source_format_par(false, &h, p).unwrap();
+        assert_eq!((out.u.h, out.u.w), (32, 24));
+
+        // 420↔422 is `NotImplementedError` upstream → `Unsupported` here.
+        for (c, s) in [((2, 2), (1, 2)), ((1, 2), (2, 2))] {
+            (h.s_ver, h.s_hor) = s;
+            (h.c_ver, h.c_hor) = c;
+            let p = planes(32, 48, 16, 24);
+            assert!(matches!(
+                to_source_format_par(false, &h, p),
+                Err(Error::Unsupported(_))
+            ));
+        }
+    }
 }
