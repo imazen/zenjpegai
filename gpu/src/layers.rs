@@ -37,6 +37,18 @@ pub fn unpack_hwc4(packed: &[f32], c: usize, h: usize, w: usize) -> Vec<f32> {
     out
 }
 
+fn storage16(ctx: &GpuContext, label: &str, data: &[u16]) -> wgpu::Buffer {
+    let bytes = bytemuck::cast_slice(data);
+    let buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label),
+        size: bytes.len() as u64,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    ctx.write_buffer(&buffer, bytes);
+    buffer
+}
+
 fn storage(ctx: &GpuContext, label: &str, data: &[f32]) -> wgpu::Buffer {
     // `create_buffer` + queue write, never `create_buffer_init`: `mapped_at_creation` trips a
     // synchronous JS exception in the browser's WebGPU backend (see `GpuContext::write_buffer`).
@@ -81,6 +93,8 @@ pub struct GpuConv {
     pub(crate) icg4: usize,
     pub(crate) ocg4: usize,
     pub(crate) ob: usize,
+    /// `weight` holds `mat4x4<f16>` bits (`SHADER_F16` devices only).
+    pub(crate) w16: bool,
     pub(crate) weight: wgpu::Buffer,
     pub(crate) bias: wgpu::Buffer,
 }
@@ -113,6 +127,19 @@ impl GpuConv {
                 }
             }
         }
+        // `mat4x4` weight stream halved on `SHADER_F16` devices: the buffer
+        // holds f16 bits and the conv kernel widens each loaded matrix back to
+        // `mat4x4<f32>` before the multiply.
+        let w16 = ctx.has_f16();
+        let weight = if w16 {
+            let bits: Vec<u16> = w
+                .iter()
+                .map(|&v| half::f16::from_f32(v).to_bits())
+                .collect();
+            storage16(ctx, "conv weight", &bits)
+        } else {
+            storage(ctx, "conv weight", &w)
+        };
         Ok(Self {
             in_ch: c.in_ch,
             out_ch: c.out_ch,
@@ -122,7 +149,8 @@ impl GpuConv {
             icg4,
             ocg4,
             ob,
-            weight: storage(ctx, "conv weight", &w),
+            w16,
+            weight,
             bias: storage(ctx, "conv bias", &bias_blocks(c.bias.as_deref(), oc4)),
         })
     }

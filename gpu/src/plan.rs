@@ -356,6 +356,7 @@ impl<'a> Graph<'a> {
             icg4: l.icg4 as u32,
             ocg4: l.ocg4 as u32,
             tile_ich,
+            w16: l.w16,
         };
         let (gx, gy) = ((ow as u32).div_ceil(wg * px), (oh as u32).div_ceil(wg));
         let mut binds = vec![

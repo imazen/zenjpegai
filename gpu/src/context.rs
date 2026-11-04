@@ -24,6 +24,7 @@ pub struct GpuContext {
     pub(crate) queue: wgpu::Queue,
     info: wgpu::AdapterInfo,
     pub(crate) timestamps: bool,
+    pub(crate) f16: bool,
     pub(crate) pipelines: Mutex<HashMap<String, wgpu::ComputePipeline>>,
 }
 
@@ -107,6 +108,7 @@ impl GpuContext {
             )));
         }
         let timestamps = adapter.features().contains(wgpu::Features::TIMESTAMP_QUERY);
+        let f16 = adapter.features().contains(wgpu::Features::SHADER_F16);
         let have = adapter.limits();
         // The large feature maps of a 1024-px HOP tile need more than WebGPU's default 128 MiB
         // per binding; take what the adapter offers, up to 1 GiB.
@@ -119,10 +121,19 @@ impl GpuContext {
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("zenjpegai-gpu"),
-                required_features: if timestamps {
-                    wgpu::Features::TIMESTAMP_QUERY
-                } else {
-                    wgpu::Features::empty()
+                required_features: {
+                    let mut f = wgpu::Features::empty();
+                    f |= if timestamps {
+                        wgpu::Features::TIMESTAMP_QUERY
+                    } else {
+                        wgpu::Features::empty()
+                    };
+                    f |= if f16 {
+                        wgpu::Features::SHADER_F16
+                    } else {
+                        wgpu::Features::empty()
+                    };
+                    f
                 },
                 required_limits: limits,
                 ..Default::default()
@@ -137,11 +148,13 @@ impl GpuContext {
     /// was created with [`wgpu::Features::TIMESTAMP_QUERY`].
     pub fn from_device(device: wgpu::Device, queue: wgpu::Queue, info: wgpu::AdapterInfo) -> Self {
         let timestamps = device.features().contains(wgpu::Features::TIMESTAMP_QUERY);
+        let f16 = device.features().contains(wgpu::Features::SHADER_F16);
         Self {
             device,
             queue,
             info,
             timestamps,
+            f16,
             pipelines: Mutex::new(HashMap::new()),
         }
     }
@@ -167,6 +180,13 @@ impl GpuContext {
     /// Whether per-tile GPU timestamps are available ([`crate::Timing::gpu_ns`]).
     pub fn has_timestamps(&self) -> bool {
         self.timestamps
+    }
+
+    /// Whether `f16`/`vec4<f16>` shaders run ([`wgpu::Features::SHADER_F16`]).
+    /// Convolution weights are f16-packed when it is on, halving the weight
+    /// stream; the accumulators and every other buffer stay `f32`.
+    pub fn has_f16(&self) -> bool {
+        self.f16
     }
 
     /// Largest storage buffer this device binds, in bytes.

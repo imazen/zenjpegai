@@ -86,12 +86,16 @@ pub struct ConvVariant {
     /// Channel blocks of the input halo staged in workgroup memory per chunk
     /// ([`conv_tiled`]); 0 = the direct kernel.
     pub tile_ich: u32,
+    /// Weights are `mat4x4<f16>` (halved weight stream; needs
+    /// [`wgpu::Features::SHADER_F16`]). The accumulator stays `f32` — each
+    /// loaded matrix is widened back before the multiply.
+    pub w16: bool,
 }
 
 impl ConvVariant {
     pub fn key(&self) -> String {
         format!(
-            "conv_k{}x{}_s{}_ob{}_wg{}_px{}_ic{}_oc{}_t{}_{:?}_{}_{:?}",
+            "conv_k{}x{}_s{}_ob{}_wg{}_px{}_ic{}_oc{}_t{}_w{}_{:?}_{}_{:?}",
             self.kh,
             self.kw,
             self.stride,
@@ -101,6 +105,7 @@ impl ConvVariant {
             self.icg4,
             self.ocg4,
             self.tile_ich,
+            self.w16,
             self.act,
             self.pre_relu6,
             self.res
@@ -142,12 +147,20 @@ fn acc_store(ob: u32, px: u32, act: Act, res: Option<Res>) -> String {
         .collect()
 }
 
-const CONV_BINDINGS: &str = "
+/// The shared conv bindings, `wt` typed `f32` or `f16` (`ConvVariant::w16`);
+/// `enable f16;` is prepended on the f16 path.
+fn conv_bindings(w16: bool) -> String {
+    let en = if w16 { "enable f16;\n" } else { "" };
+    let ty = if w16 { "f16" } else { "f32" };
+    format!(
+        "{en}
 @group(0) @binding(1) var<storage, read> src: array<vec4<f32>>;
 @group(0) @binding(2) var<storage, read_write> dst: array<vec4<f32>>;
-@group(0) @binding(3) var<storage, read> wt: array<mat4x4<f32>>;
+@group(0) @binding(3) var<storage, read> wt: array<mat4x4<{ty}>>;
 @group(0) @binding(4) var<storage, read> bias: array<vec4<f32>>;
-";
+"
+    )
+}
 
 /// Direct convolution, zero padding by bounds check, any group count whose groups are whole
 /// blocks. One invocation computes `ob` output blocks of `px` adjacent output pixels.
@@ -173,6 +186,7 @@ pub fn conv(v: &ConvVariant) -> String {
         None => "",
         Some(_) => "@group(0) @binding(5) var<storage, read> res: array<vec4<f32>>;\n",
     };
+    let bindings = conv_bindings(v.w16);
     // Per pixel of the tile: its input column and bounds flag (recomputed per tap).
     let coords: String = (0..v.px)
         .map(|p| {
@@ -183,7 +197,7 @@ pub fn conv(v: &ConvVariant) -> String {
         .collect();
     let mut step = String::new();
     for i in 0..v.ob {
-        step.push_str(&format!("        let w{i} = wt[w + {i}u];\n"));
+        step.push_str(&format!("        let w{i} = mat4x4<f32>(wt[w + {i}u]);\n"));
     }
     for p in 0..v.px {
         step.push_str(&format!(
@@ -196,7 +210,7 @@ pub fn conv(v: &ConvVariant) -> String {
         step.push_str("        }\n");
     }
     format!(
-        "{params}{CONV_BINDINGS}{res_binding}
+        "{params}{bindings}{res_binding}
 const KH: u32 = {kh}u; const KW: u32 = {kw}u; const STRIDE: u32 = {stride}u; const OB: u32 = {ob}u; const PX: u32 = {px}u;
 const ICG4: u32 = {icg4}u; const OCG4: u32 = {ocg4}u;
 @compute @workgroup_size({wg}, {wg}, 1)
@@ -265,6 +279,7 @@ pub fn conv_tiled(v: &ConvVariant, ich: u32) -> String {
         None => "",
         Some(_) => "@group(0) @binding(5) var<storage, read> res: array<vec4<f32>>;\n",
     };
+    let bindings = conv_bindings(v.w16);
     // One tap: in-bounds check like the direct kernel, then ICH channel blocks of it. K > 1
     // reads weights from the workgroup-staged chunk (`wtile`, loaded once per workgroup instead
     // of per lane); K = 1 keeps direct `wt` reads — its chunk is 4 matrices, and leaving it
@@ -285,9 +300,12 @@ pub fn conv_tiled(v: &ConvVariant, ich: u32) -> String {
         }
         let wsrc = if wtap { "wtile" } else { "wt" };
         for i in 0..v.ob {
-            s.push_str(&format!(
-                "            a0_{i} += {wsrc}[w + {i}u] * {load};\n"
-            ));
+            let w = if wsrc == "wt" && v.w16 {
+                format!("mat4x4<f32>(wt[w + {i}u])")
+            } else {
+                format!("{wsrc}[w + {i}u]")
+            };
+            s.push_str(&format!("            a0_{i} += {w} * {load};\n"));
         }
         s.push_str("          }\n        }\n        }\n      }\n");
         s
@@ -297,7 +315,7 @@ pub fn conv_tiled(v: &ConvVariant, ich: u32) -> String {
         .map(|(ky, kx)| tap(ky, kx))
         .collect();
     format!(
-        "{params}{CONV_BINDINGS}{res_binding}
+        "{params}{bindings}{res_binding}
 const KH: u32 = {kh}u; const KW: u32 = {kw}u; const OB: u32 = {ob}u;
 const ICG4: u32 = {icg4}u; const OCG4: u32 = {ocg4}u; const ICH: u32 = {ich}u; const TW: u32 = {tw}u;
 var<workgroup> tile: array<vec4<f32>, {tile_n}u>;
@@ -357,7 +375,7 @@ fn main(
         },
         wtile_stage = if v.kh > 1 {
             format!(
-                "    for (var i = tid; i < {}u; i += {}u) {{\n      let tp = i / (ICH * OB);\n      let r = i % (ICH * OB);\n      wtile[i] = wt[((og * KH + tp / KW) * KW + tp % KW) * ICG4 * OB + (ic0 + r / OB) * OB + r % OB];\n    }}\n",
+                "    for (var i = tid; i < {}u; i += {}u) {{\n      let tp = i / (ICH * OB);\n      let r = i % (ICH * OB);\n      wtile[i] = mat4x4<f32>(wt[((og * KH + tp / KW) * KW + tp % KW) * ICG4 * OB + (ic0 + r / OB) * OB + r % OB]);\n    }}\n",
                 v.kh * v.kw * ich * v.ob,
                 wg * wg,
             )
@@ -383,8 +401,11 @@ pub fn conv_transpose(k: u32, stride: u32, ob: u32, ic4: u32) -> String {
     let acc_step: String = (0..ob)
         .map(|i| format!("        a0_{i} += wt[w + {i}u] * v;\n"))
         .collect();
+    // Transposed convs stay f32-weighted for now (the f16 stream is on the
+    // direct conv); their weight buffer is packed f32 in `GpuConvTranspose`.
+    let bindings = conv_bindings(false);
     format!(
-        "{params}{CONV_BINDINGS}
+        "{params}{bindings}
 const K: u32 = {k}u; const STRIDE: u32 = {stride}u; const OB: u32 = {ob}u; const IC4: u32 = {ic4}u;
 @compute @workgroup_size({WG}, {WG}, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{
