@@ -87,6 +87,15 @@ construction, and say so in `PORTING.md`.
   drift in `fuzz/fuzz_targets/common.rs` (`tools` arg). The remaining
   encode-side `likelihood`/`tools_on_ctc`/`encoder_end_to_end` failures are the
   documented environment-sensitive img01 cases below — unrelated.
+- **efesolves vectors generated** (`crop277_efe_f4c5_f3c6_nl`, `img30_c420_efe_f3c5_f4c7_nl`,
+  `img30_base_efelin_bpp050` via `dump_efe_solves.py`): 3/4 `efe_linear::oracle` tests now pass
+  on real data (`integerize`, `free_search`, `split_decide`). `lstsq_matches_reference_solves`
+  still fails — not a missing vector but the pinned `excused` ill-posed-solve count: this box's
+  MKL flags a different number of ill-posed solves than the reference host the table was pinned
+  on (same environment-sensitivity class as the img01 encode signatures; the per-solve residual
+  bound `res_mine <= res_ref·1.01` passes). Left pinned pending a deliberate re-pin on this box.
+  `rdlr_img30_bop_m1_b0`/`rdlr_img30_hop_m2_b0` still missing: the reference's RDLR needs the
+  exact encoder args + is upstream-fragile (chroma/z `process_y` crashes — documented below).
 - **Regenerated-vector caveat (encode-side signature tests):** `make_reference_streams.sh all`
   now produces ~98 vectors on this box; every decode-side vector verifies bit-exact.
   Two encode-side tests diverge only on `img01` (the biggest, most float-sensitive input):
