@@ -401,6 +401,26 @@ fn shuffles_copies_and_pointwise() {
     let got = run(|g, i| g.window(i[0], 2, 3, 5, 4).unwrap(), &[&x]);
     assert_eq!(want.data, got.data, "window");
 
+    // Replicate pad (the analysis padding_layer): `dst[y,x] = src[min(y,h-1), min(x,w-1)]`.
+    for &(c, h, w, ph, pw) in &[
+        (7usize, 5usize, 6usize, 1usize, 1usize),
+        (10, 4, 4, 0, 3),
+        (3, 8, 2, 2, 0),
+    ] {
+        let x = rng.tensor(c, h, w);
+        let mut want = vec![0.0f32; c * (h + ph) * (w + pw)];
+        for ch in 0..c {
+            for y in 0..h + ph {
+                for xx in 0..w + pw {
+                    want[(ch * (h + ph) + y) * (w + pw) + xx] =
+                        x.data[(ch * h + y.min(h - 1)) * w + xx.min(w - 1)];
+                }
+            }
+        }
+        let got = run(|g, i| g.pad(i[0], ph, pw).unwrap(), &[&x]);
+        assert_eq!(want, got.data, "pad {c}x{h}x{w} +{ph},{pw}");
+    }
+
     let (x, m, t) = (
         rng.tensor_scaled(30, 7, 9, 4.0),
         rng.tensor(30, 7, 9),
