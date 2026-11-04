@@ -4,7 +4,7 @@
 #![cfg(feature = "gpu-tests")]
 
 mod common;
-use common::{Rng, context_arc, max_abs, max_mag, models_dir};
+use common::{Rng, context, context_arc, max_abs, max_mag, models_dir};
 use std::sync::{Arc, Mutex};
 use zenjpegai::header::OperatingPoint;
 use zenjpegai::model::{ModelDir, load_analysis_primary, load_analysis_secondary};
@@ -49,6 +49,14 @@ fn analysis_matches_cpu() {
     let stop = enough::Unstoppable;
     for op in [OperatingPoint::Bop, OperatingPoint::Hop] {
         let gpu = GpuAnalysis::load(context_arc(), &ModelDir::new(models_dir()), 1, op).unwrap();
+        // f16 weights are an opt-in approximation; their bounds re-measure, they
+        // do not inherit the f32 `3e-4`. The chroma trunk accumulates ~20x more
+        // error than luma on f16 (measured: luma ~3e-4/4e-5, chroma ~2e-3/7e-3).
+        let (rel_luma, rel_chroma) = if context().has_f16() {
+            (1e-3, 2e-2)
+        } else {
+            (3e-4, 3e-4)
+        };
         // Primary (luma): [1, h, w] -> [160, h/16, w/16]. The CPU forward
         // normalizes its input itself, so `x` is handed over raw.
         for &(h, w) in &[(48usize, 64usize), (33, 47)] {
@@ -62,7 +70,7 @@ fn analysis_matches_cpu() {
                 &format!("luma {op:?} {h}x{w}"),
                 &want.to_planar().unwrap(),
                 &got,
-                3e-4,
+                rel_luma,
             );
         }
         // Secondary (chroma): [12, h, w] -> [96, h/8, w/8].
@@ -77,7 +85,7 @@ fn analysis_matches_cpu() {
             &format!("chroma {op:?}"),
             &want.to_planar().unwrap(),
             &got,
-            3e-4,
+            rel_chroma,
         );
     }
 }
