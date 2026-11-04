@@ -883,7 +883,11 @@ impl PackedConv {
         // A plane row `r` holds input row `2(r-1) + parity`; flat tap indices
         // reach `p*hp + oy + 1`, so `hp` must cover `oh + margin`.
         let (hp, wp) = (h.div_ceil(2).max(oh) + 3, w.div_ceil(2).max(ow) + 3);
-        let mut xp = BTensor::scratch(self.in_ch, 4 * hp, wp, v)?;
+        // `xp` must be zeroed, not `scratch`: the repack only writes the input rows/cols
+        // (`iy/2 + 1`, `ix/2 + 1`), leaving the `+3` phase borders and inter-phase gaps
+        // at implicit-zero padding — the conv's border taps read them. `scratch` reuses
+        // pooled memory, so under any prior non-zero scratch the borders are stale.
+        let mut xp = BTensor::zeros(self.in_ch, 4 * hp, wp, v)?;
         // `x[icb][iy][ix]` -> `xp[icb][(rp*2+cp)*hp + iy/2 + 1][ix/2 + 1]`
         // (`rp = iy & 1`, `cp = ix & 1`), one deinterleave per input row.
         for_each_row(eng, &mut xp.data, 4 * hp * wp * v, |icb, xp_icb| {

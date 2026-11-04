@@ -588,6 +588,7 @@ fn conv2d_s2_phase_edge() {
         .unwrap();
         let x = Tensor::from_vec(in_ch, h, w, rng.vec(in_ch * h * w)).unwrap();
         for eng in engines() {
+            let _env = ENV_LOCK.lock().unwrap();
             let v = eng.tier.block();
             let packed = PackedConv::new(&conv, v, [0; 4]).unwrap();
             let bx = BTensor::from_planar(&x, v).unwrap();
