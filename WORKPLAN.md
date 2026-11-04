@@ -36,6 +36,17 @@ construction, and say so in `PORTING.md`.
   whole `gpu-tests` suite — `analysis_matches_cpu` (f32 `3e-4`, f16 `1e-3`/`2e-2`
   via `context().has_f16()`), all `decode_ref` streams, `gpu_encode` — on this box.
   The RTX 2080 remains for *perf* (f16-throughput, tiled timing), not correctness.
+- **Regenerated-vector caveat (encode-side signature tests):** `make_reference_streams.sh all`
+  now produces ~98 vectors on this box; every decode-side vector verifies bit-exact.
+  Two encode-side tests diverge only on `img01` (the biggest, most float-sensitive input):
+  `likelihood_estimate` picks `beta -274` vs the reference stream's `-273` (one bisection
+  step on a flat estimate curve) and `tools_on_ctc`'s `TOOLS_ON_SIGNATURE` drifts. Both pin
+  OUR-vs-THEIR-stream metrics to a table measured on the *reference host's* streams — this
+  box's reference encoder produces slightly different streams for img01 (tiled analysis →
+  more float paths), so the pinned deviations shift. Not correctness bugs: our decode of the
+  this-box streams is bit-exact (all 6 `img01_base_*` pass). The pinned signature/displacement
+  tables are environment-sensitive and would need re-pinning against this box's reference host
+  to flip green here; the reference host's own vectors are authoritative.
 - [~] **chroma / z RDLR — dead upstream at two levels, oracle blocked.** Enabling
   `numIteYChroma`/`numIteZLuma`/`numIteZChroma` > 0 crashes the reference: first
   `TileManager.set_alignment_size` (commented out at `tiling.py:89`; `dump_rdlr.py`
