@@ -149,10 +149,14 @@ Next high-value (unstarted):
   test in `mcm.rs` documents this.
 - **Winograd F(2,3) `Precision::Approximate` conv** — convs use `packed`/
   `depthwise` SIMD kernels (NOT `dot8`); a Winograd 3x3 kernel is the big
-  remaining perf knob (parity-breaking, opt-in). **Scope:** `PackedConv` runs
-  `conv_row<F>`/`block`/`tap_loop` (`conv.rs:92-160`) — accumulators in
-  registers across (icb, channel, tap); one weight-vector load + B
-  splat-load/mul_add per (channel, tap), 9 taps for 3x3. F(2,3): transform the
+  remaining perf knob (parity-breaking, opt-in). **Measured hot path**
+  (2048×1536 encode, `ZENJPEGAI_STAGE_TIMES=1`): `analysis` dominates — the
+  tiled analysis transform's convs (`norm+conv1+act1`, `conv2+act2` fused
+  kernels ~160–240 ms/tile, ~6 tiles) plus `hyper_enc` ~130 ms; the entropy
+  stage is small. Winograd's target is the analysis/synthesis 3x3 convs.
+  **Scope:** `PackedConv` runs `conv_row<F>`/`block`/`tap_loop` (`conv.rs:92-160`)
+  — accumulators in registers across (icb, channel, tap); one weight-vector
+  load + B splat-load/mul_add per (channel, tap), 9 taps for 3x3. F(2,3): transform the
   4x4 input tile `B^T d B` + the 3x3 kernel `G g G^T` (at pack time), 16
   element-wise mults per 2x2 output instead of 36 (2.25x mult reduction),
   output transform `A^T · A`. New `PackedWinograd` alongside `PackedConv` (the
@@ -161,5 +165,10 @@ Next high-value (unstarted):
   `Precision::Approximate` opt-in (different rounding than the exact conv).
   ~250 lines + error-bounded test vs `PackedConv`. `PackedIntConv`
   (`int_conv.rs`) is int8-only (hyper-scale decoder) — not a float path.
+  **Measured `--precision approximate` vs `exact` (2048×1536, V3/AVX2):**
+  **540 ms vs 531 ms — identical.** The accumulator-width knob does ~nothing:
+  the convs are compute-bound, not precision-bound. So `Approximate` is
+  currently a correctness-classification knob with no speed payoff — a real
+  speedup needs reduced compute (Winograd) or GPU.
 - f16-weight kernels, niche coverage vectors (per-tile eICCI, single-chroma
   tiles, 10-bit LEF/eICCI), GPU (separate workspace).
