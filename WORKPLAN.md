@@ -106,8 +106,23 @@ construction, and say so in `PORTING.md`.
   bits ride the LSB plane, recombined at output), but `icci::filter`/`lef::sharpen`
   normalized by `2^bit_depth-1`=1023 → chroma diverged ~208, whole decode ~732.
   Fixed `range` → `255.0` (`9bd3cffd`); both filters + whole decode now bit-identical.
-  Still missing: per-tile-*different* eICCI selections + single-chroma tiles (unexercised
-  shared paths — need a forced-selection multi-tile stream).
+  Still missing: per-tile-*different* eICCI selections + single-chroma tiles.
+  **New divergence found via forced-selection vectors.** Extended
+  `force_icci_encode.py` (`--sel Y:U:V,...` per-tile triples, 0=off → single-chroma
+  and per-tile-different selections, applies to 444 too — `ef121444`). Generated
+  `img01_eiccitiles_varsel{,2}_bpp050` (6 tiles, `eicci.selection`
+  `[[7,3,0],[5,0,2],[4,1,1]]` and the reordered `[5,7,4]` counterpart). `check_icci`
+  fails: **eICCI Y max diff ~13** — and a per-tile diagnostic (`diag_icci_*`) shows
+  it's **positional, not network**: left-column tiles are exact (~0.0001), interior
+  tiles diverge ~11-13 *regardless of which net runs* (net5-on-col0 exact,
+  net7-on-col1 wrong → the column is the variable). Reference `decompress` tiles
+  `img_flt` **in-place** — interior tiles read the left neighbour's *filtered*
+  margin; our `tile_layout`/`core`/`core_offset` geometry matches
+  `_get_core_of_overlapping_tile` (half overlap each side). Suspects: `tile_input`'s
+  replicate padding at the tile-region edge (`(4x+c).min(width-1)`), the
+  `dwt2`/`idwt2` block-edge handling, or the `write_core`/overlap write region.
+  Next: dump one interior tile's *input* (`rec_data`) from the reference and diff
+  our `tile_input` for the same tile.
   **10-bit LEF/eICCI — real bug found, isolated to eICCI chroma.** Reference
   env unblocked on this box (built the `lib_wrappers/{mans,direct}` ANS `.so`s;
   import via `src.codec…` — see CLAUDE.md). Vector

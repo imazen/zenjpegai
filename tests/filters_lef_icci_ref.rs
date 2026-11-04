@@ -296,6 +296,58 @@ fn icci_img01_eiccitiles_varsel_bpp050() {
     check_icci("img01_eiccitiles_varsel_bpp050", true);
 }
 
+/// Localize the varsel Y divergence per tile: run the filter on the reference's input and
+/// print the max diff of each tile's core region against `eicci.out.a`.
+#[test]
+fn diag_icci_img01_eiccitiles_varsel() {
+    diag_icci_per_tile("img01_eiccitiles_varsel_bpp050");
+}
+
+/// Same, on the reordered selections (net5 on the left column) — separates the
+/// network from the tile position in the divergence.
+#[test]
+fn diag_icci_img01_eiccitiles_varsel2() {
+    diag_icci_per_tile("img01_eiccitiles_varsel2_bpp050");
+}
+
+fn diag_icci_per_tile(name: &str) {
+    use zenjpegai::filters::icci::tile_layout;
+    let (headers, dump) = filter_dump(name);
+    let hdr = headers.tools.icci.as_ref().unwrap();
+    let image = planes(&dump, "eicci.in");
+    let ph = image.y.h;
+    let pw = image.y.w;
+    let tiles = tile_layout(ph, pw, hdr.tiling).unwrap();
+    // Run the whole filter, then diff each tile's core against eicci.out.a.
+    let eng = Engine::new();
+    let models = ModelDir::new(ref_root().join("models"));
+    let cache = icci::NetCache::default();
+    let image2 = icci::filter(
+        &eng,
+        &headers.picture,
+        hdr,
+        headers.picture.synthesis_transforms[0],
+        &models,
+        &cache,
+        image,
+        &enough::Unstoppable,
+    )
+    .unwrap();
+    let want = plane(&dump["eicci.out.a"]);
+    for (i, t) in tiles.iter().enumerate() {
+        let c = &t.core;
+        let mut mx = 0.0f32;
+        for y in 0..c.height {
+            for x in 0..c.width {
+                let g = image2.y.data[(c.y + y) * image2.y.w + c.x + x];
+                let w = want.data[(c.y + y) * want.w + c.x + x];
+                mx = mx.max((g - w).abs());
+            }
+        }
+        println!("tile {i} core=({},{},{},{}) luma max diff {mx}", c.x, c.y, c.width, c.height);
+    }
+}
+
 /// eICCI on a 4:2:2 source (`force_icci_encode.py`; the reference encoder never selects eICCI
 /// for subsampled sources, so the flag was forced): chroma bicubic-upsampled to 4:4:4,
 /// filtered, bilinear-downsampled back. A conformant stream — `icci_enable_flag` is coded
