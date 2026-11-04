@@ -230,9 +230,16 @@ Next high-value (unstarted):
   seam). Whole-picture; produces a valid, not bit-identical, codestream
   (~1e-4 latent gap like the reference tolerates). `gpu/tests/analysis.rs`
   compares `GpuAnalysis` luma/chroma to the CPU transforms (BOP+HOP, ~3e-4
-  bound; needs `ZENJPEGAI_REF` + a GPU). Still missing: tiled analysis,
-  `clip_thres` (dormant upstream — no shipped model carries it), a
-  GPU-vs-reference *bitstream* check.
+  bound; needs `ZENJPEGAI_REF` + a GPU). `encode_input` rejects
+  multi-tile pictures (`GpuError::Shape`) — `analyse_component`
+  *tiles* the analysis (`tiles::analysis_tiles_with` + `plane.window` +
+  merge into `y`), so a whole-picture pass there would diverge, not
+  just approximate. Still missing: **tiled analysis** — per-tile
+  `GpuAnalysis::luma/chroma` on `window`ed planes + merge + per-tile
+  `HyperEncoder` (CPU — `model::hyper_encoder::HyperEncoder::load`,
+  `Encoder`'s `hyper` is private) → `encode_latents(latents,
+  Some(z_hats))`; `clip_thres` (dormant upstream — no shipped model
+  carries it); a GPU-vs-reference *bitstream* check.
 - **f16 shaders (B3):** conv *weights* f16-packed on `SHADER_F16` devices
   (activations f32); `conv_transpose`/depthwise + f16 activations still
   to do.
