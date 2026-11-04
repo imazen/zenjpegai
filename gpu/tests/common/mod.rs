@@ -24,6 +24,10 @@ fn context_arc_ref() -> &'static std::sync::Arc<GpuContext> {
             adapter_name: std::env::var("ZENJPEGAI_GPU_ADAPTER").ok(),
             low_power: false,
             allow_software: std::env::var("ZENJPEGAI_GPU_ALLOW_SOFTWARE").is_ok_and(|v| v == "1"),
+            // `ZENJPEGAI_GPU_F16=1` exercises the f16-weight path (needs a
+            // SHADER_F16 adapter; the counts re-measure, they do not inherit
+            // the f32 bound).
+            f16_weights: std::env::var("ZENJPEGAI_GPU_F16").is_ok_and(|v| v == "1"),
         };
         let ctx = GpuContext::new(&opts).expect("the gpu-tests feature needs a GPU adapter");
         let i = ctx.adapter_info();
