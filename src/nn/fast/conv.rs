@@ -63,6 +63,122 @@ pub(crate) struct RowJob<'a> {
 /// `None`. Long enough for every (B, S, V) instantiation: `B * S * V` is at most 55 * 16.
 static ZERO_PAD: [f32; 1024] = [0.0; 1024];
 
+/// Winograd F(2x2, 3x3) for `Precision::Approximate` (opt-in, parity-breaking).
+///
+/// The 3x3 filter is pre-transformed to the 16 Winograd planes `u = G g G^T` at
+/// pack time. At run time each output 2x2 tile's 4x4 input patch is transformed
+/// `v = B^T d B`, the 16 planes each run one element-wise GEMM over input
+/// channels `m[ξν] = Σ u[ξν] * v[ξν]` (16 multiplies per 2x2 output vs 36 for
+/// the direct conv — 2.25x fewer), and `y = A^T m A` gives the tile.
+///
+/// The transforms are add/sub only and the GEMM accumulates over (icb, icv) in
+/// a fixed order with `mul_add`, so every tier and thread count produces
+/// identical output — but a different rounding than the direct conv.
+const WINO_PLANES: usize = 16;
+
+/// `B` tiles' `m[ξν]` accumulated over the `V` input-channel lanes of one input
+/// block: `acc[b] += u[ξν][icv][..V_oc] * v[ξν][tile_b][icv]` — the Winograd
+/// GEMM, the same op shape as [`tap_loop`] with the input channel varying per
+/// step instead of fixed.
+#[inline(always)]
+fn wino_loop<F: SimdF32<V>, const V: usize, const B: usize>(
+    t: F::Token,
+    acc: &mut [F; B],
+    wrow: &[[f32; V]], // [V_ic][V_oc] — `u[ξν]` for one input block
+    xr: &[&[f32; V]],  // [B tiles][V_ic] — `v[ξν][tile]`
+) {
+    // `wrow` is always `V` rows; the indexed loop unrolls like `tap_loop_n`.
+    for icv in 0..V {
+        let wv = F::load(t, &wrow[icv]);
+        for b in 0..B {
+            acc[b] = wv.mul_add(F::splat(t, xr[b][icv]), acc[b]);
+        }
+    }
+}
+
+/// `G g G^T` of one 3x3 kernel — the 16 Winograd filter planes. `G` rows are
+/// `(1,0,0)`, `(1/2,1/2,1/2)`, `(1/2,-1/2,1/2)`, `(0,0,1)`; `g` is row-major.
+fn wino_filter(g: &[f32]) -> [f32; WINO_PLANES] {
+    // `m = G g` (4x3): row `r` of `m` is `G[r]` dot the rows of `g`.
+    let mut m = [[0.0f32; 3]; 4];
+    for c in 0..3 {
+        m[0][c] = g[c];
+        m[1][c] = (g[c] + g[3 + c] + g[6 + c]) * 0.5;
+        m[2][c] = (g[c] - g[3 + c] + g[6 + c]) * 0.5;
+        m[3][c] = g[6 + c];
+    }
+    // `u = m G^T` (4x4): column `j` of `u` is `m` dot `G[j]`.
+    let mut u = [0.0f32; WINO_PLANES];
+    for r in 0..4 {
+        u[r * 4] = m[r][0];
+        u[r * 4 + 1] = (m[r][0] + m[r][1] + m[r][2]) * 0.5;
+        u[r * 4 + 2] = (m[r][0] - m[r][1] + m[r][2]) * 0.5;
+        u[r * 4 + 3] = m[r][2];
+    }
+    u
+}
+
+/// `B^T d B` of one tile's 4x4 input patch — the 16 Winograd input planes,
+/// one `V`-lane vector each. `B^T` rows are `(1,0,-1,0)`, `(0,1,1,0)`,
+/// `(0,-1,1,0)`, `(0,1,0,-1)`; `rows[r]` is the patch's four input cells of
+/// row `r` (padding cells already zero — callers pass either a direct `x`
+/// slice or a zero-padded gather).
+fn wino_input<F: SimdF32<V>, const V: usize>(
+    t: F::Token,
+    rows: &[&[[f32; V]]; 4],
+    dst: &mut [[f32; V]; WINO_PLANES],
+) {
+    // `tt = B^T d`: column `c` of `tt` is `B^T` applied to column `c` of `d`.
+    let mut tt = [[F::splat(t, 0.0); 4]; 4];
+    for (c, tt_c) in tt.iter_mut().enumerate().take(4) {
+        let (d0, d1, d2, d3) = (
+            F::load(t, &rows[0][c]),
+            F::load(t, &rows[1][c]),
+            F::load(t, &rows[2][c]),
+            F::load(t, &rows[3][c]),
+        );
+        tt_c[0] = d0.sub(d2);
+        tt_c[1] = d1.add(d2);
+        tt_c[2] = d2.sub(d1);
+        tt_c[3] = d1.sub(d3);
+    }
+    // `v = tt B`: row `r` of `v` is `tt[r]` applied to `B`.
+    for r in 0..4 {
+        let (t0, t1, t2, t3) = (tt[0][r], tt[1][r], tt[2][r], tt[3][r]);
+        t0.sub(t2).store(&mut dst[r * 4]);
+        t1.add(t2).store(&mut dst[r * 4 + 1]);
+        t2.sub(t1).store(&mut dst[r * 4 + 2]);
+        t1.sub(t3).store(&mut dst[r * 4 + 3]);
+    }
+}
+
+/// `A^T m A + bias` of one tile's 4x4 `m` — the 2x2 output. `A^T` rows are
+/// `(1,1,1,0)`, `(0,1,-1,-1)`; `m[e][v]` is the 16 GEMM planes.
+fn wino_output<F: SimdF32<V>, const V: usize>(
+    t: F::Token,
+    m: &[[f32; V]; WINO_PLANES],
+    bias: &[f32; V],
+    y: &mut [[f32; V]; 4],
+) {
+    // `tt = A^T m` is 2x4: `tt[c]` = col `c` of row 0, `tt[4+c]` = col `c` of row 1.
+    let mut tt = [F::splat(t, 0.0); 8];
+    for c in 0..4 {
+        let (m0, m1, m2, m3) = (
+            F::load(t, &m[c]),
+            F::load(t, &m[4 + c]),
+            F::load(t, &m[8 + c]),
+            F::load(t, &m[12 + c]),
+        );
+        tt[c] = m0.add(m1).add(m2);
+        tt[4 + c] = m1.sub(m2).sub(m3);
+    }
+    let bias = F::load(t, bias);
+    tt[0].add(tt[1]).add(tt[2]).add(bias).store(&mut y[0]);
+    tt[1].sub(tt[2]).sub(tt[3]).add(bias).store(&mut y[1]);
+    tt[4].add(tt[5]).add(tt[6]).add(bias).store(&mut y[2]);
+    tt[5].sub(tt[6]).sub(tt[7]).add(bias).store(&mut y[3]);
+}
+
 /// The `(tap) x B` body for one input channel `v`: one weight-vector load per tap, each
 /// followed by `B` splat-load / multiply / add steps. The always-true `assert` lets the
 /// optimizer drop the `r[b * S]` bounds checks from the unrolled position loop; the
@@ -393,6 +509,10 @@ pub struct PackedConv {
     stride: usize,
     v: usize,
     weight: Vec<f32>,
+    /// Winograd filter planes `[ocb][icb][ξν][V_ic][V_oc]` — packed only for
+    /// 3x3 stride-1 dense convs (the [`Precision::Approximate`](super::Precision)
+    /// path); empty otherwise.
+    w16: Vec<f32>,
     bias: Vec<f32>,
     /// `weight` + `bias` bytes in the tracked ledger (see [`crate::mem`]).
     _charge: crate::mem::Charge,
@@ -432,8 +552,31 @@ impl PackedConv {
             w
         };
         let bias = pack_bias(v, conv.out_ch, conv.bias.as_deref());
-        let charge =
-            crate::mem::Charge::new(crate::mem::vec_bytes(&weight) + crate::mem::vec_bytes(&bias));
+        // Winograd filter planes for the `Approximate` path — only the dense
+        // 3x3 stride-1 convs (the hot case) carry the 16/9-larger transform.
+        let w16 = if conv.kh == 3 && conv.kw == 3 && conv.stride == 1 && conv.groups == 1 {
+            let icbg = conv.in_ch.div_ceil(v);
+            let ocbg = conv.out_ch.div_ceil(v);
+            let mut w16 = alloc::vec![0.0f32; ocbg * icbg * WINO_PLANES * v * v];
+            for oc in 0..conv.out_ch {
+                for ic in 0..conv.in_ch {
+                    let u = wino_filter(&conv.weight[(oc * conv.in_ch + ic) * 9..][..9]);
+                    let (ocb, icb, icv, ocv) = (oc / v, ic / v, ic % v, oc % v);
+                    let base = (ocb * icbg + icb) * WINO_PLANES * v * v;
+                    for e in 0..WINO_PLANES {
+                        w16[base + (e * v + icv) * v + ocv] = u[e];
+                    }
+                }
+            }
+            w16
+        } else {
+            Vec::new()
+        };
+        let charge = crate::mem::Charge::new(
+            crate::mem::vec_bytes(&weight)
+                + crate::mem::vec_bytes(&w16)
+                + crate::mem::vec_bytes(&bias),
+        );
         Ok(Self {
             in_ch: conv.in_ch,
             out_ch: conv.out_ch,
@@ -449,6 +592,7 @@ impl PackedConv {
             stride: conv.stride,
             v,
             weight,
+            w16,
             bias,
             _charge: charge,
         })
@@ -473,6 +617,12 @@ impl PackedConv {
             (h + pt + pb - self.kh) / st + 1,
             (w + pl + pr - self.kw) / st + 1,
         );
+        // The Winograd path handles the whole 3x3 stride-1 dense conv — opt-in
+        // via `Precision::Approximate` (different rounding than the direct
+        // kernel, so never the default).
+        if eng.precision == super::Precision::Approximate && !self.w16.is_empty() {
+            return self.forward_winograd(eng, x, oh, ow);
+        }
         let mut out = BTensor::scratch(self.out_ch, oh, ow, v)?;
         let ocb_total = self.out_ch.div_ceil(v);
         let (icb_group, ocb_group) = if self.groups == 1 {
@@ -615,6 +765,303 @@ impl PackedConv {
             }
         }
     }
+
+    /// The Winograd F(2x2, 3x3) forward — `Precision::Approximate` only. Only
+    /// reachable for dense 3x3 stride-1 convs (`self.w16` is packed for those
+    /// alone). The output rows are processed in strips of two (one tile row
+    /// each); every strip transforms its tiles once into `v16`, then each
+    /// output block runs the 16 element-wise GEMMs and the inverse transform.
+    fn forward_winograd(&self, eng: &Engine, x: &BTensor, oh: usize, ow: usize) -> Result<BTensor> {
+        let v = self.v;
+        let (h, w) = (x.h, x.w);
+        let [pt, pl, _, _] = self.pad;
+        let (tw, strips) = (ow.div_ceil(2), oh.div_ceil(2));
+        let icbg = self.in_ch.div_ceil(v);
+        let ocb_total = self.out_ch.div_ceil(v);
+        let mut out = BTensor::scratch(self.out_ch, oh, ow, v)?;
+        // Split `out.data` into per-strip units: `units[sy]` is every output
+        // block's 2-row slice for strip `sy` (one row at the bottom edge).
+        let mut units: Vec<Vec<(usize, &mut [f32])>> =
+            (0..strips).map(|_| Vec::with_capacity(ocb_total)).collect();
+        let mut rest: &mut [f32] = &mut out.data;
+        for ocb in 0..ocb_total {
+            let (d, r) = rest.split_at_mut(oh * ow * v);
+            rest = r;
+            let mut d = d;
+            for (sy, slices) in units.iter_mut().enumerate() {
+                let len = (oh - 2 * sy).min(2) * ow * v;
+                let (s, rr) = d.split_at_mut(len);
+                d = rr;
+                slices.push((ocb, s));
+            }
+        }
+        let w16 = &self.w16;
+        let bias = &self.bias;
+        let run = |sy: usize, slices: &mut Vec<(usize, &mut [f32])>| {
+            run_wino(
+                eng.tier,
+                &mut WinoJob {
+                    x: &x.data,
+                    h,
+                    w,
+                    pt,
+                    pl,
+                    oh,
+                    ow,
+                    tw,
+                    icbg,
+                    v,
+                    w16,
+                    bias,
+                    sy,
+                    slices,
+                },
+            );
+        };
+        #[cfg(feature = "parallel")]
+        if eng.parallel {
+            use rayon::prelude::*;
+            units
+                .par_iter_mut()
+                .enumerate()
+                .for_each(|(sy, s)| run(sy, s));
+            return Ok(out);
+        }
+        for (sy, s) in units.iter_mut().enumerate() {
+            run(sy, s);
+        }
+        Ok(out)
+    }
+}
+
+/// One strip's work in the Winograd path.
+struct WinoJob<'a, 'b> {
+    /// The input, blocked: `[icb][h][w][V]`.
+    x: &'a [f32],
+    h: usize,
+    w: usize,
+    /// Padding: top, left (bottom/right only change the output size).
+    pt: usize,
+    pl: usize,
+    oh: usize,
+    ow: usize,
+    /// Tiles per strip: `ceil(ow / 2)`.
+    tw: usize,
+    /// Input blocks (`groups` is 1 here).
+    icbg: usize,
+    v: usize,
+    /// `w16` and `bias`, packed (`[ocb][icb][ξν][V_ic][V_oc]` and `[ocb][V]`).
+    w16: &'a [f32],
+    bias: &'a [f32],
+    /// The strip index: output rows `2 * sy`, `2 * sy + 1`.
+    sy: usize,
+    /// `(ocb, 2-row out slice)` for every output block in this strip — the
+    /// inner `&'b` is the output tensor's own lifetime, longer than the `&'a`
+    /// borrow of this strip's slice list.
+    slices: &'a mut [(usize, &'b mut [f32])],
+}
+
+/// One strip of the Winograd forward: transform this strip's input tiles into
+/// `v16` once, then for every output block run the 16 `m[ξν]` GEMMs (each a
+/// `wino_loop` over the input blocks) and inverse-transform to the 2x2 output.
+#[allow(clippy::needless_range_loop)]
+fn wino_strip<F: SimdF32<V>, const V: usize, const B: usize>(
+    t: F::Token,
+    job: &mut WinoJob<'_, '_>,
+) {
+    let (v, tw, icbg) = (job.v, job.tw, job.icbg);
+    let vlen = icbg * tw * WINO_PLANES;
+    let mlen = tw * WINO_PLANES;
+    // `scratch_buf`, not `border_buf`: both buffers are fully overwritten every
+    // call, so the zero-fill is pure waste (a memset of ~MBs per strip).
+    scratch_buf((vlen + mlen) * v, |buf| {
+        let (v16, m16) = buf.split_at_mut(vlen * v);
+        let (v16, _) = v16.as_chunks_mut::<V>();
+        let (m16, _) = m16.as_chunks_mut::<V>();
+        let (x, _) = job.x.as_chunks::<V>();
+        let (row0, nrows) = (2 * job.sy, (job.oh - 2 * job.sy).min(2));
+        // Transform every input-channel block's tiles of this strip into
+        // `v16[icb][tile][ξν][V]`.
+        for tx in 0..tw {
+            let col0 = 2 * tx;
+            // Interior tiles (the whole 4x4 patch inside the input) read `x`
+            // in place — no gather copy. Only the border tiles take the
+            // zero-padded `d` gather.
+            let interior = col0 >= job.pl
+                && col0 + 4 - job.pl <= job.w
+                && row0 >= job.pt
+                && row0 + 4 - job.pt <= job.h;
+            for icb in 0..icbg {
+                let dst: &mut [[f32; V]; WINO_PLANES] = (&mut v16[(icb * tw + tx) * WINO_PLANES..]
+                    [..WINO_PLANES])
+                    .try_into()
+                    .unwrap();
+                if interior {
+                    let mut rows: [&[[f32; V]]; 4] = [&x[..1]; 4];
+                    for (r, rr) in rows.iter_mut().enumerate() {
+                        let iy = row0 + r - job.pt;
+                        let xrow = &x[(icb * job.h + iy) * job.w..][..job.w];
+                        *rr = &xrow[col0 - job.pl..col0 - job.pl + 4];
+                    }
+                    wino_input::<F, V>(t, &rows, dst);
+                } else {
+                    // The 4x4 patch covering output rows `row0..row0+2` /
+                    // columns `col0..col0+2`, zero outside the input.
+                    let mut d = [[[0.0f32; V]; 4]; 4];
+                    for r in 0..4 {
+                        let Some(iy) = (row0 + r).checked_sub(job.pt).filter(|&y| y < job.h) else {
+                            continue;
+                        };
+                        let xrow = &x[(icb * job.h + iy) * job.w..][..job.w];
+                        for c in 0..4 {
+                            if let Some(ix) =
+                                (col0 + c).checked_sub(job.pl).filter(|&ix| ix < job.w)
+                            {
+                                d[r][c] = xrow[ix];
+                            }
+                        }
+                    }
+                    let rows: [&[[f32; V]]; 4] = [&d[0], &d[1], &d[2], &d[3]];
+                    wino_input::<F, V>(t, &rows, dst);
+                }
+            }
+        }
+        // Per output block: the 16 `m[ξν]` GEMMs, then the inverse transform.
+        for (ocb, oslice) in job.slices.iter_mut() {
+            let ocb = *ocb;
+            let (w16c, _) = job.w16[ocb * icbg * WINO_PLANES * v * v..]
+                [..icbg * WINO_PLANES * v * v]
+                .as_chunks::<V>();
+            let bias: &[f32; V] = job.bias[ocb * v..][..v].try_into().unwrap();
+            for e in 0..WINO_PLANES {
+                let mut tc = 0;
+                while tc < tw {
+                    let n = (tw - tc).min(B);
+                    let mut acc = [F::splat(t, 0.0); B];
+                    wino_block::<F, V, B>(t, &mut acc, w16c, v16, icbg, tw, e, tc, n);
+                    for b in 0..n {
+                        acc[b].store(&mut m16[(tc + b) * WINO_PLANES + e]);
+                    }
+                    tc += n;
+                }
+            }
+            for tx in 0..tw {
+                let mut y = [[0.0f32; V]; 4];
+                wino_output::<F, V>(
+                    t,
+                    (&m16[tx * WINO_PLANES..][..WINO_PLANES])
+                        .try_into()
+                        .unwrap(),
+                    bias,
+                    &mut y,
+                );
+                let col0 = 2 * tx;
+                for r in 0..nrows {
+                    let orow = &mut oslice[r * job.ow * v..];
+                    for c in 0..2 {
+                        if col0 + c < job.ow {
+                            orow[(col0 + c) * v..][..v].copy_from_slice(&y[r * 2 + c]);
+                        }
+                    }
+                }
+            }
+        }
+    });
+}
+
+/// `B` tiles' `m[ξν]` (plane `e`) accumulated over every input block and input
+/// channel lane — the Winograd GEMM body.
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn wino_block<F: SimdF32<V>, const V: usize, const B: usize>(
+    t: F::Token,
+    acc: &mut [F; B],
+    w16c: &[[f32; V]], // `[icb][ξν][icv][V_oc]` as V-chunks
+    v16: &[[f32; V]],  // `[icb][tile][ξν][V_ic]`
+    icbg: usize,
+    tw: usize,
+    e: usize,
+    tc: usize,
+    n: usize,
+) {
+    for icb in 0..icbg {
+        // `wrow[icv]` is the `V_oc` weight vector for (ξν = e, icv).
+        let wrow = &w16c[(icb * WINO_PLANES + e) * V..][..V];
+        let mut xr: [&[f32; V]; B] = [&v16[0]; B];
+        for (b, xr_b) in xr.iter_mut().enumerate().take(n) {
+            *xr_b = &v16[(icb * tw + tc + b) * WINO_PLANES + e];
+        }
+        wino_loop::<F, V, B>(t, acc, wrow, &xr);
+    }
+}
+
+fn run_wino(tier: Tier, job: &mut WinoJob<'_, '_>) {
+    match tier {
+        #[cfg(all(target_arch = "x86_64", feature = "avx512"))]
+        Tier::V4(t) => wino_v4(t, job),
+        #[cfg(target_arch = "x86_64")]
+        Tier::V3(t) => wino_v3(t, job),
+        #[cfg(target_arch = "aarch64")]
+        Tier::Neon(t) => wino_neon(t, job),
+        #[cfg(target_arch = "wasm32")]
+        Tier::Wasm128(t) => wino_wasm(t, job),
+        Tier::Scalar => wino_scalar(job),
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", feature = "avx512"))]
+#[arcane]
+fn wino_v4(t: X64V4Token, job: &mut WinoJob<'_, '_>) {
+    wino_strip::<f32x16<X64V4Token>, 16, 24>(t, job)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[arcane]
+fn wino_v3(t: X64V3Token, job: &mut WinoJob<'_, '_>) {
+    wino_strip::<f32x8<X64V3Token>, 8, 12>(t, job)
+}
+
+#[cfg(target_arch = "aarch64")]
+#[arcane]
+fn wino_neon(t: NeonToken, job: &mut WinoJob<'_, '_>) {
+    wino_strip::<f32x8<NeonToken>, 8, 12>(t, job)
+}
+
+#[cfg(target_arch = "wasm32")]
+#[arcane]
+fn wino_wasm(t: Wasm128Token, job: &mut WinoJob<'_, '_>) {
+    wino_strip::<f32x8<Wasm128Token>, 8, 4>(t, job)
+}
+
+fn wino_scalar(job: &mut WinoJob<'_, '_>) {
+    wino_strip::<Lanes8, 8, 4>(ScalarToken, job)
+}
+
+/// `f` runs with a scratch of `n` floats, reused per thread between calls —
+/// contents are *not* initialised (grows zeroed once, then keeps old values).
+/// For buffers that are fully overwritten before any read, like the Winograd
+/// transform planes, where `border_buf`'s memset would be pure waste.
+fn scratch_buf(n: usize, f: impl FnOnce(&mut [f32])) {
+    #[cfg(feature = "std")]
+    {
+        use std::cell::RefCell;
+        thread_local! {
+            /// The scratch and the ledger token for its capacity; both die at thread exit.
+            static SCRATCH: RefCell<(Vec<f32>, crate::mem::Charge)> =
+                const { RefCell::new((Vec::new(), crate::mem::Charge::EMPTY)) };
+        }
+        SCRATCH.with(|s| {
+            let mut s = s.borrow_mut();
+            if s.0.len() < n {
+                s.0.resize(n, 0.0);
+                let bytes = crate::mem::vec_bytes(&s.0);
+                s.1.resize(bytes);
+            }
+            f(&mut s.0[..n]);
+        });
+    }
+    #[cfg(not(feature = "std"))]
+    f(&mut alloc::vec![0.0f32; n]);
 }
 
 /// `f` runs with a zeroed scratch of `n` floats, reused per thread between calls.

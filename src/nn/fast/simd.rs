@@ -19,6 +19,10 @@ pub(crate) trait SimdF32<const V: usize>: Copy {
     /// `self * a + b`: fused (one rounding) on native targets, unfused on wasm32, where the
     /// only backends are `Wasm128Token` (magetypes: `f32x4_add(f32x4_mul(..))`) and `Lanes8`.
     fn mul_add(self, a: Self, b: Self) -> Self;
+    /// `self + a`, lane-wise (the Winograd transforms — add/sub have no ordering freedom).
+    fn add(self, a: Self) -> Self;
+    /// `self - a`, lane-wise.
+    fn sub(self, a: Self) -> Self;
 }
 
 impl<T: F32x8Backend + Send + Sync> SimdF32<8> for f32x8<T> {
@@ -39,6 +43,14 @@ impl<T: F32x8Backend + Send + Sync> SimdF32<8> for f32x8<T> {
     fn mul_add(self, a: Self, b: Self) -> Self {
         f32x8::mul_add(self, a, b)
     }
+    #[inline(always)]
+    fn add(self, a: Self) -> Self {
+        self + a
+    }
+    #[inline(always)]
+    fn sub(self, a: Self) -> Self {
+        self - a
+    }
 }
 
 impl<T: F32x16Backend + Send + Sync> SimdF32<16> for f32x16<T> {
@@ -58,6 +70,14 @@ impl<T: F32x16Backend + Send + Sync> SimdF32<16> for f32x16<T> {
     #[inline(always)]
     fn mul_add(self, a: Self, b: Self) -> Self {
         f32x16::mul_add(self, a, b)
+    }
+    #[inline(always)]
+    fn add(self, a: Self) -> Self {
+        self + a
+    }
+    #[inline(always)]
+    fn sub(self, a: Self) -> Self {
+        self - a
     }
 }
 
@@ -87,6 +107,22 @@ impl SimdF32<8> for Lanes8 {
         let mut r = [0.0; 8];
         for i in 0..8 {
             r[i] = crate::nn::fmadd(self.0[i], a.0[i], b.0[i]);
+        }
+        Self(r)
+    }
+    #[inline(always)]
+    fn add(self, a: Self) -> Self {
+        let mut r = [0.0; 8];
+        for i in 0..8 {
+            r[i] = self.0[i] + a.0[i];
+        }
+        Self(r)
+    }
+    #[inline(always)]
+    fn sub(self, a: Self) -> Self {
+        let mut r = [0.0; 8];
+        for i in 0..8 {
+            r[i] = self.0[i] - a.0[i];
         }
         Self(r)
     }

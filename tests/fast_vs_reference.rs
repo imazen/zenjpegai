@@ -220,6 +220,67 @@ fn blocked_tensor_roundtrip() {
     }
 }
 
+/// The opt-in Winograd F(2x2, 3x3) `Precision::Approximate` conv path: within a
+/// bound of the exact kernel, and — because the GEMM's accumulation order is
+/// fixed — identical across every SIMD tier even though it is approximate.
+#[test]
+fn winograd_conv_matches_exact() {
+    let mut rng = Rng(0xB169);
+    for &(in_ch, out_ch, h, w) in &[
+        (32usize, 48usize, 5usize, 9usize),
+        (16, 16, 7, 63),
+        (5, 7, 6, 9),
+        (96, 24, 4, 29),
+        (3, 1, 4, 4),
+        (48, 32, 2, 131),
+    ] {
+        let conv = Conv2d::new(
+            in_ch,
+            out_ch,
+            (3, 3),
+            1,
+            (1, 1),
+            1,
+            rng.vec(out_ch * in_ch * 9),
+            Some(rng.vec(out_ch)),
+        )
+        .unwrap();
+        let x = Tensor::from_vec(in_ch, h, w, rng.vec(in_ch * h * w)).unwrap();
+        let want = reference::conv2d(&conv, &x).unwrap();
+        let what = format!("winograd {in_ch}->{out_ch} {h}x{w}");
+        let mut approx = Vec::new();
+        for eng in engines() {
+            let v = eng.tier.block();
+            let packed = PackedConv::new(&conv, v, [0; 4]).unwrap();
+            let got = packed
+                .forward(&eng.approximate(), &BTensor::from_planar(&x, v).unwrap())
+                .unwrap()
+                .to_planar()
+                .unwrap();
+            approx.push((eng.tier, got));
+        }
+        // Every tier and thread setting produces identical output — the GEMM
+        // accumulates over (icb, icv) in a fixed order.
+        for w in approx.windows(2) {
+            assert_eq!(
+                w[0].1.data, w[1].1.data,
+                "{what}: {:?} vs {:?} differ",
+                w[0].0, w[1].0
+            );
+        }
+        let maxerr = want
+            .data
+            .iter()
+            .zip(&approx[0].1.data)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            maxerr < 2e-3,
+            "{what}: max abs err {maxerr:e} vs exact conv"
+        );
+    }
+}
+
 /// Blocked pixel shuffle and the parallel layout helpers are pure data movement.
 #[test]
 fn pixel_shuffle_and_layout_helpers_match_reference() {
