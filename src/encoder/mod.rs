@@ -1644,12 +1644,12 @@ impl Encoder {
         // the refined latent's residual as usual.
         let refined;
         let refined_uv;
-        // `RDLR._process` gates on `num_samples < numSamples` (4.2 MP): larger
-        // pictures return their decisions unchanged — no RDLR at all.
+        // `RDLR._process` gates on `num_samples < numSamples` (30,000,001):
+        // larger pictures return their decisions unchanged — no RDLR at all.
         let latent = if ccs == 0
             && params.rdlr
             && hdr.regions.is_none()
-            && rdlr_org.map(|s| s.w * s.h < 4_200_000).unwrap_or(true)
+            && rdlr_org.map(|s| s.w * s.h < 30_000_001).unwrap_or(true)
         {
             let source = rdlr_org.ok_or(Error::InvalidArgument(
                 "RDLR: the encode needs the source planes",
@@ -1682,7 +1682,7 @@ impl Encoder {
         } else if ccs == 1
             && params.num_ite_uv > 0
             && hdr.regions.is_none()
-            && (hdr.width as usize) * (hdr.height as usize) < 4_200_000
+            && (hdr.width as usize) * (hdr.height as usize) < 30_000_001
             && let Some((sup, y_rate_part, original)) = uv_ctx
         {
             // `RDLRCompUV.process_y` — chroma RDLR scoring per-plane PSNR against the
@@ -1726,7 +1726,7 @@ impl Encoder {
         let scales_opt;
         let (z_hat, scales, mask) = if params.num_ite_z > 0
             && hdr.regions.is_none()
-            && (hdr.width as usize) * (hdr.height as usize) < 4_200_000
+            && (hdr.width as usize) * (hdr.height as usize) < 30_000_001
         {
             z_opt = rdlr::optimize_z(
                 eng,
@@ -1764,10 +1764,25 @@ impl Encoder {
             scales: &scales,
             quality_map,
         };
+        let (ch, cw) = hdr.component_size(ccs);
         let out = stage!(
             "compress",
             compress_regions(
-                eng, hdr, ccs, model, z_hat, latent, &mask, &q, num_chs, lh, lw, None, stop,
+                eng,
+                hdr,
+                ccs,
+                model,
+                z_hat,
+                latent,
+                &mask,
+                &q,
+                num_chs,
+                if ccs == 0 { ch } else { ch * 2 } as usize,
+                if ccs == 0 { cw } else { cw * 2 } as usize,
+                lh,
+                lw,
+                None,
+                stop,
             )
         )?;
         let mcm::Compressed {
@@ -1996,6 +2011,8 @@ fn compress_regions<Q: mcm::Quantiser>(
     mask: &Tensor<bool>,
     q: &Q,
     num_chs: usize,
+    img_h: usize,
+    img_w: usize,
     lh: usize,
     lw: usize,
     psi_in: Option<&Tensor<f32>>,
@@ -2003,11 +2020,25 @@ fn compress_regions<Q: mcm::Quantiser>(
 ) -> Result<mcm::Compressed> {
     let chs = model.chs;
     let independent = hdr.regions.is_some_and(|r| r.independent);
-    let img = region_grid(hdr, ccs, Plane::Image);
-    let zg = region_grid(hdr, ccs, Plane::HyperLatent);
-    let pg = region_grid(hdr, ccs, Plane::Psi);
-    let lg = region_grid(hdr, ccs, Plane::Latent);
-    let n = img.extended.len();
+    // `regions == None` (the RDLR/per-tile path) is a single region covering the
+    // caller's tensors — `y`/`z_hat` may be a picture tile, so the grids come
+    // from the passed dims, not `hdr`'s picture dims.
+    let (img_tiles, z_tiles, p_tiles, l_tiles) = if hdr.regions.is_some() {
+        (
+            region_grid(hdr, ccs, Plane::Image).extended,
+            region_grid(hdr, ccs, Plane::HyperLatent).extended,
+            region_grid(hdr, ccs, Plane::Psi).extended,
+            region_grid(hdr, ccs, Plane::Latent).extended,
+        )
+    } else {
+        (
+            vec![Area::new(0, 0, img_w, img_h)],
+            vec![Area::new(0, 0, z_hat.w, z_hat.h)],
+            vec![Area::new(0, 0, lw.div_ceil(2), lh.div_ceil(2))],
+            vec![Area::new(0, 0, lw, lh)],
+        )
+    };
+    let n = img_tiles.len();
     let v = eng.tier.block();
     let (pic_h, pic_w) = (hdr.height as usize, hdr.width as usize);
 
@@ -2024,7 +2055,7 @@ fn compress_regions<Q: mcm::Quantiser>(
             break;
         }
         stop.check()?;
-        let (it, zt) = (img.extended[r], zg.extended[r]);
+        let (it, zt) = (img_tiles[r], z_tiles[r]);
         let (th, tw, divider) = if ccs == 0 {
             (it.height, it.width, 32)
         } else {
@@ -2049,7 +2080,7 @@ fn compress_regions<Q: mcm::Quantiser>(
         if n == 1 && t.h == psi.h && t.w == psi.w {
             psi_single = Some(t);
         } else {
-            assign(&mut psi, pg.extended[r], &t.to_planar()?, (0, 0));
+            assign(&mut psi, p_tiles[r], &t.to_planar()?, (0, 0));
         }
         if let Some(p) = &psi_single {
             psi = p.to_planar()?;
@@ -2068,7 +2099,7 @@ fn compress_regions<Q: mcm::Quantiser>(
     let mut tape = Vec::new();
     for r in 0..n {
         stop.check()?;
-        let (lt, pt, it) = (lg.extended[r], pg.extended[r], img.extended[r]);
+        let (lt, pt, it) = (l_tiles[r], p_tiles[r], img_tiles[r]);
         let (y_tile, mask_tile, psi_tile);
         let (yt, mt, psi_b) = match psi_single.take() {
             Some(p) => (y, mask, p),

@@ -141,7 +141,8 @@ pub(crate) fn rate_point_y(
     // inside (residual_q vs residual_dq). `psi` is `z_hat`'s hyper-decoder output —
     // fixed across `optimize_y`'s iterations — precomputed once by the caller.
     let out = compress_regions(
-        eng, hdr, 0, model, z_hat, y, mask, q, num_chs, y.h, y.w, psi_in, stop,
+        eng, hdr, 0, model, z_hat, y, mask, q, num_chs, original.h, original.w, y.h, y.w,
+        psi_in, stop,
     )?;
     let mcm::Compressed {
         residual_q,
@@ -243,7 +244,8 @@ pub(crate) fn rate_point_uv(
     stop: &dyn enough::Stop,
 ) -> Result<RatePointUV> {
     let out = compress_regions(
-        eng, hdr, 1, model, z_hat, y, mask, q, num_chs, y.h, y.w, psi_in, stop,
+        eng, hdr, 1, model, z_hat, y, mask, q, num_chs, original.h * 2, original.w * 2,
+        y.h, y.w, psi_in, stop,
     )?;
     let mcm::Compressed {
         residual_q,
@@ -555,6 +557,7 @@ pub(crate) fn optimize_y(
     slope_psnr: f64,
     slope_msssim: f64,
     ratio: f64,
+    optimize_area: Option<Area>,
     stop: &dyn enough::Stop,
 ) -> Result<(Tensor<f32>, f64)> {
     let mut leaf = y.clone();
@@ -612,9 +615,26 @@ pub(crate) fn optimize_y(
             Some(&orig_ms),
             stop,
         )?;
-        for (i, (&g, acc)) in d_y.data.iter().zip(&mut sum_sq).enumerate() {
-            *acc += g * g;
-            leaf.data[i] -= lr * g / (acc.sqrt() + 1e-10);
+        // Upstream's leaf is `lat_tile_optimized_part` — only the overlap-free
+        // core is stepped; the overlap context stays at its initial values.
+        match optimize_area {
+            Some(a) => {
+                let stride = leaf.w * leaf.h;
+                for (i, (&g, acc)) in d_y.data.iter().zip(&mut sum_sq).enumerate() {
+                    let pos = i % stride;
+                    let (x, y) = (pos % leaf.w, pos / leaf.w);
+                    if x >= a.x && x < a.x + a.width && y >= a.y && y < a.y + a.height {
+                        *acc += g * g;
+                        leaf.data[i] -= lr * g / (acc.sqrt() + 1e-10);
+                    }
+                }
+            }
+            None => {
+                for (i, (&g, acc)) in d_y.data.iter().zip(&mut sum_sq).enumerate() {
+                    *acc += g * g;
+                    leaf.data[i] -= lr * g / (acc.sqrt() + 1e-10);
+                }
+            }
         }
         lr *= lr_decay;
         if up.loss < best_loss {
@@ -765,6 +785,7 @@ pub(crate) fn optimize_uv(
     refs: (f64, f64, f64, f64),
     slope_u: f64,
     slope_v: f64,
+    optimize_area: Option<Area>,
     stop: &dyn enough::Stop,
 ) -> Result<(Tensor<f32>, f64)> {
     let mut leaf = y.clone();
@@ -812,9 +833,25 @@ pub(crate) fn optimize_uv(
             pixels,
             stop,
         )?;
-        for (i, (&g, acc)) in d_y.data.iter().zip(&mut sum_sq).enumerate() {
-            *acc += g * g;
-            leaf.data[i] -= lr * g / (acc.sqrt() + 1e-10);
+        // Same masked leaf as `optimize_y` — only `core_lat_rel` is stepped.
+        match optimize_area {
+            Some(a) => {
+                let stride = leaf.w * leaf.h;
+                for (i, (&g, acc)) in d_y.data.iter().zip(&mut sum_sq).enumerate() {
+                    let pos = i % stride;
+                    let (x, y) = (pos % leaf.w, pos / leaf.w);
+                    if x >= a.x && x < a.x + a.width && y >= a.y && y < a.y + a.height {
+                        *acc += g * g;
+                        leaf.data[i] -= lr * g / (acc.sqrt() + 1e-10);
+                    }
+                }
+            }
+            None => {
+                for (i, (&g, acc)) in d_y.data.iter().zip(&mut sum_sq).enumerate() {
+                    *acc += g * g;
+                    leaf.data[i] -= lr * g / (acc.sqrt() + 1e-10);
+                }
+            }
         }
         lr *= lr_decay;
         if up.loss < best_loss {
@@ -931,9 +968,45 @@ pub(crate) fn chroma(
         refs,
         su,
         sv,
+        None,
         stop,
     )?;
     Ok(best)
+}
+
+/// `numSamplesPerLumaTile` — `setup_tiles_enc`'s luma tile threshold
+/// (`RdlrCompParams` default: image samples per tile → 1024-tile).
+const NUM_SAMPLES_PER_LUMA_TILE: usize = 1 << 20;
+/// `numSamplesPerChromaTile` — the chroma threshold (→ 720-tile).
+const NUM_SAMPLES_PER_CHROMA_TILE: usize = 500_000;
+/// `numSamplesTileOverlap{Y,UV}` — tile overlap in image samples.
+const RDLR_TILE_OVERLAP: usize = 64;
+/// `tool.get_alignment_size()` — the CCS tile alignment.
+const RDLR_ALIGN: usize = 16;
+/// `tile_min_size_for_MSSSIM` — MS-SSIM needs tiles larger than 160; the floor
+/// is `tile_min_size + overlap` (240) when the MS-SSIM loss is mixed in.
+const TILE_MIN_FOR_MSSSIM: usize = 176;
+
+/// `tiling.assign_data` — `dst[dst_area] = src[src_area]` per channel plane.
+fn assign_area(
+    dst: &mut Tensor<f32>,
+    dst_area: &Area,
+    src: &Tensor<f32>,
+    src_area: &Area,
+) -> Result<()> {
+    if src_area.width != dst_area.width || src_area.height != dst_area.height {
+        return Err(Error::InvalidArgument("assign_area shape mismatch"));
+    }
+    let (sd, ss) = (dst.w * dst.h, src.w * src.h);
+    for c in 0..dst.data.len() / sd {
+        for y in 0..dst_area.height {
+            for x in 0..dst_area.width {
+                dst.data[c * sd + (dst_area.y + y) * dst.w + dst_area.x + x] =
+                    src.data[c * ss + (src_area.y + y) * src.w + src_area.x + x];
+            }
+        }
+    }
+    Ok(())
 }
 
 /// `__calc_lr` — the per-resolution learning rate (`LearningRateYAutomaticPerResolution`).
@@ -1010,40 +1083,81 @@ pub(crate) fn luma(
         .as_ref()
         .ok_or_else(|| Error::Model("RDLR: no context model".into()))?;
     let synthesis = crate::model::load_synthesis_primary(models, model_id as usize, synth_op, eng)?;
-    let area = Area::new(0, 0, original.w, original.h);
-    let refs = {
-        let r = rate_point_y(
-            eng, hdr, model, &synthesis, lh, latent, z_hat, scale_log, mask, q, num_chs, original,
-            area, pixels, None, None, stop,
-        )?;
-        (r.bpp, r.psnr, r.msssim)
-    };
-    let (sp, sm) = fixed_slopes(target_bpp_centi(model_id));
-    let (best, _loss) = optimize_y(
-        eng,
-        ctx,
-        hdr,
-        model,
-        &synthesis,
-        lh,
-        latent,
-        z_hat,
-        scale_log,
-        mask,
-        q,
-        num_chs,
-        original,
-        area,
-        pixels,
-        num_ite,
-        calc_lr(pixels),
-        0.7,
-        refs,
-        sp,
-        sm,
-        0.8,
-        stop,
+    // `process_y`: `setup_tiles_enc` over `numSamplesPerLumaTile` picture tiles
+    // (single whole-picture tile when the picture fits). `minimum_tile_size` is
+    // set whenever `ratio != 0` — our `loss_upstream` always mixes MS-SSIM
+    // (`loss = msssim·0.8 + psnr·0.2`).
+    let tiles = crate::tools::tiles::rdlr_tiles(
+        original.h,
+        original.w,
+        latent.h,
+        latent.w,
+        z_hat.h,
+        z_hat.w,
+        NUM_SAMPLES_PER_LUMA_TILE,
+        RDLR_TILE_OVERLAP,
+        RDLR_ALIGN,
+        Some(TILE_MIN_FOR_MSSSIM + RDLR_TILE_OVERLAP),
     )?;
+    let (sp, sm) = fixed_slopes(target_bpp_centi(model_id));
+    let lr0 = calc_lr(pixels);
+    let mut best = latent.clone();
+    for t in &tiles {
+        let lat_t = latent.window(t.latent.x, t.latent.y, t.latent.width, t.latent.height)?;
+        let im_t = original.window(t.image.x, t.image.y, t.image.width, t.image.height)?;
+        let z_t = z_hat.window(t.z.x, t.z.y, t.z.width, t.z.height)?;
+        let sl_t = scale_log.window(t.latent.x, t.latent.y, t.latent.width, t.latent.height)?;
+        let mask_t = mask.window(t.latent.x, t.latent.y, t.latent.width, t.latent.height)?;
+        // `get_ref_rate_data` — the un-optimised rate point of this tile.
+        let core_px = (t.core_img_rel.width * t.core_img_rel.height) as f64;
+        let r = rate_point_y(
+            eng,
+            hdr,
+            model,
+            &synthesis,
+            lh,
+            &lat_t,
+            &z_t,
+            &sl_t,
+            &mask_t,
+            q,
+            num_chs,
+            &im_t,
+            t.core_img_rel,
+            core_px,
+            None,
+            None,
+            stop,
+        )?;
+        let (best_t, _loss) = optimize_y(
+            eng,
+            ctx,
+            hdr,
+            model,
+            &synthesis,
+            lh,
+            &lat_t,
+            &z_t,
+            &sl_t,
+            &mask_t,
+            q,
+            num_chs,
+            &im_t,
+            t.core_img_rel,
+            core_px,
+            num_ite,
+            lr0,
+            0.7,
+            (r.bpp, r.psnr, r.msssim),
+            sp,
+            sm,
+            0.8,
+            Some(t.core_lat_rel),
+            stop,
+        )?;
+        // `assign_data(best_decisions['y'], optimized_part_of_lattile, best_y_tile)`.
+        assign_area(&mut best, &t.core_lat, &best_t, &t.core_lat_rel)?;
+    }
     Ok(best)
 }
 
@@ -2072,6 +2186,7 @@ mod oracle {
                 dump["rdlr.slope.psnrY"].f32s() as f64,
                 dump["rdlr.slope.msssim_Torch"].f32s() as f64,
                 dump["rdlr.ratio_psnr_msssim"].f32s() as f64,
+                None,
                 &enough::Unstoppable,
             )
             .unwrap();
