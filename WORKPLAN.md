@@ -143,6 +143,12 @@ construction, and say so in `PORTING.md`.
   `div` (sigmoid's `1/(1+e)`) and `select`/`blend` (elu_gate's `if x>0`) — both exist on
   `f32x` (`simd_gt`+`select`) and as scalar ops on `Lanes8`. `elu_gate` needs the
   `elu = select(x>0, x, exp(x)-1)` branch; keep it unfused `mul`/`add` throughout.
+  **Op names confirmed (magetypes f32x8/f32x16, same on f32x16):** `min`,`max`,`floor`,
+  `*`/`+`/`-`/`/` (exact `impl Div` — use it, NOT `recip`/`recip_portable`/`recip_newton`
+  which are approximations → not bit-identical), `simd_gt`, `blend(mask,t,f)`, `to_i32x8`,
+  `splat_t`, `load_t`, `store`. `i32x8`: `splat_t`, `+`, `shl_const::<23>`, `bitcast_to_f32`.
+  sigmoid: `splat(1) / (splat(1) + exp_lane(zero - x))` (exact div). elu_gate:
+  `e = exp_lane(x) - 1; elu = blend(x.simd_gt(zero), x, e); elu * g`.
 - **Regenerated-vector caveat (encode-side signature tests):** `make_reference_streams.sh all`
   now produces ~98 vectors on this box; every decode-side vector verifies bit-exact.
   Two encode-side tests diverge only on `img01` (the biggest, most float-sensitive input):
