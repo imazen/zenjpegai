@@ -68,7 +68,11 @@ Gotchas, all hit for real:
 - The upstream Makefiles call `python3-config`, absent in a uv venv. Build the two pybind11
   extensions by hand:
   `g++ -O3 -std=c++14 -fopenmp -shared -fPIC $(python -m pybind11 --includes) ans.cpp compressor.cpp decompressor.cpp -o ../../lib_wrappers/mans/ans$(python -c "import sysconfig;print(sysconfig.get_config_var('EXT_SUFFIX'))")`
-  (same for `direct/` → `lib_wrappers/direct/ec_direct…so`).
+  (same for `direct/` → `lib_wrappers/direct/ec_direct…so`). Built on this
+  box into `src/codec/entropy_coding/lib_wrappers/{mans,direct}/`.
+- Import the modules as `src.codec…` (the `src` package), never bare `codec…`:
+  putting `src/` on `sys.path` makes `ans.so` loadable under *both* namespaces
+  and pybind double-registers (`type "ANSEncoder" is already registered`).
 - Scripts under `scripts/` need `PYTHONPATH=.`.
 - CPU run: add `-target_device cpu`. Encoder:
   `python -m src.reco.coders.encoder IN.png OUT.bits --set_target_bpp 50 --cfg cfg/tools_off.json cfg/profiles/base.json -target_device cpu`;
