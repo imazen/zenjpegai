@@ -159,12 +159,12 @@ impl MemoryEstimate {
 pub fn estimate_memory(hdr: &PictureHeader, op: OperatingPoint) -> MemoryEstimate {
     /// Cold-start model-load peaks per `model_id` (β 0.002/0.012/0.075/0.5), measured
     /// tracked + ~13 % margin.
-    const MODEL_LOAD_PEAK: [u64; 4] = [70 << 20, 70 << 20, 84 << 20, 84 << 20];
+    const MODEL_LOAD_PEAK: [u64; 4] = [96 << 20, 96 << 20, 96 << 20, 96 << 20];
     const PER_PICTURE_SAMPLE: u64 = 20;
     let (fixed, per_tile_sample, extra_tile_sample): (u64, u64, u64) = match op {
-        OperatingPoint::Sop => (32 << 20, 36, 36),
-        OperatingPoint::Bop => (32 << 20, 92, 60),
-        OperatingPoint::Hop => (44 << 20, 970, 600),
+        OperatingPoint::Sop => (40 << 20, 50, 45),
+        OperatingPoint::Bop => (52 << 20, 105, 70),
+        OperatingPoint::Hop => (52 << 20, 1050, 650),
     };
     let (w, h) = (hdr.width as u64, hdr.height as u64);
     // Tile areas the way the decoder computes them (region-aware tiling only shrinks tiles,
