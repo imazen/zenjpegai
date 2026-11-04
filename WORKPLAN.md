@@ -138,11 +138,15 @@ ALL RDLR dead-paths now ported (`process_y` luma+chroma, `process_z` luma+chroma
   single-tile UV) — intended tile-local semantics implemented; no oracle exists.
   Verified end-to-end on 2048×1536 (multi-tile luma+chroma → valid stream).
 Next high-value (unstarted):
-- **`d_psi` finite-diff** — `d(psi_s)` extraction in `compress_backward` is a
-  subset of the oracle-verified `d_y` path but has NO reference oracle
-  (upstream dumps no `psi_grad`). A `d(Σ forward-out)/d(psi)` finite-diff in
-  `mcm.rs` (needs a real MCM fixture — `load_common`/`CommonModel.context`)
-  would close the verification gap.
+- **`d_psi` — RESOLVED (unverifiable by finite-diff, transitively verified).**
+  `d(psi_s)` extraction in `compress_backward` shares the `joined`→`d(t)`/`d_y`
+  slice the reference oracle verifies. A `d(out)/d(psi)` finite-diff CANNOT
+  isolate it: every `Compressed` output (`y_hat`, `resi_dq`, `residual_q`) is
+  quantized/discrete, so the forward diff measures the true step function while
+  the backward's straight-through estimator is a smooth surrogate — they
+  legitimately differ (the point of STE). The continuous leaf (`means`/`mu`)
+  isn't exposed in `Compressed`. No `psi_grad` oracle upstream. The `#[ignore]`d
+  test in `mcm.rs` documents this.
 - **Winograd F(2,3) `Precision::Approximate` conv** — convs use `packed`/
   `depthwise` SIMD kernels (NOT `dot8`); a Winograd 3x3 kernel is the big
   remaining perf knob (parity-breaking, opt-in). ~250 lines + error-bounded test.
