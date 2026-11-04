@@ -149,6 +149,17 @@ Next high-value (unstarted):
   test in `mcm.rs` documents this.
 - **Winograd F(2,3) `Precision::Approximate` conv** — convs use `packed`/
   `depthwise` SIMD kernels (NOT `dot8`); a Winograd 3x3 kernel is the big
-  remaining perf knob (parity-breaking, opt-in). ~250 lines + error-bounded test.
+  remaining perf knob (parity-breaking, opt-in). **Scope:** `PackedConv` runs
+  `conv_row<F>`/`block`/`tap_loop` (`conv.rs:92-160`) — accumulators in
+  registers across (icb, channel, tap); one weight-vector load + B
+  splat-load/mul_add per (channel, tap), 9 taps for 3x3. F(2,3): transform the
+  4x4 input tile `B^T d B` + the 3x3 kernel `G g G^T` (at pack time), 16
+  element-wise mults per 2x2 output instead of 36 (2.25x mult reduction),
+  output transform `A^T · A`. New `PackedWinograd` alongside `PackedConv` (the
+  kernel-pack transform is `G g G^T`; input tiles transformed per row-batch then
+  element-wise across the channel/GEMM dims; `y` output tiles transformed back).
+  `Precision::Approximate` opt-in (different rounding than the exact conv).
+  ~250 lines + error-bounded test vs `PackedConv`. `PackedIntConv`
+  (`int_conv.rs`) is int8-only (hyper-scale decoder) — not a float path.
 - f16-weight kernels, niche coverage vectors (per-tile eICCI, single-chroma
   tiles, 10-bit LEF/eICCI), GPU (separate workspace).
