@@ -560,7 +560,7 @@ impl<'a> Graph<'a> {
         let (row, dispatch) = grid1(y.len4(), 1);
         self.push(
             "pad",
-            || kernels::pad(),
+            kernels::pad,
             &[
                 x.h as u32,
                 x.w as u32,
