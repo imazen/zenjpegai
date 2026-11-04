@@ -94,8 +94,13 @@ construction, and say so in `PORTING.md`.
   MKL flags a different number of ill-posed solves than the reference host the table was pinned
   on (same environment-sensitivity class as the img01 encode signatures; the per-solve residual
   bound `res_mine <= res_ref·1.01` passes). Left pinned pending a deliberate re-pin on this box.
-  `rdlr_img30_bop_m1_b0`/`rdlr_img30_hop_m2_b0` still missing: the reference's RDLR needs the
-  exact encoder args + is upstream-fragile (chroma/z `process_y` crashes — documented below).
+  `rdlr_img30_bop_m1_b0`/`rdlr_img30_hop_m2_b0` **generated** via `dump_rdlr.py` — the missing
+  args were `cfg/tools_off.json` (every other vector layers it before the tool cfg; without it
+  extra multitools crash `get_active_tool`) + `cfg/tools/RDLR.json` (`numIteYLuma: 8`, chroma/z
+  off — the working luma-oracle path) + `-model.bitrate_matcher.enabled 0
+  -model.bitrate_matcher.target_tool_idx <model_id> -model.bitrate_matcher.target_beta_disp_Y 0`.
+  `rate_point_matches_reference_iterations` (BOP) **passes** all 8 iterations; `_hop` (28MB
+  model) replays the same path but is much slower per iteration (still running at write time).
 - **FIXED — `GpuEncoder` mis-headered non-BT.709 sources:** `GpuEncoder::encode` accepted
   `SourceImage::Yuv` but routed through `Encoder::encode_latents`, which hardcodes
   `SourceMeta::resolve(1,1,8,Bt709,...)` — so a YUV source got a BT.709 stream header instead
