@@ -235,10 +235,28 @@ Next high-value (unstarted):
   into `y`), so `encode` falls back to the wrapped CPU `Encoder::encode`
   (tiled, correct) on multi-tile pictures; the raw-tensor `encode_input`
   still rejects multi-tile (`GpuError::Shape`). Still missing: per-tile
-  GPU analysis — per-tile `GpuAnalysis::luma/chroma` on `window`ed
-  planes + merge + per-tile `HyperEncoder` (CPU —
-  `model::hyper_encoder::HyperEncoder::load`, `Encoder`'s `hyper` is
-  private) → `encode_latents(latents, Some(z_hats))`; `clip_thres`
+  GPU analysis — the mapped recipe (mirroring `analyse_component`,
+  encoder/mod.rs:1147-1234): per component `ccs`, `grid =
+  Encoder::analysis_tile_grid(pic_w, pic_h, ccs, params)`; merged
+  `y = Tensor::<f32>::zeros(LATENT_CHANNELS[ccs], lh, lw)`, `z_hat =
+  Tensor::<i8>::zeros(..., hz, wz)` with `d = LATENT_DOWNSCALE[ccs]`
+  (=`[16,8]`), `lh = ph.div_ceil(d)`, `hz = ph.div_ceil(4*d)`
+  (HYPER_DOWNSCALE `[64,32]` = 4×d; both `pub` in `encoder::tiles`,
+  `LATENT_CHANNELS=[160,96]` `pub` in `header`). Per tile `t`:
+  `tile = plane.window(t.image.{x,y,width,height})`; `yt` = GPU
+  `GpuAnalysis::luma/chroma` on the tile → planar `Tensor<f32>`;
+  `bt = BTensor::from_planar_par(eng, &yt, eng.tier.block())`;
+  `zt = hyper[ccs].forward_clip(eng, &bt, t.image.height, t.image.width,
+  d, clip, &Unstoppable)?.to_planar()`; quantize `v.clamp(-(Z_OFFSET as
+  f32), (Z_OFFSET-1) as f32).round_ties_even() as i8` (Z_OFFSET=31,
+  `model::common`, pub); merge `assign(&mut y, t.latent_core, &yt,
+  t.latent_core_offset)` + `assign(&mut z_hat, t.hyper_core, &zq,
+  t.hyper_core_offset)` — `assign` is encoder-private (mod.rs:2321),
+  replicate ~20 lines in the gpu crate. Then `encode_latents([&y,&uv],
+  Some([&z_y,&z_uv]), w, h, params, None)`. Blockers to wire:
+  `GpuEncoder` needs an `Engine` field (hyper is CPU) + `[HyperEncoder;2]`
+  via `model::load_hyper_encoder(&models, model_id, ccs, op, eng)` —
+  Encoder's own `hyper` is private so it loads its own. `clip_thres`
   (dormant upstream — no shipped model
   carries it); a GPU-vs-reference *bitstream* check.
 - **f16 shaders (B3):** conv *weights* f16-packed on `SHADER_F16` devices
