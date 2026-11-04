@@ -37,9 +37,10 @@ construction, and say so in `PORTING.md`.
   dead code. Our `optimize_uv`/`optimize_z`/`process_z` (`rdlr.rs:723-2540`) are
   construction-complete + self-consistent (`rdlr_roundtrip`, `num_ite_uv/z=2`),
   unverifiable until that patch exists. chroma `process_y` machinery DONE (c2fe1ec);
-  `process_z` pending (`cfg/tools/RDLR.json`: `numIteYLuma=8` shipped, `numIteYChroma`,
-  `numIteZLuma`, `numIteZChroma = 0`; set them >0 in a reference cfg → the path RUNS, so there
-  IS an oracle — dump + compare). Three sub-parts:
+  `process_z` pending — and the patch is *semantically* uncertain, not just mechanical:
+  `mask2`/`psi` are computed at luma latent res but indexed into the chroma latent, so a
+  "fix" must choose a downsample/upsample the reference never defined (it would be
+  inventing semantics, not restoring them). Three sub-parts:
     1. **chroma `process_y`** (`rdlr_comp_UV.py::RDLRCompUV.rdlr_y_iteration` /
        `get_current_rate_point`): chroma `optimize_y` variant. Loss = mean of per-channel
        PSNR+rate direction projections (psnrU/psnrV vs rate_log_diff, `normal_vec` from
