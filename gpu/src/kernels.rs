@@ -147,14 +147,31 @@ fn acc_store(ob: u32, px: u32, act: Act, res: Option<Res>) -> String {
         .collect()
 }
 
+/// `mat4x4<f32>(wt[idx])` on the f16 path (widen), `wt[idx]` on f32 —
+/// `mat4x4<f32>(mat4x4<f32>)` is not a valid WGSL constructor, so the wrap
+/// is conditional, not unconditional.
+fn wmat(w16: bool, idx: &str) -> String {
+    if w16 {
+        format!("mat4x4<f32>(wt[{idx}])")
+    } else {
+        format!("wt[{idx}]")
+    }
+}
+
 /// The shared conv bindings, `wt` typed `f32` or `f16` (`ConvVariant::w16`);
 /// `enable f16;` is prepended on the f16 path.
+/// `enable f16;` is a global directive — it must precede `struct P` and every
+/// global declaration, so it is emitted at the top of the module, not in the
+/// bindings.
+fn f16_enable(w16: bool) -> &'static str {
+    if w16 { "enable f16;\n" } else { "" }
+}
+
+/// The shared conv bindings, `wt` typed `f32` or `f16` (`ConvVariant::w16`).
 fn conv_bindings(w16: bool) -> String {
-    let en = if w16 { "enable f16;\n" } else { "" };
     let ty = if w16 { "f16" } else { "f32" };
     format!(
-        "{en}
-@group(0) @binding(1) var<storage, read> src: array<vec4<f32>>;
+        "@group(0) @binding(1) var<storage, read> src: array<vec4<f32>>;
 @group(0) @binding(2) var<storage, read_write> dst: array<vec4<f32>>;
 @group(0) @binding(3) var<storage, read> wt: array<mat4x4<{ty}>>;
 @group(0) @binding(4) var<storage, read> bias: array<vec4<f32>>;
@@ -197,7 +214,10 @@ pub fn conv(v: &ConvVariant) -> String {
         .collect();
     let mut step = String::new();
     for i in 0..v.ob {
-        step.push_str(&format!("        let w{i} = mat4x4<f32>(wt[w + {i}u]);\n"));
+        step.push_str(&format!(
+            "        let w{i} = {};\n",
+            wmat(v.w16, &format!("w + {i}u"))
+        ));
     }
     for p in 0..v.px {
         step.push_str(&format!(
@@ -210,7 +230,7 @@ pub fn conv(v: &ConvVariant) -> String {
         step.push_str("        }\n");
     }
     format!(
-        "{params}{bindings}{res_binding}
+        "{en}{params}{bindings}{res_binding}
 const KH: u32 = {kh}u; const KW: u32 = {kw}u; const STRIDE: u32 = {stride}u; const OB: u32 = {ob}u; const PX: u32 = {px}u;
 const ICG4: u32 = {icg4}u; const OCG4: u32 = {ocg4}u;
 @compute @workgroup_size({wg}, {wg}, 1)
@@ -235,6 +255,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{
   let o = (gid.y * p.out_w + ox0) * p.out_c4 + oc4;
 {store}}}
 ",
+        en = f16_enable(v.w16),
         params = params(&[
             "in_h", "in_w", "in_c4", "out_h", "out_w", "out_c4", "pad_y", "pad_x", "icg4", "ocg4"
         ]),
@@ -300,8 +321,8 @@ pub fn conv_tiled(v: &ConvVariant, ich: u32) -> String {
         }
         let wsrc = if wtap { "wtile" } else { "wt" };
         for i in 0..v.ob {
-            let w = if wsrc == "wt" && v.w16 {
-                format!("mat4x4<f32>(wt[w + {i}u])")
+            let w = if wsrc == "wt" {
+                wmat(v.w16, &format!("w + {i}u"))
             } else {
                 format!("{wsrc}[w + {i}u]")
             };
@@ -315,7 +336,7 @@ pub fn conv_tiled(v: &ConvVariant, ich: u32) -> String {
         .map(|(ky, kx)| tap(ky, kx))
         .collect();
     format!(
-        "{params}{bindings}{res_binding}
+        "{en}{params}{bindings}{res_binding}
 const KH: u32 = {kh}u; const KW: u32 = {kw}u; const OB: u32 = {ob}u;
 const ICG4: u32 = {icg4}u; const OCG4: u32 = {ocg4}u; const ICH: u32 = {ich}u; const TW: u32 = {tw}u;
 var<workgroup> tile: array<vec4<f32>, {tile_n}u>;
@@ -353,6 +374,7 @@ fn main(
   let o = (oy * p.out_w + ox) * p.out_c4 + oc4;
 {store}}}
 ",
+        en = f16_enable(v.w16),
         params = params(&[
             "in_h", "in_w", "in_c4", "out_h", "out_w", "out_c4", "pad_y", "pad_x", "icg4", "ocg4"
         ]),
@@ -375,9 +397,13 @@ fn main(
         },
         wtile_stage = if v.kh > 1 {
             format!(
-                "    for (var i = tid; i < {}u; i += {}u) {{\n      let tp = i / (ICH * OB);\n      let r = i % (ICH * OB);\n      wtile[i] = mat4x4<f32>(wt[((og * KH + tp / KW) * KW + tp % KW) * ICG4 * OB + (ic0 + r / OB) * OB + r % OB]);\n    }}\n",
+                "    for (var i = tid; i < {}u; i += {}u) {{\n      let tp = i / (ICH * OB);\n      let r = i % (ICH * OB);\n      wtile[i] = {};\n    }}\n",
                 v.kh * v.kw * ich * v.ob,
                 wg * wg,
+                wmat(
+                    v.w16,
+                    "((og * KH + tp / KW) * KW + tp % KW) * ICG4 * OB + (ic0 + r / OB) * OB + r % OB"
+                ),
             )
         } else {
             String::new()
@@ -399,11 +425,16 @@ fn main(
 /// Params: `in_h in_w in_c4 out_h out_w out_c4 pad`.
 pub fn conv_transpose(k: u32, stride: u32, ob: u32, ic4: u32, w16: bool) -> String {
     let acc_step: String = (0..ob)
-        .map(|i| format!("        a0_{i} += mat4x4<f32>(wt[w + {i}u]) * v;\n"))
+        .map(|i| {
+            format!(
+                "        a0_{i} += {} * v;\n",
+                wmat(w16, &format!("w + {i}u"))
+            )
+        })
         .collect();
     let bindings = conv_bindings(w16);
     format!(
-        "{params}{bindings}
+        "{en}{params}{bindings}
 const K: u32 = {k}u; const STRIDE: u32 = {stride}u; const OB: u32 = {ob}u; const IC4: u32 = {ic4}u;
 @compute @workgroup_size({WG}, {WG}, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{
@@ -431,6 +462,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{
   let o = (gid.y * p.out_w + gid.x) * p.out_c4 + oc4;
 {store}}}
 ",
+        en = f16_enable(w16),
         params = params(&["in_h", "in_w", "in_c4", "out_h", "out_w", "out_c4", "pad"]),
         decl = acc_decl(ob, 1, "oc4"),
         step = acc_step,
