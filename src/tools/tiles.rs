@@ -400,10 +400,10 @@ pub fn rdlr_tiles(
 mod tests {
     use super::*;
 
-    /// `setup_tiles_enc` + `_init_image_tiles_with_overlap` + `init_latent_tiles`
-    /// + `get_core_of_overlapping_*_tile` for a 2400x2400 picture at
-    /// `numSamplesPerTile` = 1 MP (tile 1024, overlap 64, alignment 16):
-    /// strides of 960 → a 3x3 grid, last column/row 480 wide/high.
+    /// `setup_tiles_enc` + `_init_image_tiles_with_overlap` + `init_latent_tiles` +
+    /// `get_core_of_overlapping_*_tile` for a 2400x2400 picture at `numSamplesPerTile`
+    /// = 1 MP (tile 1024, overlap 64, alignment 16): strides of 960 → a 3x3 grid,
+    /// last column/row 480 wide/high.
     #[test]
     fn rdlr_tiles_grid_and_cores() {
         let t = rdlr_tiles(2400, 2400, 150, 150, 38, 38, 1 << 20, 64, 16, None).unwrap();

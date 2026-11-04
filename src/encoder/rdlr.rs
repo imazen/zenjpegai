@@ -2386,6 +2386,7 @@ pub(crate) struct ZRatePoint {
 /// `process_z`'s `encode_z + encode_y` eval: `z_hat_cont` (the STE-quantized
 /// continuous hyper-latent) → `z_hat_i8` (integer) → `psi` (hyper-decoder,
 /// differentiable) + `scale_log` (int `hsd`) + `compress` → `rate_y` + `z_bits`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn rate_point_z(
     eng: &Engine,
     ccs: usize,
@@ -2450,6 +2451,7 @@ pub(crate) fn rate_point_z(
 /// `scale_log` (the int `hsd` path) is held fixed, matching the reference's
 /// zero gradient through its integer convolutions. The `encode_z` term is the
 /// `z_nbits` LUT's local slope.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn backward_z(
     eng: &Engine,
     model: &crate::model::common::CommonModel,
@@ -2540,6 +2542,7 @@ fn quant_z(z_hat: &Tensor<f32>) -> Result<Tensor<i8>> {
 /// `process_z`: optimize `z_Y`'s `z_hat` toward `encode_z + encode_y` total
 /// bits via the `Substract` additive filter + Adagrad(lr·0.9/iter). Returns the
 /// best integer `z_hat` (`best['z_hat'].round()`).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn optimize_z(
     eng: &Engine,
     ccs: usize,

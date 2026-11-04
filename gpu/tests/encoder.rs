@@ -25,10 +25,7 @@ fn source(w: usize, h: usize) -> RgbImage {
 }
 
 fn decode_rgb(stream: &[u8]) -> Vec<u16> {
-    Decoder::new(models_dir())
-        .decode(stream)
-        .unwrap()
-        .data
+    Decoder::new(models_dir()).decode(stream).unwrap().data
 }
 
 #[test]

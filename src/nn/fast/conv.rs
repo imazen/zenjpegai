@@ -1140,8 +1140,8 @@ impl PackedConv {
                     }
                 }
                 let mut taps = [(None, 0usize); MAX_TAPS];
-                for tt in 0..ntaps {
-                    taps[tt] = (Some(tt), 0);
+                for (tt, tap) in taps.iter_mut().enumerate().take(ntaps) {
+                    *tap = (Some(tt), 0);
                 }
                 if ocb2() {
                     // Register tile on the packed tile: each input splat feeds
