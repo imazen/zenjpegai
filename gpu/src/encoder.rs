@@ -71,32 +71,6 @@ impl GpuEncoder {
         Ok(a)
     }
 
-    /// Run `f` (the analysis forward) on a normalized input map, returning
-    /// the latent as planar `[C, H, W]`.
-    fn run_analysis(
-        &self,
-        input: &Tensor<f32>,
-        f: impl FnOnce(&mut Graph<'_>, T) -> Result<T>,
-    ) -> Result<(usize, usize, usize, Vec<f32>)> {
-        let (h, w) = (input.h, input.w);
-        let mut g = Graph::new(&self.ctx);
-        let x = g.input(input.c, h, w)?;
-        let lat = f(&mut g, x)?;
-        g.output(lat);
-        let plan = g.finish(&self.pool)?;
-        // Normalize `(v - 127.5) / 128` on the host during upload.
-        let norm: Vec<f32> = input.data.iter().map(|&v| (v - 127.5) / 128.0).collect();
-        plan.write(&self.ctx, x, &norm)?;
-        let mut enc = self
-            .ctx
-            .device()
-            .create_command_encoder(&Default::default());
-        plan.encode(&mut enc, None);
-        self.ctx.queue().submit([enc.finish()]);
-        let data = self.read_latent(&plan, lat)?;
-        Ok((lat.c, lat.h, lat.w, data))
-    }
-
     /// Copy `t`'s HWC4 buffer back and unpack to planar `[C, H, W]`.
     fn read_latent(&self, plan: &Plan, t: T) -> Result<Vec<f32>> {
         let bytes = (t.len4() * 4) as u64;
@@ -170,11 +144,38 @@ impl GpuEncoder {
         }
         let analysis = self.analysis(model_id, params.op)?;
         let (h, w) = (luma.h, luma.w);
-        let (yc, yh, yw, yd) = self.run_analysis(luma, |g, x| analysis.luma(g, x, h, w))?;
         let (ch, cw) = (chroma.h, chroma.w);
-        let (_c, uh, uw, ud) = self.run_analysis(chroma, |g, x| analysis.chroma(g, x, ch, cw))?;
-        let y = Tensor::from_vec(yc, yh, yw, yd).map_err(|e| GpuError::Shape(e.to_string()))?;
-        let uv = Tensor::from_vec(_c, uh, uw, ud).map_err(|e| GpuError::Shape(e.to_string()))?;
+        // Luma and chroma share one graph, one plan and one submission — the
+        // two analyses are independent dispatches, so this halves the
+        // plan-build + submit + sync the split version paid twice.
+        let mut g = Graph::new(&self.ctx);
+        let xl = g.input(luma.c, h, w)?;
+        let yl = analysis.luma(&mut g, xl, h, w)?;
+        g.output(yl);
+        let xc = g.input(chroma.c, ch, cw)?;
+        let uvl = analysis.chroma(&mut g, xc, ch, cw)?;
+        g.output(uvl);
+        let plan = g.finish(&self.pool)?;
+        let norm = |t: &Tensor<f32>| {
+            t.data
+                .iter()
+                .map(|&v| (v - 127.5) / 128.0)
+                .collect::<Vec<f32>>()
+        };
+        plan.write(&self.ctx, xl, &norm(luma))?;
+        plan.write(&self.ctx, xc, &norm(chroma))?;
+        let mut enc = self
+            .ctx
+            .device()
+            .create_command_encoder(&Default::default());
+        plan.encode(&mut enc, None);
+        self.ctx.queue().submit([enc.finish()]);
+        let yd = self.read_latent(&plan, yl)?;
+        let ud = self.read_latent(&plan, uvl)?;
+        let y =
+            Tensor::from_vec(yl.c, yl.h, yl.w, yd).map_err(|e| GpuError::Shape(e.to_string()))?;
+        let uv = Tensor::from_vec(uvl.c, uvl.h, uvl.w, ud)
+            .map_err(|e| GpuError::Shape(e.to_string()))?;
         self.cpu
             .encode_latents([&y, &uv], None, w, h, params, None)
             .map(|(stream, _)| stream)
