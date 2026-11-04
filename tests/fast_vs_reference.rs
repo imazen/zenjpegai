@@ -605,15 +605,25 @@ fn conv2d_s2_phase_edge() {
 #[test]
 fn phase_32x32_8x58() {
     let mut rng = Rng(99);
-    let conv = Conv2d::new(32,32,(3,3),2,(1,1),1,rng.vec(32*32*9),Some(rng.vec(32))).unwrap();
-    let x = Tensor::from_vec(32,8,58,rng.vec(32*8*58)).unwrap();
+    let conv = Conv2d::new(
+        32,
+        32,
+        (3, 3),
+        2,
+        (1, 1),
+        1,
+        rng.vec(32 * 32 * 9),
+        Some(rng.vec(32)),
+    )
+    .unwrap();
+    let x = Tensor::from_vec(32, 8, 58, rng.vec(32 * 8 * 58)).unwrap();
     let _env = ENV_LOCK.lock().unwrap();
     for eng in engines() {
         let v = eng.tier.block();
-        let packed = PackedConv::new(&conv, v, [0;4]).unwrap();
+        let packed = PackedConv::new(&conv, v, [0; 4]).unwrap();
         let bx = BTensor::from_planar(&x, v).unwrap();
         let want = packed.forward(&eng, &bx).unwrap();
-        unsafe { std::env::set_var("ZENJPEGAI_CONV_S2_PHASE","1") };
+        unsafe { std::env::set_var("ZENJPEGAI_CONV_S2_PHASE", "1") };
         let got = packed.forward(&eng, &bx).unwrap();
         unsafe { std::env::remove_var("ZENJPEGAI_CONV_S2_PHASE") };
         assert_eq!(want.data, got.data, "32x32 s2 8x58 {eng:?}");
@@ -622,14 +632,24 @@ fn phase_32x32_8x58() {
 #[test]
 fn blis_32x32_8x58() {
     let mut rng = Rng(98);
-    let conv = Conv2d::new(32,32,(3,3),2,(1,1),1,rng.vec(32*32*9),Some(rng.vec(32))).unwrap();
-    let x = Tensor::from_vec(32,8,58,rng.vec(32*8*58)).unwrap();
+    let conv = Conv2d::new(
+        32,
+        32,
+        (3, 3),
+        2,
+        (1, 1),
+        1,
+        rng.vec(32 * 32 * 9),
+        Some(rng.vec(32)),
+    )
+    .unwrap();
+    let x = Tensor::from_vec(32, 8, 58, rng.vec(32 * 8 * 58)).unwrap();
     let _env = ENV_LOCK.lock().unwrap();
     for eng in engines() {
         let v = eng.tier.block();
-        let packed = PackedConv::new(&conv, v, [0;4]).unwrap();
+        let packed = PackedConv::new(&conv, v, [0; 4]).unwrap();
         let bx = BTensor::from_planar(&x, v).unwrap();
-        unsafe { std::env::set_var("ZENJPEGAI_CONV_NOBLIS","1") };
+        unsafe { std::env::set_var("ZENJPEGAI_CONV_NOBLIS", "1") };
         let want = packed.forward(&eng, &bx).unwrap();
         unsafe { std::env::remove_var("ZENJPEGAI_CONV_NOBLIS") };
         let got = packed.forward(&eng, &bx).unwrap();
