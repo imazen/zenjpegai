@@ -87,7 +87,7 @@ fn elu_gate_slice(a: &mut [f32], b: &[f32]) {
 /// The sub-lane tail falls back to the scalar slices, which are bit-identical
 /// for the same reason. Modelled on `zenmetrics-math`'s `expf_libm_lanes!`.
 macro_rules! exp_lanes {
-    ($cexp:ident, $sig:ident, $elu:ident, $F:ident, $I:ident, $conv:ident) => {
+    ($cexp:ident, $sig:ident, $elu:ident, $sexp:ident, $elub:ident, $F:ident, $I:ident, $conv:ident) => {
         /// Cephes `exp` on one `$F` lane vector, bit-identical to [`exp`].
         #[inline(always)]
         fn $cexp<T: $conv>(t: T, x: $F<T>) -> $F<T> {
@@ -138,14 +138,85 @@ macro_rules! exp_lanes {
             }
             elu_gate_slice(at, bt);
         }
+
+        /// `data[i] = exp(data[i] - m)` — lane chunks + scalar tail. The softmax
+        /// numerator; the `sum` stays a fixed-order scalar `f64` accumulate.
+        #[inline(always)]
+        fn $sexp<T: $conv>(t: T, data: &mut [f32], m: f32) {
+            let sm = $F::<T>::splat_t(t, m);
+            let (chunks, tail) = $F::<T>::partition_slice_mut_t(t, data);
+            for c in chunks.iter_mut() {
+                let x = $F::<T>::load_t(t, c);
+                $cexp(t, x - sm).store(c);
+            }
+            for v in tail {
+                *v = exp(*v - m);
+            }
+        }
+
+        /// `elu_gate` backward: `d_a = elu'(a)·b·d`, `d_b = elu(a)·d` — one
+        /// `exp` lane call yields both `elu`/`delu`. Lanes + scalar tail.
+        #[inline(always)]
+        fn $elub<T: $conv>(
+            t: T,
+            d: &[f32],
+            a: &[f32],
+            b: &[f32],
+            d_a: &mut [f32],
+            d_b: &mut [f32],
+        ) {
+            let s = $F::<T>::splat_t;
+            let (dac, dat) = $F::<T>::partition_slice_mut_t(t, d_a);
+            let (dbc, dbt) = $F::<T>::partition_slice_mut_t(t, d_b);
+            let (ac, at) = $F::<T>::partition_slice_t(t, a);
+            let (bc, bt) = $F::<T>::partition_slice_t(t, b);
+            let (dc, dt) = $F::<T>::partition_slice_t(t, d);
+            for (((da, db), (av, bv)), o) in dac
+                .iter_mut()
+                .zip(dbc.iter_mut())
+                .zip(ac.iter().zip(bc.iter()))
+                .zip(dc.iter())
+            {
+                let xv = $F::<T>::load_t(t, av);
+                let e = $cexp(t, xv);
+                let pos = xv.simd_gt(s(t, 0.0));
+                let elu = $F::<T>::blend(pos, xv, e - s(t, 1.0));
+                let delu = $F::<T>::blend(pos, s(t, 1.0), e);
+                let ov = $F::<T>::load_t(t, o);
+                (delu * $F::<T>::load_t(t, bv) * ov).store(da);
+                (elu * ov).store(db);
+            }
+            for (((da, db), (&av, &bv)), &o) in dat
+                .iter_mut()
+                .zip(dbt.iter_mut())
+                .zip(at.iter().zip(bt.iter()))
+                .zip(dt.iter())
+            {
+                let elu = if av > 0.0 { av } else { exp(av) - 1.0 };
+                let delu = if av > 0.0 { 1.0 } else { exp(av) };
+                *da = delu * bv * o;
+                *db = elu * o;
+            }
+        }
     };
 }
 
-exp_lanes!(cephes_exp8, sigmoid8, elu8, f32x8, i32x8, F32x8Convert);
+exp_lanes!(
+    cephes_exp8,
+    sigmoid8,
+    elu8,
+    softmax_exp8,
+    elu_bwd8,
+    f32x8,
+    i32x8,
+    F32x8Convert
+);
 exp_lanes!(
     cephes_exp16,
     sigmoid16,
     elu16,
+    softmax_exp16,
+    elu_bwd16,
     f32x16,
     i32x16,
     F32x16Convert
@@ -214,6 +285,76 @@ fn run_elu_gate_slice(tier: Tier, a: &mut [f32], b: &[f32]) {
         #[cfg(target_arch = "wasm32")]
         Tier::Wasm128(t) => elu_wasm(t, a, b),
         Tier::Scalar => elu_gate_slice(a, b),
+    }
+}
+
+#[arcane]
+fn softmax_v4(t: X64V4Token, data: &mut [f32], m: f32) {
+    softmax_exp16::<X64V4Token>(t, data, m)
+}
+#[arcane]
+fn softmax_v3(t: X64V3Token, data: &mut [f32], m: f32) {
+    softmax_exp8::<X64V3Token>(t, data, m)
+}
+#[arcane]
+fn softmax_neon(t: NeonToken, data: &mut [f32], m: f32) {
+    softmax_exp8::<NeonToken>(t, data, m)
+}
+#[cfg(target_arch = "wasm32")]
+#[arcane]
+fn softmax_wasm(t: Wasm128Token, data: &mut [f32], m: f32) {
+    softmax_exp8::<Wasm128Token>(t, data, m)
+}
+
+/// Softmax `exp(x - m)` on `tier`'s lanes — bit-identical to scalar on every element.
+fn run_softmax_exp_slice(tier: Tier, data: &mut [f32], m: f32) {
+    match tier {
+        #[cfg(all(target_arch = "x86_64", feature = "avx512"))]
+        Tier::V4(t) => softmax_v4(t, data, m),
+        #[cfg(target_arch = "x86_64")]
+        Tier::V3(t) => softmax_v3(t, data, m),
+        #[cfg(target_arch = "aarch64")]
+        Tier::Neon(t) => softmax_neon(t, data, m),
+        #[cfg(target_arch = "wasm32")]
+        Tier::Wasm128(t) => softmax_wasm(t, data, m),
+        Tier::Scalar => {
+            for v in data {
+                *v = exp(*v - m);
+            }
+        }
+    }
+}
+
+#[arcane]
+fn elu_bwd_v4(t: X64V4Token, d: &[f32], a: &[f32], b: &[f32], da: &mut [f32], db: &mut [f32]) {
+    elu_bwd16::<X64V4Token>(t, d, a, b, da, db)
+}
+#[arcane]
+fn elu_bwd_v3(t: X64V3Token, d: &[f32], a: &[f32], b: &[f32], da: &mut [f32], db: &mut [f32]) {
+    elu_bwd8::<X64V3Token>(t, d, a, b, da, db)
+}
+#[arcane]
+fn elu_bwd_neon(t: NeonToken, d: &[f32], a: &[f32], b: &[f32], da: &mut [f32], db: &mut [f32]) {
+    elu_bwd8::<NeonToken>(t, d, a, b, da, db)
+}
+#[cfg(target_arch = "wasm32")]
+#[arcane]
+fn elu_bwd_wasm(t: Wasm128Token, d: &[f32], a: &[f32], b: &[f32], da: &mut [f32], db: &mut [f32]) {
+    elu_bwd8::<Wasm128Token>(t, d, a, b, da, db)
+}
+
+/// `elu_gate` backward on `tier`'s lanes — bit-identical to scalar on every element.
+fn run_elu_bwd_slice(tier: Tier, d: &[f32], a: &[f32], b: &[f32], da: &mut [f32], db: &mut [f32]) {
+    match tier {
+        #[cfg(all(target_arch = "x86_64", feature = "avx512"))]
+        Tier::V4(t) => elu_bwd_v4(t, d, a, b, da, db),
+        #[cfg(target_arch = "x86_64")]
+        Tier::V3(t) => elu_bwd_v3(t, d, a, b, da, db),
+        #[cfg(target_arch = "aarch64")]
+        Tier::Neon(t) => elu_bwd_neon(t, d, a, b, da, db),
+        #[cfg(target_arch = "wasm32")]
+        Tier::Wasm128(t) => elu_bwd_wasm(t, d, a, b, da, db),
+        Tier::Scalar => elu_gate_backward_scalar(d, a, b, da, db),
     }
 }
 
@@ -423,9 +564,9 @@ fn channel_attention_impl(
             } * temperature[head];
             max = max.max(*a);
         }
+        run_softmax_exp_slice(eng.tier, row, max);
         let mut sum = 0.0f64;
-        for a in row.iter_mut() {
-            *a = exp(*a - max);
+        for a in row.iter() {
             sum += *a as f64;
         }
         let sum = sum as f32;
@@ -695,6 +836,10 @@ pub fn channel_attention_backward(
 /// `d_a = elu'(a)·b·d` (`elu'(x) = 1` for `x>0`, `exp(x)` else) and
 /// `d_b = elu(a)·d`. `a`/`b` are the forward's pre-gating halves. RDLR VJP.
 pub fn elu_gate_backward(d: &[f32], a: &[f32], b: &[f32], d_a: &mut [f32], d_b: &mut [f32]) {
+    run_elu_bwd_slice(Tier::detect(), d, a, b, d_a, d_b)
+}
+
+fn elu_gate_backward_scalar(d: &[f32], a: &[f32], b: &[f32], d_a: &mut [f32], d_b: &mut [f32]) {
     for (((da, db), (&av, &bv)), &o) in d_a
         .iter_mut()
         .zip(d_b.iter_mut())
