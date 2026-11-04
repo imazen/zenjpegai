@@ -31,13 +31,16 @@ use crate::error::{GpuError, Result};
 use crate::layers::unpack_hwc4;
 use crate::plan::{Graph, Plan, Pool, T};
 
+/// Per-(model, operating-point) hyper-encoder pair cache.
+type HyperMap = Mutex<HashMap<(usize, OperatingPoint), Arc<[HyperEncoder; 2]>>>;
+
 /// GPU analysis + CPU `encode_latents`. `GpuEncoder` is `Sync`.
 pub struct GpuEncoder {
     ctx: Arc<GpuContext>,
     cpu: Encoder,
     eng: Engine,
     models: Box<dyn ModelSource + Send + Sync>,
-    hypers: Mutex<HashMap<(usize, OperatingPoint), Arc<[HyperEncoder; 2]>>>,
+    hypers: HyperMap,
     analyses: Mutex<HashMap<(usize, OperatingPoint), Arc<GpuAnalysis>>>,
     pool: Arc<Mutex<Pool>>,
 }
@@ -177,7 +180,13 @@ impl GpuEncoder {
             .meta(params.c_ver, params.c_hor)
             .map_err(GpuError::Codec)?;
         let input = preprocess(&src, &meta).map_err(GpuError::Codec)?;
-        self.encode_input(&input.luma, &input.chroma, params.model_id as usize, params)
+        self.encode_impl(
+            &input.luma,
+            &input.chroma,
+            params.model_id as usize,
+            params,
+            &meta,
+        )
     }
 
     /// Whole-picture encode from pre-made analysis inputs: `luma`
@@ -193,6 +202,30 @@ impl GpuEncoder {
         model_id: usize,
         params: EncodeParams,
     ) -> Result<Vec<u8>> {
+        // Raw latents carry no source metadata — BT.709 4:4:4, like `Encoder::encode_latents`.
+        let meta = zenjpegai::encoder::SourceMeta::resolve(
+            1,
+            1,
+            8,
+            zenjpegai::header::ColourTransform::Bt709,
+            params.c_ver,
+            params.c_hor,
+        )
+        .map_err(GpuError::Codec)?;
+        self.encode_impl(luma, chroma, model_id, params, &meta)
+    }
+
+    /// The shared whole-picture / tiled encode behind `encode` and `encode_input`, with the
+    /// source's real `meta` so non-BT.709 inputs (`SourceImage::Yuv`) keep `colour_transform_idx`
+    /// and `s_ver`/`s_hor` in the stream header.
+    fn encode_impl(
+        &self,
+        luma: &Tensor<f32>,
+        chroma: &Tensor<f32>,
+        model_id: usize,
+        params: EncodeParams,
+        meta: &zenjpegai::encoder::SourceMeta,
+    ) -> Result<Vec<u8>> {
         for ccs in 0..2 {
             let (w, h) = if ccs == 0 {
                 (luma.w, luma.h)
@@ -204,7 +237,7 @@ impl GpuEncoder {
                 .len()
                 != 1
             {
-                return self.encode_tiled(luma, chroma, model_id, params);
+                return self.encode_tiled(luma, chroma, model_id, params, meta);
             }
         }
         let analysis = self.analysis(model_id, params.op)?;
@@ -242,7 +275,7 @@ impl GpuEncoder {
         let uv = Tensor::from_vec(uvl.c, uvl.h, uvl.w, ud)
             .map_err(|e| GpuError::Shape(e.to_string()))?;
         self.cpu
-            .encode_latents([&y, &uv], None, w, h, params, None)
+            .encode_latents_with([&y, &uv], None, w, h, meta, params, None)
             .map(|(stream, _)| stream)
             .map_err(|e| GpuError::Codec(e.error().clone()))
     }
@@ -258,6 +291,7 @@ impl GpuEncoder {
         chroma: &Tensor<f32>,
         model_id: usize,
         params: EncodeParams,
+        meta: &zenjpegai::encoder::SourceMeta,
     ) -> Result<Vec<u8>> {
         let hyper = self.hyper(model_id, params.op)?;
         let mut parts: [Option<(Tensor<f32>, Tensor<i8>)>; 2] = [None, None];
@@ -315,7 +349,15 @@ impl GpuEncoder {
         let (y, zy) = parts[0].take().unwrap();
         let (uv, zuv) = parts[1].take().unwrap();
         self.cpu
-            .encode_latents([&y, &uv], Some([&zy, &zuv]), luma.w, luma.h, params, None)
+            .encode_latents_with(
+                [&y, &uv],
+                Some([&zy, &zuv]),
+                luma.w,
+                luma.h,
+                meta,
+                params,
+                None,
+            )
             .map(|(stream, _)| stream)
             .map_err(|e| GpuError::Codec(e.error().clone()))
     }

@@ -664,11 +664,28 @@ impl Encoder {
         params: EncodeParams,
         quality_map: Option<&QualityMap>,
     ) -> core::result::Result<(Vec<u8>, [ComponentTrace; 2]), At<Error>> {
-        let _grant = self
-            .check_limits(width, height, params.op, false, &enough::Unstoppable)
-            .map_err(|e| at!(e))?;
         // Latents carry no source metadata: the reference's default (8 bit, 4:4:4, BT.709).
         let meta = SourceMeta::resolve(1, 1, 8, ColourTransform::Bt709, params.c_ver, params.c_hor)
+            .map_err(|e| at!(e))?;
+        self.encode_latents_with(latents, z_hats, width, height, &meta, params, quality_map)
+    }
+
+    /// [`Self::encode_latents`] with an explicit [`SourceMeta`]: callers that ran the analysis
+    /// on a non-BT.709 source (e.g. `GpuEncoder` on a `SourceImage::Yuv`) keep the source's
+    /// `s_ver`/`s_hor`/`colour_transform_idx` in the stream header instead of the 4:4:4 default.
+    #[allow(clippy::too_many_arguments)]
+    pub fn encode_latents_with(
+        &self,
+        latents: [&Tensor<f32>; 2],
+        z_hats: Option<[&Tensor<i8>; 2]>,
+        width: usize,
+        height: usize,
+        meta: &SourceMeta,
+        params: EncodeParams,
+        quality_map: Option<&QualityMap>,
+    ) -> core::result::Result<(Vec<u8>, [ComponentTrace; 2]), At<Error>> {
+        let _grant = self
+            .check_limits(width, height, params.op, false, &enough::Unstoppable)
             .map_err(|e| at!(e))?;
         let (stream, components) = self
             .encode_from_latents(
@@ -676,7 +693,7 @@ impl Encoder {
                 z_hats.map(|z| [z[0].clone(), z[1].clone()]),
                 width,
                 height,
-                &meta,
+                meta,
                 params,
                 quality_map,
                 &enough::Unstoppable,

@@ -96,14 +96,15 @@ construction, and say so in `PORTING.md`.
   bound `res_mine <= res_ref·1.01` passes). Left pinned pending a deliberate re-pin on this box.
   `rdlr_img30_bop_m1_b0`/`rdlr_img30_hop_m2_b0` still missing: the reference's RDLR needs the
   exact encoder args + is upstream-fragile (chroma/z `process_y` crashes — documented below).
-- **Observed anomaly — `GpuEncoder` on real YUV input (needs investigation):** a scratch
-  `gpu_encode_matches_cpu_encode` variant encoding `img30_560x888_8bit_444.yuv` (real
-  photo, `SourceImage::Yuv`, `model_id:1 op:Bop` fixed `beta_displacement_log=[0,0]`, no
-  rate matching) decoded to a picture differing from the CPU encode by **worst 244 /
-  99.4% of samples** — far beyond the ~1e-4 GPU-analysis gap, and vs the synthetic ramp's
-  0/36864. Either `GpuEncoder` mishandles a non-RGB/real `SourceImage` (`preprocess` →
-  `analysis.luma`/`chroma` path) or the test setup is off (YUV plane layout / params).
-  Reverted pending a focused look — if real, it's a GPU-encode gap on non-trivial input.
+- **FIXED — `GpuEncoder` mis-headered non-BT.709 sources:** `GpuEncoder::encode` accepted
+  `SourceImage::Yuv` but routed through `Encoder::encode_latents`, which hardcodes
+  `SourceMeta::resolve(1,1,8,Bt709,...)` — so a YUV source got a BT.709 stream header instead
+  of its real `colour_transform_idx=0`/`s_ver`/`s_hor` (a scratch probe decoded worst-244 /
+  99.4% differing vs CPU encode). Added `Encoder::encode_latents_with` (meta-aware) and
+  threaded the real `meta` through `encode`/`encode_impl`/`encode_tiled`; `encode_input` keeps
+  BT.709 for raw latents (correct — raw latents carry no source metadata). `gpu_encode` RGB
+  path unchanged (0-diff). Verified compiling + no regression; a Yuv-source GPU-encode parity
+  test is a reasonable follow-up.
 - **Regenerated-vector caveat (encode-side signature tests):** `make_reference_streams.sh all`
   now produces ~98 vectors on this box; every decode-side vector verifies bit-exact.
   Two encode-side tests diverge only on `img01` (the biggest, most float-sensitive input):
