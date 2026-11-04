@@ -209,5 +209,23 @@ Next high-value (unstarted):
   markers are wired in the pack + sweep loops behind the `coz` feature.
   The ~64% backend-bound topdown (~29% mem + ~35% core) confirms the
   packed reads attack the memory third.
+- **Prefetch — tested thoroughly (temporary unsafe `_mm_prefetch`, since
+  reverted):** `ZENJPEGAI_PF` bitmask tried next-icb input rows (1),
+  next-posblock tap rows (2), next-icb weights (4) on both the packed
+  and strided paths via `zenbench conv_kernels`. Single-threaded: dead
+  even everywhere (~18.6 ms on `hsd_conv3x3_128_128` for every mode) —
+  the packed tile made input reads sequential, which the hardware
+  prefetcher already covers. Weight prefetch (4) was a clear loss
+  (~25 ms — the prefetch uops steal the load ports the FMA loop needs).
+  Next-posblock (2) showed a marginal mt delta (4.8–5.3 vs 5.5 ms) that
+  does not replicate within the box's CV=15-25% noise. **Conclusion:
+  prefetch does not clear the bar for an archmage API — not worth asking
+  upstream.** `#![forbid(unsafe_code)]` restored.
+- **Remaining perf arc (in priority):** encoder/analysis on the wgpu
+  backend (`gpu/src` is decode-only today: context/decoder/kernels/
+  layers/plan/synthesis — analysis needs a parallel conv-s2 + attention
+  + MCM/GDN shader set and an `encoder.rs` driver); f16 shaders (B3 —
+  halves GPU register pressure + memory traffic); a wasm encoder (the
+  wasm crate is decode-only today).
 - f16-weight kernels, niche coverage vectors (per-tile eICCI, single-chroma
   tiles, 10-bit LEF/eICCI), GPU (separate workspace).
