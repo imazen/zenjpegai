@@ -436,10 +436,18 @@ Missing, most important first, with the next concrete step for each:
    on the 10-bit 4:4:4 LEF+eICCI vector `img30yuv444b10_base_lef_eicci_bpp050`, filter and
    whole-decode.
 4. **eICCI multi-thread scaling** is about 4.5x on 16 cores: the network is 140x222 at 48
-   channels, too small for the engine's row-level split to fill the pool. Next step: run the
-   luma and chroma trunks (independent) as two rayon tasks, or tile-level parallelism when the
-   filter is tiled (tiles must still be *written* in raster order, see below, so only the
-   inference of tiles whose inputs are final can overlap).
+   channels, too small for the engine's row-level split to fill the pool. The luma and
+   chroma trunks (independent) already run as two `rayon::join` tasks. **Tile-level
+   wavefront parallelism is ruled out**: the filter's square margin makes tile `[r,c]`'s
+   top-right `image` corner overlap the `[r-1,c+1]` core (and symmetrically bottom-left),
+   so its dependency cone is NW *plus* the diagonal top-right neighbour — two tiles on the
+   same anti-diagonal (`[r,c]` and `[r-1,c+1]`) share that corner and are *not* independent.
+   An anti-diagonal wavefront therefore reads a corner the same-diagonal neighbour has not
+   yet filtered (verified: `icci_img01_eiccitiles_*` diverge ~0.5; reverted). A correct
+   schedule needs each tile gated on the whole `[r-1, ..=c+1]` prefix plus `[r,c-1]`,
+   which serialises nearly as tightly as raster order — at most ~2x for the opt-in tiled
+   path and only on wide grids. The trunk `rayon::join` is the practical parallelisation;
+   the remaining lever is finer intra-trunk split (channels or sub-tiles), not tiles.
 
 ## Reference behaviour of the post-filters worth knowing
 
