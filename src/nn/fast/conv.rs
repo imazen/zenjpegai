@@ -623,6 +623,22 @@ impl PackedConv {
         if eng.precision == super::Precision::Approximate && !self.w16.is_empty() {
             return self.forward_winograd(eng, x, oh, ow);
         }
+        // Stride-2 convs can take the phase-decomposed path: the input is
+        // repacked into 4 parity planes so every tap reads unit-stride. The
+        // tap order is unchanged, so the result is bit-identical on every
+        // `Precision` — but measured ~8 % SLOWER end-to-end: the kernel is
+        // FMA-bound, not memory-bound, so unit-stride reads buy nothing and
+        // the repack pass is pure cost. Kept opt-in (`ZENJPEGAI_CONV_S2_PHASE`)
+        // as the substrate for a later phase-GEMM (Pan & Chen ASP-DAC'21).
+        if self.stride == 2
+            && self.groups == 1
+            && self.kh * self.kw <= MAX_TAPS
+            && self.pad[0] <= 1
+            && self.pad[1] <= 1
+            && phase_s2()
+        {
+            return self.forward_s2(eng, x, oh, ow);
+        }
         let mut out = BTensor::scratch(self.out_ch, oh, ow, v)?;
         let ocb_total = self.out_ch.div_ceil(v);
         let (icb_group, ocb_group) = if self.groups == 1 {
@@ -832,6 +848,85 @@ impl PackedConv {
         }
         Ok(out)
     }
+
+    /// Stride-2 forward via phase decomposition: `x` repacks into the four
+    /// (row-parity, column-parity) planes of one `[icb][4*hp][wp]` buffer, so
+    /// every tap reads its plane at unit stride instead of skipping every
+    /// other position. The tap order is unchanged, so the accumulation order —
+    /// and hence the result — is bit-identical to the strided path on every
+    /// `Precision`; only the access pattern differs. The planes carry their
+    /// own zero border, so every tap is interior and there is no border path.
+    fn forward_s2(&self, eng: &Engine, x: &BTensor, oh: usize, ow: usize) -> Result<BTensor> {
+        let v = self.v;
+        let (h, w) = (x.h, x.w);
+        let [pt, pl, _, _] = self.pad;
+        let ntaps = self.kh * self.kw;
+        let icbg = self.in_ch.div_ceil(v);
+        // A plane row `r` holds input row `2(r-1) + parity`; flat tap indices
+        // reach `p*hp + oy + 1`, so `hp` must cover `oh + margin`.
+        let (hp, wp) = (h.div_ceil(2).max(oh) + 3, w.div_ceil(2).max(ow) + 3);
+        let mut xp = BTensor::scratch(self.in_ch, 4 * hp, wp, v)?;
+        // `x[icb][iy][ix]` -> `xp[icb][(rp*2+cp)*hp + iy/2 + 1][ix/2 + 1]`
+        // (`rp = iy & 1`, `cp = ix & 1`), one deinterleave per input row.
+        for_each_row(eng, &mut xp.data, 4 * hp * wp * v, |icb, xp_icb| {
+            for iy in 0..h {
+                let xrow = &x.data[(icb * h + iy) * w * v..][..w * v];
+                for cp in 0..2usize {
+                    let dst =
+                        &mut xp_icb[(((iy & 1) * 2 + cp) * hp + iy / 2 + 1) * wp * v..][..wp * v];
+                    let (mut j, mut c) = (cp, 1);
+                    while j < w {
+                        dst[c * v..c * v + v].copy_from_slice(&xrow[j * v..j * v + v]);
+                        j += 2;
+                        c += 1;
+                    }
+                }
+            }
+        });
+        let mut out = BTensor::scratch(self.out_ch, oh, ow, v)?;
+        let wlen = icbg * v * ntaps * v;
+        let tier = eng.tier;
+        for_each_row(eng, &mut out.data, ow * v, |idx, row| {
+            let (ocb, oy) = (idx / oh, idx % oh);
+            let mut taps = [(None, 0usize); MAX_TAPS];
+            for ky in 0..self.kh {
+                // Tap (ky,kx) reads input (2oy + ky - pt, 2ox + kx - pl): row
+                // parity `(ky + pt) & 1`, plane index `(2oy + ky - pt)/2`;
+                // the column analogue becomes the tap's `dx` offset.
+                let rp = (ky + pt) & 1;
+                let dy = (ky as isize - pt as isize).div_euclid(2) + 1;
+                for kx in 0..self.kw {
+                    let cp = (kx + pl) & 1;
+                    let dx = (kx as isize - pl as isize).div_euclid(2) + 1;
+                    taps[ky * self.kw + kx] = (
+                        Some((rp * 2 + cp) * hp + (oy as isize + dy) as usize),
+                        dx as usize,
+                    );
+                }
+            }
+            run_row(
+                tier,
+                &mut RowJob {
+                    out: &mut *row,
+                    o0: 0,
+                    os: 1,
+                    n: ow,
+                    xp: &xp.data,
+                    ph: 4 * hp,
+                    pw: wp,
+                    icb_base: 0,
+                    icb0: 0,
+                    icb1: icbg,
+                    in_ch: self.in_ch,
+                    is: 1,
+                    taps: &taps[..ntaps],
+                    w: &self.weight[ocb * wlen..][..wlen],
+                    bias: &self.bias[ocb * v..][..v],
+                },
+            );
+        });
+        Ok(out)
+    }
 }
 
 /// One strip's work in the Winograd path.
@@ -1035,6 +1130,19 @@ fn wino_wasm(t: Wasm128Token, job: &mut WinoJob<'_, '_>) {
 
 fn wino_scalar(job: &mut WinoJob<'_, '_>) {
     wino_strip::<Lanes8, 8, 4>(ScalarToken, job)
+}
+
+/// Debug/benchmark knob: `ZENJPEGAI_CONV_S2_PHASE` opts stride-2 convs into
+/// the phase-decomposed path (bit-identical to the strided read — an A/B
+/// switch and phase-GEMM substrate, not an accuracy switch).
+#[cfg(feature = "std")]
+fn phase_s2() -> bool {
+    std::env::var_os("ZENJPEGAI_CONV_S2_PHASE").is_some()
+}
+
+#[cfg(not(feature = "std"))]
+fn phase_s2() -> bool {
+    false
 }
 
 /// `f` runs with a scratch of `n` floats, reused per thread between calls —

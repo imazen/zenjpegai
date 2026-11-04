@@ -120,6 +120,48 @@ fn conv2d_bit_identical() {
     strided_conv_case(&mut rng, 7, 5, (3, 3), (1, 1), 1, false, 9, 11, 2);
 }
 
+/// The opt-in phase-decomposed stride-2 path (`ZENJPEGAI_CONV_S2_PHASE`):
+/// repacks the input into 4 parity planes for unit-stride tap reads. The
+/// accumulation order is unchanged, so the output must be bit-identical to
+/// the direct strided path on every tier and thread count.
+#[test]
+fn conv2d_s2_phase_is_bit_identical() {
+    let mut rng = Rng(0x5E2A);
+    for &(in_ch, out_ch, h, w) in &[
+        (32usize, 48usize, 5usize, 9usize),
+        (16, 16, 8, 58),
+        (5, 7, 7, 129),
+        (96, 24, 4, 24),
+        (3, 1, 2, 2),
+        (128, 128, 6, 33),
+    ] {
+        let conv = Conv2d::new(
+            in_ch,
+            out_ch,
+            (3, 3),
+            2,
+            (1, 1),
+            1,
+            rng.vec(out_ch * in_ch * 9),
+            Some(rng.vec(out_ch)),
+        )
+        .unwrap();
+        let x = Tensor::from_vec(in_ch, h, w, rng.vec(in_ch * h * w)).unwrap();
+        let what = format!("s2 phase {in_ch}->{out_ch} {h}x{w}");
+        for eng in engines() {
+            let v = eng.tier.block();
+            let packed = PackedConv::new(&conv, v, [0; 4]).unwrap();
+            let bx = BTensor::from_planar(&x, v).unwrap();
+            unsafe { std::env::remove_var("ZENJPEGAI_CONV_S2_PHASE") };
+            let want = packed.forward(&eng, &bx).unwrap();
+            unsafe { std::env::set_var("ZENJPEGAI_CONV_S2_PHASE", "1") };
+            let got = packed.forward(&eng, &bx).unwrap();
+            unsafe { std::env::remove_var("ZENJPEGAI_CONV_S2_PHASE") };
+            assert_eq!(want.data, got.data, "{what} {eng:?}: phase path differs");
+        }
+    }
+}
+
 #[test]
 fn conv2d_extra_padding_matches_explicit_padding() {
     // The SOP upsampler pads one zero row/column at the bottom/right before a 2x2 convolution.

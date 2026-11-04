@@ -165,5 +165,21 @@ Next high-value (unstarted):
   int8-only (hyper-scale decoder) — not a float path.
   **Also measured `--precision approximate` vs `exact` before wino:** 540 vs
   531 ms — the accumulator-width knob alone does ~nothing.
+- **Phase-decomposed stride-2 conv** — **LANDED opt-in** (`forward_s2`,
+  `ZENJPEGAI_CONV_S2_PHASE`): repacks `x` into the 4 (row-parity, col-parity)
+  planes of a `[icb][4*hp][wp]` buffer; the 3x3 s2 conv's 9 taps become
+  unit-stride reads across 4 planes (Pan & Chen ASP-DAC'21 / DWM-style
+  decomposition) with *identical* accumulation order → bit-identical on every
+  `Precision`/tier (`conv2d_s2_phase_is_bit_identical`). **Measured ~8 %
+  SLOWER end-to-end** (593 vs 549 ms): the kernel is FMA-bound, not
+  memory-bound, so unit-stride reads buy nothing and the repack pass + larger
+  working set are pure cost — the same lesson as Winograd. Kept opt-in as the
+  substrate for a future phase-GEMM (the 4 planes are GEMM-shaped); the direct
+  `tap_loop` strided read stays the default. Decode-side convs are already
+  optimally covered: `PackedConvTranspose` runs the same phase trick on the
+  output side (per output-column parity), `PackedDepthwise`/`PackedIntConv`
+  own their paths, no `reference::` fallback runs on the decode forward path.
+  The real conv lever left is FMA-*reduction* (F(4,3) Winograd, implicit
+  GEMM) or GPU, not access-pattern tricks.
 - f16-weight kernels, niche coverage vectors (per-tile eICCI, single-chroma
   tiles, 10-bit LEF/eICCI), GPU (separate workspace).
