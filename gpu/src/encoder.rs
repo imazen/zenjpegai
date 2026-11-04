@@ -142,6 +142,9 @@ impl GpuEncoder {
     /// Whole-picture encode from pre-made analysis inputs: `luma`
     /// `[1, h, w]`, `chroma` `[12, h/2, w/2]`, both in `[0, 255]` — the
     /// `AnalysisInput` `preprocess` produces. Lower-level than `encode`.
+    /// Errors on a picture the encoder would split into more than one
+    /// analysis tile — the reference analysis is *tiled* there, and a
+    /// whole-picture GPU pass would diverge, not just approximate.
     pub fn encode_input(
         &self,
         luma: &Tensor<f32>,
@@ -149,6 +152,22 @@ impl GpuEncoder {
         model_id: usize,
         params: EncodeParams,
     ) -> Result<Vec<u8>> {
+        for ccs in 0..2 {
+            let (w, h) = if ccs == 0 {
+                (luma.w, luma.h)
+            } else {
+                (chroma.w * 2, chroma.h * 2)
+            };
+            if Encoder::analysis_tile_grid(w, h, ccs, params)
+                .map_err(GpuError::Codec)?
+                .len()
+                != 1
+            {
+                return Err(GpuError::Shape(format!(
+                    "tiled GPU analysis not implemented (ccs {ccs} is multi-tile)"
+                )));
+            }
+        }
         let analysis = self.analysis(model_id, params.op)?;
         let (h, w) = (luma.h, luma.w);
         let (yc, yh, yw, yd) = self.run_analysis(luma, |g, x| analysis.luma(g, x, h, w))?;
