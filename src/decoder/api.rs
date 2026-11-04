@@ -124,7 +124,7 @@ impl Decoder {
     pub fn estimate_memory(&self, stream: &[u8]) -> Result<MemoryEstimate, At<Error>> {
         let headers = self.read_headers(stream)?;
         let op = self.pick_operating_point(&headers)?;
-        Ok(crate::estimate_memory(&headers.picture, op))
+        Ok(crate::estimate_memory(&headers.picture, &headers.tools, op))
     }
 
     /// The [`Engine`] (SIMD tier, threading) this decoder runs the float networks on.
@@ -327,7 +327,10 @@ impl Decoder {
         let hdr = &headers.picture;
         let op = self.pick_operating_point(&headers)?;
         // Limits are judged on the header alone, before any picture-sized allocation.
-        let estimate = self.limits.check_header(hdr, op).map_err(|e| at!(e))?;
+        let estimate = self
+            .limits
+            .check_header(hdr, &headers.tools, op)
+            .map_err(|e| at!(e))?;
         // Admission control: wait for (or be refused by) the shared budget before the model
         // load and the picture-sized buffers. The grant is held to the end of the call —
         // success, error and cancellation alike — by the RAII guard.

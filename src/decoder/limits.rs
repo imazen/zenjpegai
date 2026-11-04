@@ -11,7 +11,7 @@
 //! the estimate covers the tracked peak of every reference stream.
 
 use crate::error::{Error, Result};
-use crate::header::{OperatingPoint, PictureHeader};
+use crate::header::{OperatingPoint, PictureHeader, ToolHeader};
 
 /// Caller-set bounds on what a decode may consume. `None` means unlimited.
 ///
@@ -87,7 +87,12 @@ impl Limits {
     }
 
     /// Check a picture header against every bound; returns the memory estimate it was judged by.
-    pub fn check_header(&self, hdr: &PictureHeader, op: OperatingPoint) -> Result<MemoryEstimate> {
+    pub fn check_header(
+        &self,
+        hdr: &PictureHeader,
+        tools: &ToolHeader,
+        op: OperatingPoint,
+    ) -> Result<MemoryEstimate> {
         if self.max_width.is_some_and(|m| hdr.width > m) {
             return Err(Error::LimitExceeded("picture wider than max_width"));
         }
@@ -100,7 +105,7 @@ impl Limits {
                 "picture has more than max_pixels samples",
             ));
         }
-        let est = estimate_memory(hdr, op);
+        let est = estimate_memory(hdr, tools, op);
         if self.max_memory_bytes.is_some_and(|m| est.live_bytes > m) {
             return Err(Error::LimitExceeded(
                 "estimated decode memory exceeds max_memory_bytes",
@@ -156,13 +161,17 @@ impl MemoryEstimate {
 /// (ids 0-1) and ~76 MiB for the large ones (ids 2-3, whose common checkpoints are
 /// 50-61 MiB files). A decoder whose cache is already warm doesn't pay this, but the
 /// estimate cannot know the cache state, so it covers the cold case.
-pub fn estimate_memory(hdr: &PictureHeader, op: OperatingPoint) -> MemoryEstimate {
+pub fn estimate_memory(
+    hdr: &PictureHeader,
+    tools: &ToolHeader,
+    op: OperatingPoint,
+) -> MemoryEstimate {
     /// Cold-start model-load peaks per `model_id` (β 0.002/0.012/0.075/0.5), measured
     /// tracked + ~13 % margin.
-    const MODEL_LOAD_PEAK: [u64; 4] = [96 << 20, 96 << 20, 96 << 20, 96 << 20];
+    const MODEL_LOAD_PEAK: [u64; 4] = [70 << 20, 70 << 20, 96 << 20, 96 << 20];
     const PER_PICTURE_SAMPLE: u64 = 20;
     let (fixed, per_tile_sample, extra_tile_sample): (u64, u64, u64) = match op {
-        OperatingPoint::Sop => (40 << 20, 50, 45),
+        OperatingPoint::Sop => (40 << 20, 50, 50),
         OperatingPoint::Bop => (52 << 20, 105, 70),
         OperatingPoint::Hop => (52 << 20, 1050, 650),
     };
@@ -198,10 +207,20 @@ pub fn estimate_memory(hdr: &PictureHeader, op: OperatingPoint) -> MemoryEstimat
         .get(hdr.model_id as usize)
         .copied()
         .unwrap_or(MODEL_LOAD_PEAK[MODEL_LOAD_PEAK.len() - 1]);
+    // Post-filter working sets the picture geometry alone doesn't express: eICCI runs its
+    // own tile-parallel coefficient solve + filtered planes, a fixed per-picture cost plus
+    // a per-sample term. The tool header says whether it's on (the PIH only says whether it
+    // *could* be signalled — `icci_flag_coded` — which is also true of plain 4:4:4).
+    let icci = if tools.icci.is_some() {
+        (20u64 << 20).saturating_add(8 * w * h)
+    } else {
+        0
+    };
     let live_bytes = fixed
         .saturating_add(PER_PICTURE_SAMPLE.saturating_mul(w * h))
         .saturating_add(per_tile_sample.saturating_mul(largest))
         .saturating_add(extra_tile_sample.saturating_mul(extra))
+        .saturating_add(icci)
         .max(model_load);
     MemoryEstimate {
         live_bytes,
@@ -226,14 +245,15 @@ mod tests {
     #[test]
     fn header_is_judged_against_every_bound() {
         let hdr = header();
+        let tools = ToolHeader::default();
         let op = OperatingPoint::Bop;
-        assert!(Limits::default().check_header(&hdr, op).is_ok());
-        assert!(Limits::none().check_header(&hdr, op).is_ok());
+        assert!(Limits::default().check_header(&hdr, &tools, op).is_ok());
+        assert!(Limits::none().check_header(&hdr, &tools, op).is_ok());
         let px = 560 * 888;
         assert!(
             Limits::none()
                 .with_max_pixels(px)
-                .check_header(&hdr, op)
+                .check_header(&hdr, &tools, op)
                 .is_ok()
         );
         for l in [
@@ -243,7 +263,7 @@ mod tests {
             Limits::none().with_max_memory(50 << 20),
         ] {
             assert!(matches!(
-                l.check_header(&hdr, op),
+                l.check_header(&hdr, &tools, op),
                 Err(Error::LimitExceeded(_))
             ));
         }
@@ -264,7 +284,8 @@ mod tests {
     #[test]
     fn estimate_orders_operating_points_and_honours_tiling() {
         let mut hdr = header();
-        let e = |h: &PictureHeader, op| estimate_memory(h, op).live_bytes;
+        let tools = ToolHeader::default();
+        let e = |h: &PictureHeader, op| estimate_memory(h, &tools, op).live_bytes;
         assert!(e(&hdr, OperatingPoint::Sop) < e(&hdr, OperatingPoint::Bop));
         assert!(e(&hdr, OperatingPoint::Bop) < e(&hdr, OperatingPoint::Hop));
         let untiled = e(&hdr, OperatingPoint::Hop);
