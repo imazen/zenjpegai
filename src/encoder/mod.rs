@@ -1061,9 +1061,7 @@ impl Encoder {
         let cand: Vec<i32> = if span <= 9 {
             (lo..=hi).collect()
         } else {
-            (0..9)
-                .map(|k| lo + ((hi - lo) * k + 4) / 8)
-                .collect()
+            (0..9).map(|k| lo + ((hi - lo) * k + 4) / 8).collect()
         };
         let mut best = (beta_y as i32, f64::INFINITY);
         for b in cand {

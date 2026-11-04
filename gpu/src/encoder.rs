@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use zenjpegai::encoder::{EncodeParams, Encoder};
+use zenjpegai::encoder::{EncodeParams, Encoder, SourceImage, preprocess};
 use zenjpegai::header::OperatingPoint;
 use zenjpegai::model::ModelSource;
 use zenjpegai::tensor::Tensor;
@@ -124,11 +124,25 @@ impl GpuEncoder {
         Ok(data)
     }
 
-    /// Whole-picture encode: `luma`/`chroma` are the analysis inputs (raw
-    /// `[0, 255]` planes — `luma` `[1, h, w]`, `chroma` `[12, h/2, w/2]`).
-    /// Returns the codestream. GPU analysis is approximate: valid but not
+    /// Whole-picture encode: the source (`RgbImage`, `YuvImage`, `Picture`)
+    /// is preprocessed to the analysis inputs (colour transform + chroma
+    /// split at half resolution), the transforms run on the GPU and the
+    /// latents are coded by the CPU `encode_latents`. Mirrors
+    /// `Encoder::encode`; GPU analysis is approximate: valid but not
     /// bit-identical to `Encoder::encode`.
-    pub fn encode(
+    pub fn encode(&self, src: impl Into<SourceImage>, params: EncodeParams) -> Result<Vec<u8>> {
+        let src = src.into();
+        let meta = src
+            .meta(params.c_ver, params.c_hor)
+            .map_err(|e| GpuError::Codec(e.into()))?;
+        let input = preprocess(&src, &meta).map_err(|e| GpuError::Codec(e.into()))?;
+        self.encode_input(&input.luma, &input.chroma, params.model_id as usize, params)
+    }
+
+    /// Whole-picture encode from pre-made analysis inputs: `luma`
+    /// `[1, h, w]`, `chroma` `[12, h/2, w/2]`, both in `[0, 255]` — the
+    /// `AnalysisInput` `preprocess` produces. Lower-level than `encode`.
+    pub fn encode_input(
         &self,
         luma: &Tensor<f32>,
         chroma: &Tensor<f32>,
