@@ -191,6 +191,34 @@ pub(crate) fn rate_point_y(
     })
 }
 
+/// `get_luma_tile_rate` / `get_current_rate_point(only_rate=True)` — the luma
+/// tile's rate term (`z` + residual bits per pixel) that chroma RDLR's joint
+/// rate adds. Compresses the luma tile and skips the synthesis/distortion the
+/// full `rate_point_y` computes — upstream's `only_rate` skips the same.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn luma_tile_rate(
+    eng: &Engine,
+    hdr: &crate::header::PictureHeader,
+    model: &crate::model::common::CommonModel,
+    lh: &lh::Likelihood,
+    y: &Tensor<f32>,
+    z_hat: &Tensor<i8>,
+    scale_log: &Tensor<i32>,
+    mask: &Tensor<bool>,
+    q: &impl mcm::Quantiser,
+    num_chs: usize,
+    img_h: usize,
+    img_w: usize,
+    pixels: f64,
+    stop: &dyn enough::Stop,
+) -> Result<f64> {
+    let out = compress_regions(
+        eng, hdr, 0, model, z_hat, y, mask, q, num_chs, img_h, img_w, y.h, y.w, None, stop,
+    )?;
+    let rate_y = gm_rate(y, &out.y_hat, &out.residual_q, scale_log);
+    Ok((lh.z_bits(z_hat) + rate_y) / pixels)
+}
+
 /// `RDLRCompUV.get_current_rate_point` for one chroma latent tile: the UV rate
 /// (`test_bpp_UV`) and the per-plane PSNRs. `sup` is `sup_info` — the (refined)
 /// luma `y_hat` decimated `[:, :, ::2, ::2]` into the chroma decoder's input
@@ -913,79 +941,109 @@ pub(crate) fn chroma(
     q: &impl mcm::Quantiser,
     num_chs: usize,
     original: &Tensor<f32>,
-    y_rate_part: f64,
+    y_rate_parts: &[f64],
     pixels: f64,
     num_ite: usize,
     stop: &dyn enough::Stop,
 ) -> Result<Tensor<f32>> {
     let synthesis_uv =
         crate::model::load_synthesis_secondary(models, model_id as usize, synth_op, eng)?;
-    let area = Area::new(0, 0, original.w, original.h);
-    let refs = {
+    // `numSamplesPerChromaTile` picture tiles — `get_luma_tile_rate` adds each
+    // UV tile's co-located luma-tile rate (`y_rate_parts[i]`).
+    let tiles = crate::tools::tiles::rdlr_tiles(
+        original.h,
+        original.w,
+        latent.h,
+        latent.w,
+        z_hat.h,
+        z_hat.w,
+        NUM_SAMPLES_PER_CHROMA_TILE,
+        RDLR_TILE_OVERLAP,
+        RDLR_ALIGN,
+        Some(TILE_MIN_FOR_MSSSIM + RDLR_TILE_OVERLAP),
+    )?;
+    let (su, sv) = fixed_slopes_uv(target_bpp_centi(model_id));
+    let lr0 = calc_lr(pixels);
+    let sup_p = sup.to_planar()?;
+    let mut best = latent.clone();
+    for (i, t) in tiles.iter().enumerate() {
+        let lat_t = latent.window(t.latent.x, t.latent.y, t.latent.width, t.latent.height)?;
+        let im_t = original.window(t.image.x, t.image.y, t.image.width, t.image.height)?;
+        let z_t = z_hat.window(t.z.x, t.z.y, t.z.width, t.z.height)?;
+        let sl_t = scale_log.window(t.latent.x, t.latent.y, t.latent.width, t.latent.height)?;
+        let mask_t = mask.window(t.latent.x, t.latent.y, t.latent.width, t.latent.height)?;
+        // `lat_suppinfo = get_data(sup_info, latent_tile)` — sup is already
+        // `::2` decimated to chroma-latent res.
+        let sup_t = BTensor::from_planar(
+            &sup_p.window(t.latent.x, t.latent.y, t.latent.width, t.latent.height)?,
+            eng.tier.block(),
+        )?;
+        // `ref_data[0]` (joint) and `ref_data[3]` (Y part) each get the luma
+        // tile's rate — `additional_rate`. `y_rate_parts[i]` is the luma tile's
+        // bpp; for a single tile it is the whole-picture `y_rate_part`.
+        let yrp = y_rate_parts.get(i).copied().unwrap_or(0.0);
+        let core_px = (t.core_img_rel.width * t.core_img_rel.height) as f64;
         let r = rate_point_uv(
             eng,
             hdr,
             model,
             &synthesis_uv,
             lh,
-            latent,
-            z_hat,
-            scale_log,
-            mask,
+            &lat_t,
+            &z_t,
+            &sl_t,
+            &mask_t,
             q,
             num_chs,
-            original,
-            sup,
-            area,
-            pixels,
+            &im_t,
+            &sup_t,
+            t.core_img_rel,
+            core_px,
             None,
             stop,
         )?;
-        // `ref_data[0]` (joint) and `ref_data[3]` (Y part) each get
-        // `additional_rate` — the luma bpp.
-        (r.bpp + y_rate_part, r.psnr_u, r.psnr_v, y_rate_part)
-    };
-    let (su, sv) = fixed_slopes_uv(target_bpp_centi(model_id));
-    let (best, _loss) = optimize_uv(
-        eng,
-        hdr,
-        model,
-        &synthesis_uv,
-        lh,
-        sup,
-        latent,
-        z_hat,
-        scale_log,
-        mask,
-        q,
-        num_chs,
-        original,
-        area,
-        pixels,
-        num_ite,
-        calc_lr(pixels),
-        0.7,
-        refs,
-        su,
-        sv,
-        None,
-        stop,
-    )?;
+        let (best_t, _loss) = optimize_uv(
+            eng,
+            hdr,
+            model,
+            &synthesis_uv,
+            lh,
+            &sup_t,
+            &lat_t,
+            &z_t,
+            &sl_t,
+            &mask_t,
+            q,
+            num_chs,
+            &im_t,
+            t.core_img_rel,
+            core_px,
+            num_ite,
+            lr0,
+            0.7,
+            (r.bpp + yrp, r.psnr_u, r.psnr_v, yrp),
+            su,
+            sv,
+            Some(t.core_lat_rel),
+            stop,
+        )?;
+        assign_area(&mut best, &t.core_lat, &best_t, &t.core_lat_rel)?;
+    }
     Ok(best)
 }
 
 /// `numSamplesPerLumaTile` — `setup_tiles_enc`'s luma tile threshold
 /// (`RdlrCompParams` default: image samples per tile → 1024-tile).
-const NUM_SAMPLES_PER_LUMA_TILE: usize = 1 << 20;
+pub(crate) const NUM_SAMPLES_PER_LUMA_TILE: usize = 1 << 20;
 /// `numSamplesPerChromaTile` — the chroma threshold (→ 720-tile).
-const NUM_SAMPLES_PER_CHROMA_TILE: usize = 500_000;
+pub(crate) const NUM_SAMPLES_PER_CHROMA_TILE: usize = 500_000;
 /// `numSamplesTileOverlap{Y,UV}` — tile overlap in image samples.
-const RDLR_TILE_OVERLAP: usize = 64;
+pub(crate) const RDLR_TILE_OVERLAP: usize = 64;
 /// `tool.get_alignment_size()` — the CCS tile alignment.
-const RDLR_ALIGN: usize = 16;
+pub(crate) const RDLR_ALIGN: usize = 16;
 /// `tile_min_size_for_MSSSIM` — MS-SSIM needs tiles larger than 160; the floor
 /// is `tile_min_size + overlap` (240) when the MS-SSIM loss is mixed in.
-const TILE_MIN_FOR_MSSSIM: usize = 176;
+pub(crate) const TILE_MIN_FOR_MSSSIM: usize = 176;
 
 /// `tiling.assign_data` — `dst[dst_area] = src[src_area]` per channel plane.
 fn assign_area(

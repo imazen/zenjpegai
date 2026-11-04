@@ -340,6 +340,11 @@ struct ComponentPass {
     /// kept only when chroma RDLR needs it as `tile_rate_ref_Y_part`/`additional_rate`
     /// (`num_ite_uv > 0`).
     rate_bits: Option<f64>,
+    /// `get_luma_tile_rate` per UV tile — the co-located luma-tile rate for each
+    /// chroma RDLR tile (`additional_rate` per `latent_UV_tile`); one entry per
+    /// `numSamplesPerChromaTile` tile. `Some` only on the luma pass with
+    /// `num_ite_uv > 0`.
+    y_rate_parts: Option<Vec<f64>>,
     efe_residual: Option<Tensor<f32>>,
     efe_likely: Option<Tensor<u16>>,
     lef_channel: Option<u8>,
@@ -1312,7 +1317,7 @@ impl Encoder {
         // payload run concurrently with the whole chroma pass. Results come back in
         // `ComponentPass`es; header fields are applied in ccs order afterwards, exactly the
         // sequential values.
-        let pass = |ccs: usize, uv: Option<(&BTensor, f64, &Tensor<f32>)>| {
+        let pass = |ccs: usize, uv: Option<(&BTensor, &[f64], &Tensor<f32>)>| {
             self.component_pass(
                 eng,
                 &set,
@@ -1341,10 +1346,11 @@ impl Encoder {
                     .ok_or(Error::InvalidArgument("RDLR: no luma y_hat for sup"))?,
                 eng.tier.block(),
             )?;
-            let y_rate_part = a
-                .rate_bits
-                .ok_or(Error::InvalidArgument("RDLR: no luma rate for UV"))?;
-            let b = pass(1, Some((&sup, y_rate_part, uv_org.unwrap())))?;
+            let y_rate_parts = a
+                .y_rate_parts
+                .as_deref()
+                .ok_or(Error::InvalidArgument("RDLR: no luma tile rates for UV"))?;
+            let b = pass(1, Some((&sup, y_rate_parts, uv_org.unwrap())))?;
             (a, b)
         } else {
             #[cfg(feature = "parallel")]
@@ -1607,7 +1613,7 @@ impl Encoder {
         keep_trace: bool,
         stop: &dyn enough::Stop,
         rdlr_org: Option<&Tensor<f32>>,
-        uv_ctx: Option<(&BTensor, f64, &Tensor<f32>)>,
+        uv_ctx: Option<(&BTensor, &[f64], &Tensor<f32>)>,
     ) -> Result<ComponentPass> {
         stop.check()?;
         let model = &set.common[ccs];
@@ -1683,7 +1689,7 @@ impl Encoder {
             && params.num_ite_uv > 0
             && hdr.regions.is_none()
             && (hdr.width as usize) * (hdr.height as usize) < 30_000_001
-            && let Some((sup, y_rate_part, original)) = uv_ctx
+            && let Some((sup, y_rate_parts, original)) = uv_ctx
         {
             // `RDLRCompUV.process_y` — chroma RDLR scoring per-plane PSNR against the
             // source chroma plus the joined luma rate term (`get_luma_tile_rate`).
@@ -1708,7 +1714,7 @@ impl Encoder {
                 &q,
                 num_chs,
                 original,
-                y_rate_part,
+                y_rate_parts,
                 (hdr.width as f64) * (hdr.height as f64),
                 params.num_ite_uv,
                 stop,
@@ -1763,6 +1769,65 @@ impl Encoder {
         let q = EncoderQuantiser {
             scales: &scales,
             quality_map,
+        };
+        // `get_luma_tile_rate` — each UV tile's co-located luma-tile rate
+        // (`additional_rate`), for chroma RDLR's joint-rate loss. Computed on
+        // the luma pass (ccs == 0) over the UV tile grid upscaled 2x to luma
+        // res; `latent`/`z_hat`/`scales`/`mask`/`q` are the refined decisions.
+        let y_rate_parts = if ccs == 0 && params.num_ite_uv > 0 && hdr.regions.is_none() {
+            let (uh, uw) = hdr.component_size(1);
+            let (ulh, ulw) = hdr.latent_size(1);
+            let uv_tiles = crate::tools::tiles::rdlr_tiles(
+                uh as usize,
+                uw as usize,
+                ulh as usize,
+                ulw as usize,
+                (ulh / 4) as usize,
+                (ulw / 4) as usize,
+                rdlr::NUM_SAMPLES_PER_CHROMA_TILE,
+                rdlr::RDLR_TILE_OVERLAP,
+                rdlr::RDLR_ALIGN,
+                Some(rdlr::TILE_MIN_FOR_MSSSIM + rdlr::RDLR_TILE_OVERLAP),
+            )?;
+            let mut parts = Vec::with_capacity(uv_tiles.len());
+            for t in &uv_tiles {
+                // `latent_Y_tile = latent_UV_tile.upscale(2)` — the UV latent is
+                // half the luma latent for the RDLR's 4:2:0 chroma view.
+                let (ly, iy, zy) = (
+                    Area::new(
+                        t.latent.x * 2,
+                        t.latent.y * 2,
+                        t.latent.width * 2,
+                        t.latent.height * 2,
+                    ),
+                    Area::new(
+                        t.image.x * 2,
+                        t.image.y * 2,
+                        t.image.width * 2,
+                        t.image.height * 2,
+                    ),
+                    Area::new(t.z.x * 2, t.z.y * 2, t.z.width * 2, t.z.height * 2),
+                );
+                parts.push(rdlr::luma_tile_rate(
+                    eng,
+                    hdr,
+                    model,
+                    &set.lh[0],
+                    &latent.window(ly.x, ly.y, ly.width, ly.height)?,
+                    &z_hat.window(zy.x, zy.y, zy.width, zy.height)?,
+                    &scales.scale_log.window(ly.x, ly.y, ly.width, ly.height)?,
+                    &mask.window(ly.x, ly.y, ly.width, ly.height)?,
+                    &q,
+                    num_chs,
+                    iy.height,
+                    iy.width,
+                    (t.core_img_rel.width * t.core_img_rel.height * 4) as f64,
+                    stop,
+                )?);
+            }
+            Some(parts)
+        } else {
+            None
         };
         let (ch, cw) = hdr.component_size(ccs);
         let out = stage!(
@@ -1866,6 +1931,7 @@ impl Encoder {
             grfs_channel_flags,
             cube_flags,
             rate_bits,
+            y_rate_parts,
             efe_residual,
             efe_likely,
             lef_channel,
