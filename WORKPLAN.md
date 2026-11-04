@@ -99,8 +99,9 @@ construction, and say so in `PORTING.md`.
   extra multitools crash `get_active_tool`) + `cfg/tools/RDLR.json` (`numIteYLuma: 8`, chroma/z
   off — the working luma-oracle path) + `-model.bitrate_matcher.enabled 0
   -model.bitrate_matcher.target_tool_idx <model_id> -model.bitrate_matcher.target_beta_disp_Y 0`.
-  `rate_point_matches_reference_iterations` (BOP) **passes** all 8 iterations; `_hop` (28MB
-  model) replays the same path but is much slower per iteration (still running at write time).
+  `rate_point_matches_reference_iterations` **and** `_hop` both pass all 8 iterations
+  (the HOP replay runs ~40 min on the 28MB model). `--lib` is now 103/104 — the only
+  failure is the `lstsq` `excused`-solve env-pin below.
 - **FIXED — `GpuEncoder` mis-headered non-BT.709 sources:** `GpuEncoder::encode` accepted
   `SourceImage::Yuv` but routed through `Encoder::encode_latents`, which hardcodes
   `SourceMeta::resolve(1,1,8,Bt709,...)` — so a YUV source got a BT.709 stream header instead
