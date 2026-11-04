@@ -24,3 +24,14 @@ own Python process wall (~1.4 s incl. model load) makes the end-to-end gap large
 Python pipeline takes multiple seconds for the same fixed-point encode (model load +
 oneDNN analysis + Python orchestration), so the single-pass encoder is an order of
 magnitude faster end-to-end even before the optimizer paths.
+
+## Per-operating-point (same 560x888 img30 base stream, `--op`)
+
+| op | decode ms (steady-state) |
+|----|--------------------------|
+| sop | ~22 – 25 |
+| bop | ~32 – 36 |
+| hop | n/a — `img30_base_off` is a BOP stream (no HOP synthesis present) |
+
+SOP (luma synthesis only, coarser model) is ~30% cheaper than BOP; HOP needs a HOP-coded
+stream to measure.
