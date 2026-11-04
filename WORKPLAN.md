@@ -129,6 +129,13 @@ construction, and say so in `PORTING.md`.
   add a `SimdI32` companion type (the safe, additive route — Lanes8 implements elementwise,
   f32x8/f32x16 via magetypes `to_i32`/`bitcast_i32`), or (b) write `exp_lanes` per-concrete-type.
   Dispatch via `#[arcane]` tier fns calling `exp_lanes::<f32xN<Token>>` exactly like `conv_row_*`.
+  **Key bit-identity insight (verified):** Rust does NOT auto-contract `a*b+c` to FMA
+  (`fp-contract` off), so scalar `exp`'s `p*r+c` and `p*(r*r)+r+1` are UNFUSED `mul`+`add`.
+  The lane exp must therefore use `mul`/`add` (NOT `mul_add`) to match scalar rounding.
+  Extend `SimdF32` (additive — conv uses only existing methods) with `min`/`max`/`mul`/`floor`/
+  `pow2`; `pow2` (2^n) per-type: `f32x` via `to_i32→i32x::splat+127→shl<23>→bitcast_to_f32`
+  (needs the backend token for the i32 splat — check `f32x`/`i32x` for a token-free `add_const`
+  or `+` operator), `Lanes8` via `f32::from_bits(((n as i32+127) as u32)<<23)` per element.
 - **Regenerated-vector caveat (encode-side signature tests):** `make_reference_streams.sh all`
   now produces ~98 vectors on this box; every decode-side vector verifies bit-exact.
   Two encode-side tests diverge only on `img01` (the biggest, most float-sensitive input):
