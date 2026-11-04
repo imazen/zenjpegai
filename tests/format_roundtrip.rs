@@ -158,3 +158,110 @@ fn rejected_coded_formats_error() {
         .is_err()
     );
 }
+
+/// `tools_on()` — every coding tool on (RVS, GRFS, LSBS, LEF, EFE linear +
+/// non-linear, eICCI) — roundtrips through the whole decoder's filter chain.
+/// 176px clears both eICCI's MS-SSIM minimum (161) and its tile floor (176).
+#[test]
+fn tools_on_roundtrip() {
+    let pic = roundtrip(yuv(176, 176, (1, 1), 8), EncodeParams::tools_on());
+    assert_yuv(&pic, 176, 176, (1, 1), 8);
+}
+
+/// More than one ANS thread per residual substream and per `z` substream
+/// (`num_threads_r`/`num_threads_z`) — the stream still decodes identically.
+#[test]
+fn threaded_ans_roundtrip() {
+    let params = EncodeParams {
+        num_threads_r: 4,
+        num_threads_z: 2,
+        ..EncodeParams::default()
+    };
+    let pic = roundtrip(yuv(96, 64, (2, 2), 8), params);
+    assert_yuv(&pic, 96, 64, (2, 2), 8);
+}
+
+/// `num_chs` below the model's channel count codes only the first N residual
+/// channels per component — the decoder reconstructs the rest as zero residual.
+#[test]
+fn reduced_num_chs_roundtrip() {
+    let params = EncodeParams {
+        num_chs: [16, 16],
+        ..EncodeParams::default()
+    };
+    let pic = roundtrip(yuv(96, 64, (2, 2), 8), params);
+    assert_yuv(&pic, 96, 64, (2, 2), 8);
+}
+
+/// A non-displayed border (`diff_display`) marks the last columns/rows as
+/// coded-but-not-displayed — the decoder crops them, so the decoded picture is
+/// `(w - diff_w) × (h - diff_h)`, not the source size.
+#[test]
+fn diff_display_roundtrip() {
+    let params = EncodeParams {
+        diff_display: (16, 8),
+        ..EncodeParams::default()
+    };
+    let pic = roundtrip(yuv(96, 64, (1, 1), 8), params);
+    assert_yuv(&pic, 80, 56, (1, 1), 8);
+}
+
+/// Region partitioning (dependent and independent) on a picture above the
+/// `NUM_SAMPLES_IN_REGION` threshold.
+#[test]
+fn regions_roundtrip() {
+    for &mode in &[
+        zenjpegai::encoder::RegionMode::Dependent,
+        zenjpegai::encoder::RegionMode::Independent,
+    ] {
+        let params = EncodeParams {
+            regions: Some(mode),
+            ..EncodeParams::default()
+        };
+        let pic = roundtrip(yuv(1040, 1040, (1, 1), 8), params);
+        assert_yuv(&pic, 1040, 1040, (1, 1), 8);
+    }
+}
+
+/// The shipped luma RDLR (`numIteYLuma = 8`, `EncodeParams::rdlr`) produces a
+/// conforming stream. 176px clears the mixed loss's MS-SSIM minimum (161).
+#[test]
+fn rdlr_roundtrip() {
+    let params = EncodeParams {
+        rdlr: true,
+        ..EncodeParams::default()
+    };
+    let pic = roundtrip(yuv(176, 176, (1, 1), 8), params);
+    assert_yuv(&pic, 176, 176, (1, 1), 8);
+}
+
+/// The experimental knobs (`EncodeParams::experimental`) — chroma RDLR,
+/// `process_z`, feature clipping — produce conforming streams when enabled.
+#[test]
+fn experimental_roundtrip() {
+    let params = EncodeParams {
+        rdlr: true,
+        experimental: zenjpegai::encoder::Experimental {
+            num_ite_uv: 2,
+            num_ite_z: 2,
+            clipping: true,
+            ..zenjpegai::encoder::Experimental::default()
+        },
+        ..EncodeParams::default()
+    };
+    let pic = roundtrip(yuv(176, 176, (1, 1), 8), params);
+    assert_yuv(&pic, 176, 176, (1, 1), 8);
+}
+
+/// `encode_to_bpp` — the bitrate matcher's trial encodes land on a stream that
+/// still decodes to the source format.
+#[test]
+fn rate_matched_roundtrip() {
+    let (stream, _match) = Encoder::new(models())
+        .encode_to_bpp(yuv(96, 64, (1, 1), 8), 0.5, EncodeParams::default())
+        .expect("rate-matched encode failed");
+    let pic = Decoder::new(models())
+        .decode_picture(&stream)
+        .expect("rate-matched decode failed");
+    assert_yuv(&pic, 96, 64, (1, 1), 8);
+}

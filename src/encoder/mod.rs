@@ -172,7 +172,6 @@ pub struct EncodeParams {
 /// `clipping_mode`) and most are crash-dead on top of that — these are
 /// *intended-semantics* ports, not stream-parity defaults.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-#[non_exhaustive]
 pub struct Experimental {
     /// `numIteYChroma` of `cfg/tools/RDLR.json` (shipped `0`, arg default `40`): chroma
     /// `process_y` — `RDLRCompUV` refining the chroma latent by the same Adagrad loop the
@@ -1823,37 +1822,36 @@ impl Encoder {
                     (ulw / 4) as usize,
                     rdlr::NUM_SAMPLES_PER_CHROMA_TILE,
                     rdlr::RDLR_TILE_OVERLAP,
-                    rdlr::RDLR_ALIGN,
-                    Some(rdlr::TILE_MIN_FOR_MSSSIM + rdlr::RDLR_TILE_OVERLAP),
+                    rdlr::CHROMA_LATENT_FACTOR,
+                    None,
                 )?;
                 let mut parts = Vec::with_capacity(uv_tiles.len());
                 for t in &uv_tiles {
-                    // `latent_Y_tile = latent_UV_tile.upscale(2)` — the UV latent is
-                    // half the luma latent for the RDLR's 4:2:0 chroma view.
-                    let (ly, iy, zy) = (
-                        Area::new(
-                            t.latent.x * 2,
-                            t.latent.y * 2,
-                            t.latent.width * 2,
-                            t.latent.height * 2,
-                        ),
-                        Area::new(
-                            t.image.x * 2,
-                            t.image.y * 2,
-                            t.image.width * 2,
-                            t.image.height * 2,
-                        ),
-                        Area::new(t.z.x * 2, t.z.y * 2, t.z.width * 2, t.z.height * 2),
+                    // The chroma "picture" is the half-res view, so `t.image` is
+                    // upscaled 2x to the luma-image tile. The UV latent and z
+                    // tiles are *already* at luma res (`latent_size`/`hyper_latent_size`
+                    // are picture/16 and picture/64 for both components) —
+                    // `t.latent`/`t.z` slice the luma tensors directly.
+                    let iy = Area::new(
+                        t.image.x * 2,
+                        t.image.y * 2,
+                        t.image.width * 2,
+                        t.image.height * 2,
                     );
                     parts.push(rdlr::luma_tile_rate(
                         eng,
                         hdr,
                         model,
                         &set.lh[0],
-                        &latent.window(ly.x, ly.y, ly.width, ly.height)?,
-                        &z_hat.window(zy.x, zy.y, zy.width, zy.height)?,
-                        &scales.scale_log.window(ly.x, ly.y, ly.width, ly.height)?,
-                        &mask.window(ly.x, ly.y, ly.width, ly.height)?,
+                        &latent.window(t.latent.x, t.latent.y, t.latent.width, t.latent.height)?,
+                        &z_hat.window(t.z.x, t.z.y, t.z.width, t.z.height)?,
+                        &scales.scale_log.window(
+                            t.latent.x,
+                            t.latent.y,
+                            t.latent.width,
+                            t.latent.height,
+                        )?,
+                        &mask.window(t.latent.x, t.latent.y, t.latent.width, t.latent.height)?,
                         &q,
                         num_chs,
                         iy.height,

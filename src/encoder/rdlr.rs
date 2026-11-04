@@ -962,7 +962,9 @@ pub(crate) fn chroma(
     let synthesis_uv =
         crate::model::load_synthesis_secondary(models, model_id as usize, synth_op, eng)?;
     // `numSamplesPerChromaTile` picture tiles — `get_luma_tile_rate` adds each
-    // UV tile's co-located luma-tile rate (`y_rate_parts[i]`).
+    // UV tile's co-located luma-tile rate (`y_rate_parts[i]`). The chroma
+    // component's latent factor is 8 (its "picture" is the half-res 4:2:0
+    // view); the UV loss is per-plane PSNR only — no MS-SSIM floor.
     let tiles = crate::tools::tiles::rdlr_tiles(
         original.h,
         original.w,
@@ -972,8 +974,8 @@ pub(crate) fn chroma(
         z_hat.w,
         NUM_SAMPLES_PER_CHROMA_TILE,
         RDLR_TILE_OVERLAP,
-        RDLR_ALIGN,
-        Some(TILE_MIN_FOR_MSSSIM + RDLR_TILE_OVERLAP),
+        CHROMA_LATENT_FACTOR,
+        None,
     )?;
     let (su, sv) = fixed_slopes_uv(target_bpp_centi(model_id));
     let lr0 = calc_lr(pixels);
@@ -1054,6 +1056,10 @@ pub(crate) const NUM_SAMPLES_PER_CHROMA_TILE: usize = 500_000;
 pub(crate) const RDLR_TILE_OVERLAP: usize = 64;
 /// `tool.get_alignment_size()` — the CCS tile alignment.
 pub(crate) const RDLR_ALIGN: usize = 16;
+/// The chroma component's `latent_downscale_factor` — its "picture" is the
+/// half-res 4:2:0 view, so `chroma_image / 8` lands on the same picture/16
+/// latent resolution as luma's `/16`. Its `z` factor is `CHROMA_LATENT_FACTOR * 4`.
+pub(crate) const CHROMA_LATENT_FACTOR: usize = 8;
 /// `tile_min_size_for_MSSSIM` — MS-SSIM needs tiles larger than 160; the floor
 /// is `tile_min_size + overlap` (240) when the MS-SSIM loss is mixed in.
 pub(crate) const TILE_MIN_FOR_MSSSIM: usize = 176;

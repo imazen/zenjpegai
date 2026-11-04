@@ -305,6 +305,13 @@ pub fn rdlr_tiles(
         grid.push(row);
         sy += step_y;
     }
+    if grid.is_empty() || grid[0].is_empty() {
+        // `img <= overlap` on an axis: upstream's `range(0, img - overlap, step)`
+        // produces an empty grid — its RDLR is a silent no-op on such a
+        // picture. Our contract returns the single whole-picture tile instead
+        // (all borders, so its core is the whole picture).
+        grid = vec![vec![Area::new(0, 0, img_w, img_h)]];
+    }
     let (rows, cols) = (grid.len(), grid[0].len());
     if let Some(min) = minimum_tile_size {
         // `_adjust_boundary_tiles`: a last row/column shorter than `min` takes
@@ -333,6 +340,8 @@ pub fn rdlr_tiles(
     }
     // `init_latent_tiles`/`_get_latent_tile_from_image_tile`: position by
     // floor-division, size by `ceil(size / f)` for non-aligned (border) tiles.
+    // `alignment` is the component's latent downscale factor (`latent_downscale_factor`
+    // — 16 luma, 8 chroma); `z` is a further 4x (`/64` luma, `/32` chroma).
     let map = |t: &Area, f: usize, lh: usize, lw: usize| {
         let (x, y) = (t.x / f, t.y / f);
         let h = if t.height % f == 0 {
@@ -373,14 +382,14 @@ pub fn rdlr_tiles(
     let mut tiles = Vec::with_capacity(rows * cols);
     for row in &grid {
         for image in row {
-            let latent = map(image, 16, latent_h, latent_w);
+            let latent = map(image, alignment, latent_h, latent_w);
             tiles.push(RdlrTile {
                 image: *image,
                 latent,
-                z: map(image, 64, z_h, z_w),
+                z: map(image, alignment * 4, z_h, z_w),
                 core_img_rel: core(image, image, 1, true),
-                core_lat: core(&latent, image, 16, false),
-                core_lat_rel: core(&latent, image, 16, true),
+                core_lat: core(&latent, image, alignment, false),
+                core_lat_rel: core(&latent, image, alignment, true),
             });
         }
     }

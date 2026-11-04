@@ -80,6 +80,10 @@ required-features = ["cli"]
 # The rest of examples/ debug/profile against internal modules directly (entropy stage,
 # reconstruction, filters).
 [[example]]
+name = "dbg_encode"
+required-features = ["cli"]
+
+[[example]]
 name = "dbg_entropy"
 required-features = ["unstable-internals"]
 
@@ -179,6 +183,10 @@ required-features = ["unstable-internals"]
 [[test]]
 name = "fuzz_regression"
 required-features = ["std", "unstable-internals"]
+
+[[test]]
+name = "format_roundtrip"
+required-features = ["cli"]
 
 # The float layers are unusable unoptimised (a 0.5 MP decode takes minutes); tests need them.
 [profile.dev]
