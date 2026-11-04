@@ -47,6 +47,7 @@ impl ModelSource for Shared {
 struct State {
     models: Shared,
     decoder: Decoder,
+    encoder: zenjpegai::Encoder,
 }
 
 fn state() -> &'static State {
@@ -56,6 +57,10 @@ fn state() -> &'static State {
         let engine = Engine::with(Tier::detect(), cfg!(feature = "threads"));
         State {
             decoder: Decoder::with_source(Box::new(models.clone()), engine),
+            encoder: zenjpegai::Encoder::with_source(
+                Box::new(models.clone()),
+                Engine::with(Tier::detect(), cfg!(feature = "threads")),
+            ),
             models,
         }
     })
@@ -341,4 +346,36 @@ pub fn release_buffers() {
     state().decoder.release_buffers();
     #[cfg(feature = "gpu")]
     gpu::release_buffers();
+}
+
+/// Encode an 8-bit interleaved RGB picture to a codestream. `rgb` is
+/// `[r, g, b, r, g, b, ...]` (3 bytes/pixel); `beta` is the quantiser
+/// displacement (the `-q` knob, `beta_displacement_log` applied to both
+/// components). Returns the JPEG AI codestream.
+#[wasm_bindgen]
+pub fn encode(
+    rgb: &[u8],
+    width: u32,
+    height: u32,
+    model_id: u32,
+    op: &str,
+    beta: i32,
+) -> Result<Vec<u8>, JsError> {
+    let (w, h) = (width as usize, height as usize);
+    if rgb.len() != w * h * 3 {
+        return Err(JsError::new("rgb length must be width*height*3"));
+    }
+    let params = zenjpegai::EncodeParams {
+        model_id: model_id as u8,
+        op: parse_op(op)?,
+        beta_displacement_log: [beta, beta],
+        ..Default::default()
+    };
+    let img = RgbImage {
+        width: w,
+        height: h,
+        bit_depth: 8,
+        data: rgb.iter().map(|&b| b as u16).collect(),
+    };
+    state().encoder.encode(img, params).map_err(js_err)
 }
