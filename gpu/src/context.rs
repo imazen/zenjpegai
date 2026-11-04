@@ -16,6 +16,12 @@ pub struct ContextOptions {
     /// Accept software rasterisers (llvmpipe, WARP, SwiftShader). Off by default: a CPU
     /// "GPU" is slower than the crate's own CPU engine, so callers should fall back instead.
     pub allow_software: bool,
+    /// Pack convolution weights as `f16` when the adapter offers
+    /// [`wgpu::Features::SHADER_F16`], halving the conv weight stream. The
+    /// weights are quantised to half precision — the GPU path's decode moves
+    /// — so it is off by default; the f32-weighted decode is the verified
+    /// path. Turn on to measure the f16 parity bound and the speedup.
+    pub f16_weights: bool,
 }
 
 /// A device, its queue and the compiled kernels. Create once, share between decoders.
@@ -108,7 +114,7 @@ impl GpuContext {
             )));
         }
         let timestamps = adapter.features().contains(wgpu::Features::TIMESTAMP_QUERY);
-        let f16 = adapter.features().contains(wgpu::Features::SHADER_F16);
+        let f16 = opts.f16_weights && adapter.features().contains(wgpu::Features::SHADER_F16);
         let have = adapter.limits();
         // The large feature maps of a 1024-px HOP tile need more than WebGPU's default 128 MiB
         // per binding; take what the adapter offers, up to 1 GiB.
@@ -132,7 +138,7 @@ impl GpuContext {
                         wgpu::Features::SHADER_F16
                     } else {
                         wgpu::Features::empty()
-                    };
+                    }; // requested via ContextOptions::f16_weights only
                     f
                 },
                 required_limits: limits,
