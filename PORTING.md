@@ -409,10 +409,14 @@ Measured 2026-09-17 on a busy 9950X3D (load 16; `benchmarks/filters_lef_icci_202
 
 Missing, most important first, with the next concrete step for each:
 
-1. **eICCI tiling together with `diff_display_img_*` != 0** (`Error::Unsupported`). The reference
-   relies on Python slices clamping. Next step: a stream with a non-multiple-of-16 picture *and*
-   `numSamplesPerTile` small enough to tile (`scripts/ref_vectors/cfg/eicci_tiles.json` on a
-   cropped input), then clamp tile and core areas to the displayed size in `tile_layout`.
+1. **eICCI tiling together with `diff_display_img_*` != 0** — handled (was
+   `Error::Unsupported`): `tile_layout` tiles are clamped to the displayed rectangle (each
+   tile's `image`/`core` intersected with `[0, displayed)`), border-only tiles skipped — the
+   port of the reference's Python slice clamping. **No oracle possible**: the reference
+   *encoder* itself crashes in `post_filters.compress` on eICCI-tiling + `diff_display`
+   (`torch.cat` 1400 vs 1395, `icci_filter.py:362`), so a conformant stream carrying the case
+   cannot be produced; the clamp is the faithful decode-side port, unexercised by a real
+   vector.
 2. **Unexercised but shared code paths** (no oracle stream selects them): per-tile
    *different* selections and tiles with only one chroma plane filtered. Next step: a
    multi-tile eICCI stream whose tiles pick different networks / filter one chroma only.
