@@ -67,6 +67,19 @@ construction, and say so in `PORTING.md`.
   (largest, most float-sensitive) or the m3/indregions/RVS/GRFS analysis paths —
   a small borderline-integerization divergence, not a systematic bug (most of
   those same-path vectors are bit-exact elsewhere).
+- **BUG (subsampled decode — latent, surfaced by populated format vectors):**
+  `decode_ref` `y.psi` diverges ~1.9–3.0 on every chroma-subsampled vector
+  (`img30yuv{420,422,444,420b10,444b10}_base_off_bpp050`,
+  `img30_base_off_{c420,c422}_bpp050`, `img30cropyuv420_base_off_bpp075`) while all
+  non-subsampled streams stay bit-exact. The reference's `img30_base_off_c420`
+  `y.psi` is byte-identical to `img30_base_off` (444) — chroma subsample must not
+  touch luma — so our coded-420/subsampled decode's luma `y.psi` is wrong, not an
+  env/dump artefact. Real bug in the subsampled luma decode path (dims/stride or
+  a chroma-shaped buffer indexed into luma); surfaced when the format vectors'
+  decode dumps were populated. Everything else: `decode_ref` 42/50,
+  `entropy_ref` 37/37, `weights_ref` 4/4, `api_ref` 6/6, `filters_efe` 17/17,
+  `filters_lef_icci` 19/19, `formats`/`efe_nl`/`eicci`/`msssim`/`encoder_end_to_end`
+  (26/27) — all bit-exact.
 - **Regenerated-vector caveat (encode-side signature tests):** `make_reference_streams.sh all`
   now produces ~98 vectors on this box; every decode-side vector verifies bit-exact.
   Two encode-side tests diverge only on `img01` (the biggest, most float-sensitive input):
