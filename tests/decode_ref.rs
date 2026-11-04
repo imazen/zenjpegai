@@ -321,6 +321,10 @@ vectors! {
     img30_efe_f4c6_f1c5 => "img30_efe_f4c6_f1c5",
     crop277_efe_f4c5_f3c6_nl => "crop277_efe_f4c5_f3c6_nl",
     img01_efe_f2c0_f3c0_nl => "img01_efe_f2c0_f3c0_nl",
+    // Subsampled sources coded at source resolution: `to_source_format` is a no-op and the
+    // subsampled `efe_linear` branches run end-to-end through the whole decoder.
+    crop277_s420_efe_f3c5_f4c7_nl => "crop277_s420_efe_f3c5_f4c7_nl",
+    crop277_s422_efe_f3c6_f4c2_nl => "crop277_s422_efe_f3c6_f4c2_nl",
     // 2096x1400: six overlapping synthesis tiles.
     img01_base_off_bpp050 => "img01_base_off_bpp050",
     img01_base_off_threads8_bpp050 => "img01_base_off_threads8_bpp050",

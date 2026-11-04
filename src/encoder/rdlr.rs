@@ -213,7 +213,6 @@ pub(crate) struct RatePointUV {
     pub cube_flag: Vec<bool>,
     /// The secondary synthesis's VJP tape (`backward_uv` consumes it).
     pub synth_tape: Option<crate::model::synthesis::SecondaryTape>,
-    pub tape: Vec<mcm::StageTape>,
 }
 
 /// `RDLRCompUV.get_current_rate_point`: the chroma analogue of [`rate_point_y`]
@@ -251,7 +250,6 @@ pub(crate) fn rate_point_uv(
         psi,
         y_hat,
         cube_flag,
-        tape: mcm_tape,
         ..
     } = out;
 
@@ -283,7 +281,6 @@ pub(crate) fn rate_point_uv(
         rate_uv,
         cube_flag,
         synth_tape: Some(synth_tape),
-        tape: mcm_tape,
     })
 }
 
