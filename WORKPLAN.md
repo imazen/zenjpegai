@@ -48,7 +48,15 @@ construction, and say so in `PORTING.md`.
   bypasses it). Remaining `encode_ref` failures: `msssim_matches` (needs bespoke
   `msssim_oracle`, no standard generator), `encoder_end_to_end`
   (`enc_img01_hop_m2_b0_indregions` `uv.z_hat` 1 value), `likelihood`/`tools_on_ctc`
-  (environment-sensitive — see below). `msssim_oracle` generated via
+  (environment-sensitive — see below). **Full ref-suite state:** `decode_ref`
+  50/50, `entropy_ref` 37/37, `weights_ref` 4/4, `api_ref` 6/6, `filters_lef_icci`
+  19/19 — all bit-exact. `memory_ref` `budget_*` + `fast_vs_reference`
+  `conv2d_blis`/`conv2d_s2_phase`/`phase_32x32` fail ONLY in-parallel (pass alone)
+  — a test-parallelism flake: the global memory-budget allocator and the
+  `ZENJPEGAI_CONV_*` env knobs aren't isolated per test (the `SERIAL` lock covers
+  some but not the shared allocator/conv-state), so concurrent runs race. Not a
+  real regression — but a test-hygiene gap that could mask real failures.
+  `msssim_oracle` generated via
   `dump_filters.py --msssim` → `msssim_matches` passes (≤1e-5).
   `encoder_end_to_end`: **26/27 `enc_*` vectors bit-exact** (`0 symbols moved`,
   `+0.000%`, `0 samples differ`) — the encoder is essentially bit-exact. The
