@@ -171,15 +171,27 @@ Next high-value (unstarted):
   unit-stride reads across 4 planes (Pan & Chen ASP-DAC'21 / DWM-style
   decomposition) with *identical* accumulation order → bit-identical on every
   `Precision`/tier (`conv2d_s2_phase_is_bit_identical`). **Measured ~8 %
-  SLOWER end-to-end** (593 vs 549 ms): the kernel is FMA-bound, not
-  memory-bound, so unit-stride reads buy nothing and the repack pass + larger
-  working set are pure cost — the same lesson as Winograd. Kept opt-in as the
-  substrate for a future phase-GEMM (the 4 planes are GEMM-shaped); the direct
-  `tap_loop` strided read stays the default. Decode-side convs are already
-  optimally covered: `PackedConvTranspose` runs the same phase trick on the
-  output side (per output-column parity), `PackedDepthwise`/`PackedIntConv`
-  own their paths, no `reference::` fallback runs on the decode forward path.
-  The real conv lever left is FMA-*reduction* (F(4,3) Winograd, implicit
-  GEMM) or GPU, not access-pattern tricks.
+  SLOWER end-to-end** (593 vs 549 ms) — see the profile note below. Kept
+  opt-in as the substrate for a future phase-GEMM (the 4 planes are
+  GEMM-shaped); the direct `tap_loop` strided read stays the default.
+  Decode-side convs are already optimally covered: `PackedConvTranspose`
+  runs the same phase trick on the output side (per output-column parity),
+  `PackedDepthwise`/`PackedIntConv` own their paths, no `reference::`
+  fallback runs on the decode forward path.
+- **Conv-kernel bottleneck — MEASURED (bench_s2conv example, 128→128 s2
+  3x3 conv on 512×352, i270/Core Ultra AVX2):** 158 ms/conv single-threaded
+  vs a ~5–7 ms FMA port floor → **~3 % FMA utilization: memory-LATENCY-
+  bound, not FMA-bound** (my earlier guess was wrong). 24 threads give only
+  13.4× (→11.8 ms, ~40 % util) — latency-bound with a bandwidth ceiling,
+  not compute-bound; ~2× off peak even threaded. Root cause: the conv
+  re-reads the whole input per output-channel block (ocb) — a ~92 MB working
+  set per ocb — so every splat-load misses L2/LLC (~17 cycles/step). **The
+  real fix is ocb-tiling** (N-block the output channels: accumulate
+  `acc[OC_B][B]` over several output blocks at once, so one input read feeds
+  `OC_B` FMAs — input traffic ÷OC_B, the same miss-avoidance GEMM
+  N-blocking does). Neither Winograd nor phase-decompose helps a
+  latency-bound kernel — only fewer misses (tiling) or fewer FLOPs
+  (F(4,3)/implicit-GEMM) or GPU do. The `phase` path's repack only added
+  traffic.
 - f16-weight kernels, niche coverage vectors (per-tile eICCI, single-chroma
   tiles, 10-bit LEF/eICCI), GPU (separate workspace).

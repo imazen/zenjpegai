@@ -88,6 +88,10 @@ name = "dbg_entropy"
 required-features = ["unstable-internals"]
 
 [[example]]
+name = "bench_s2conv"
+required-features = ["unstable-internals"]
+
+[[example]]
 name = "dbg_recon"
 required-features = ["unstable-internals"]
 
