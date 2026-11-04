@@ -106,6 +106,22 @@ impl GpuEncoder {
     /// bit-identical to `Encoder::encode`.
     pub fn encode(&self, src: impl Into<SourceImage>, params: EncodeParams) -> Result<Vec<u8>> {
         let src = src.into();
+        // The GPU analysis is whole-picture: if the encoder would split either
+        // component into more than one analysis tile, the full CPU encode —
+        // which tiles the analysis natively — is the correct path, not a
+        // diverging whole-picture GPU pass.
+        for ccs in 0..2 {
+            if Encoder::analysis_tile_grid(src.width(), src.height(), ccs, params)
+                .map_err(GpuError::Codec)?
+                .len()
+                != 1
+            {
+                return self
+                    .cpu
+                    .encode(src, params)
+                    .map_err(|e| GpuError::Codec(e.error().clone()));
+            }
+        }
         let meta = src
             .meta(params.c_ver, params.c_hor)
             .map_err(GpuError::Codec)?;
