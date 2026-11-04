@@ -36,6 +36,19 @@ construction, and say so in `PORTING.md`.
   whole `gpu-tests` suite — `analysis_matches_cpu` (f32 `3e-4`, f16 `1e-3`/`2e-2`
   via `context().has_f16()`), all `decode_ref` streams, `gpu_encode` — on this box.
   The RTX 2080 remains for *perf* (f16-throughput, tiled timing), not correctness.
+- **Vector suite now fully populated + verified on this box:** `decode_ref`
+  **50/50 bit-exact**; `filters_efe_ref` **17/17**; `formats_streams`,
+  `efe_nonlinear_decisions`, `eicci_selection`, `colour_preprocessing`,
+  `decisions_match`, `rate_matching`, `hop_post_filters`, all `eicci_*` — all
+  pass. Generated all `efe`/`formats`/`icci`/`efe_nonlinear`/`filters_lef_icci`/
+  `enc2` oracles (`make_reference_streams.sh` per-set + direct `force_efe_encode`/
+  `dump_decode`/`dump_filters`/`dump_efe_nonlinear`/`dump_encode --enc2` drivers —
+  the `efe`/`formats` sets' preamble shell structure fails `rc=120` on this box,
+  but every constituent Python call works standalone, so the per-vector driver
+  bypasses it). Remaining `encode_ref` failures: `msssim_matches` (needs bespoke
+  `msssim_oracle`, no standard generator), `encoder_end_to_end`
+  (`enc_img01_hop_m2_b0_indregions` `uv.z_hat` 1 value), `likelihood`/`tools_on_ctc`
+  (environment-sensitive — see below).
 - **Regenerated-vector caveat (encode-side signature tests):** `make_reference_streams.sh all`
   now produces ~98 vectors on this box; every decode-side vector verifies bit-exact.
   Two encode-side tests diverge only on `img01` (the biggest, most float-sensitive input):
