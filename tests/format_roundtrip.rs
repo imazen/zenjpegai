@@ -265,3 +265,56 @@ fn rate_matched_roundtrip() {
         .expect("rate-matched decode failed");
     assert_yuv(&pic, 96, 64, (1, 1), 8);
 }
+
+/// `encode_with_quality_map` — a spatially varying quantisation map (one `qp`
+/// per latent position) still produces a stream that decodes to the source
+/// format.
+#[test]
+fn quality_map_roundtrip() {
+    let (w, h) = (96usize, 64usize);
+    // Luma latent grid for a 4:4:4 source is ceil(w/16) x ceil(h/16).
+    let qp = zenjpegai::tensor::Tensor::<i32>::from_vec(
+        1,
+        h.div_ceil(16),
+        w.div_ceil(16),
+        vec![-2; (h.div_ceil(16)) * (w.div_ceil(16))],
+    )
+    .expect("qp map");
+    let qm = zenjpegai::tools::qualmap::QualityMap::from_qp(&qp).expect("quality map");
+    let stream = Encoder::new(models())
+        .encode_with_quality_map(yuv(w, h, (1, 1), 8), EncodeParams::default(), &qm)
+        .expect("quality-map encode failed");
+    let pic = Decoder::new(models())
+        .decode_picture(&stream)
+        .expect("quality-map decode failed");
+    assert_yuv(&pic, w, h, (1, 1), 8);
+}
+
+/// `Precision::Approximate` — the opt-in `f32` kernels (not reference-parity)
+/// still produce a conforming stream.
+#[test]
+fn approximate_precision_roundtrip() {
+    let params = EncodeParams {
+        precision: zenjpegai::nn::fast::Precision::Approximate,
+        ..EncodeParams::default()
+    };
+    let pic = roundtrip(yuv(96, 64, (1, 1), 8), params);
+    assert_yuv(&pic, 96, 64, (1, 1), 8);
+}
+
+/// `SourceImage::read_yuv` — the `extract_info` filename convention drives the
+/// parsed format (`<w>x<h>_<chroma>_<bit>bit`), then the planar source
+/// roundtrips.
+#[test]
+fn read_yuv_source_roundtrip() {
+    let (w, h) = (96usize, 64usize);
+    let (cw, ch) = (w.div_ceil(2), h.div_ceil(2)); // the default 4:2:0
+    let mut data = plane(w * h, 8, 1);
+    data.extend(plane(cw * ch, 8, 2));
+    data.extend(plane(cw * ch, 8, 3));
+    let bytes: Vec<u8> = data.iter().map(|&s| s as u8).collect();
+    let src =
+        SourceImage::read_yuv("synthetic_96x64_420_8bit.yuv", &bytes).expect("read_yuv failed");
+    let pic = roundtrip(src, EncodeParams::default());
+    assert_yuv(&pic, w, h, (2, 2), 8);
+}
