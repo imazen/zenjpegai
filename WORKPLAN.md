@@ -102,7 +102,7 @@ construction, and say so in `PORTING.md`.
 
 - [ ] Niche coverage vectors: per-tile-different eICCI selections, single-chroma tiles,
   10-bit eICCI/LEF (needs reference decode support check first).
-- [ ] GPU work (separate workspace): shader-f16 (B3), GPU pool ledger — parity-breaking.
+- [~] GPU work (separate workspace): shader-f16 conv *weights* landed (`GpuContext` requests `SHADER_F16`, `GpuConv` packs `mat4x4<f16>`, `conv()`/`conv_tiled()` widen to `mat4x4<f32>` — activations stay f32); conv_transpose/depthwise and f16 *activations* still f32. GPU pool ledger — parity-breaking.
 - [ ] Sweep `PORTING.md` after every landing: row update + what remains missing.
 
 ## Continuation checkpoint (post-`process_z`)
@@ -221,11 +221,25 @@ Next high-value (unstarted):
   does not replicate within the box's CV=15-25% noise. **Conclusion:
   prefetch does not clear the bar for an archmage API — not worth asking
   upstream.** `#![forbid(unsafe_code)]` restored.
-- **Remaining perf arc (in priority):** encoder/analysis on the wgpu
-  backend (`gpu/src` is decode-only today: context/decoder/kernels/
-  layers/plan/synthesis — analysis needs a parallel conv-s2 + attention
-  + MCM/GDN shader set and an `encoder.rs` driver); f16 shaders (B3 —
-  halves GPU register pressure + memory traffic); a wasm encoder (the
-  wasm crate is decode-only today).
-- f16-weight kernels, niche coverage vectors (per-tile eICCI, single-chroma
-  tiles, 10-bit LEF/eICCI), GPU (separate workspace).
+- **Encoder/analysis on the wgpu backend — landed** (`gpu/src/analysis.rs`
+  `GpuAnalysis` + `gpu/src/encoder.rs` `GpuEncoder`; the `pad` WGSL
+  kernel + `Graph::pad` give the structural replicate-pad; `Loader`/
+  `ResAu`/`Tam`/`Cab`/`ResidualBlock`/`TransformerBlock` promoted to
+  `pub(crate)` in `synthesis.rs`). `encode(SourceImage, params)` mirrors
+  `Encoder::encode`: GPU analysis -> CPU `encode_latents` (the parity
+  seam). Whole-picture; produces a valid, not bit-identical, codestream
+  (~1e-4 latent gap like the reference tolerates). `gpu/tests/analysis.rs`
+  compares `GpuAnalysis` luma/chroma to the CPU transforms (BOP+HOP, ~3e-4
+  bound; needs `ZENJPEGAI_REF` + a GPU). Still missing: tiled analysis,
+  `clip_thres` (dormant upstream — no shipped model carries it), a
+  GPU-vs-reference *bitstream* check.
+- **f16 shaders (B3):** conv *weights* f16-packed on `SHADER_F16` devices
+  (activations f32); `conv_transpose`/depthwise + f16 activations still
+  to do.
+- **Wasm encoder — landed** (`wasm/src/lib.rs`: `State` gains an
+  `Encoder::with_source` sharing the decoder's `PackedBundle`;
+  `encode(rgb, w, h, model_id, op, beta)` -> codestream, builds for
+  wasm32-unknown-unknown).
+- f16 conv_transpose/depthwise + f16-activation kernels, niche coverage
+  vectors (per-tile eICCI, single-chroma tiles, 10-bit LEF/eICCI), GPU
+  (separate workspace).
