@@ -118,6 +118,19 @@ no-improvement — additive can't flip `z_hat` <0.5 in `num_ite_z` iters).
 ALL RDLR dead-paths now ported (`process_y` luma+chroma, `process_z` luma+chroma,
 `feature_clipping`, QMAP 0/1/2, UV-beta, `Precision::Approximate` early-exit).
 
+- [x] **`minimum_tile_size` / `_adjust_boundary_tiles`** — RESOLVED. The
+  `_adjust_boundary_tiles` machinery is ported (`filters/icci.rs`,
+  `MINIMUM_TILE_SIZE = 176`, oracle-verified `matches_reference_layout_with_adjusted_boundary`)
+  — it's the eICCI `numSamplesPerTile` tiling path. For RDLR it's dormant by
+  design: `numSamples` = `numSamplesPerLumaTile` = 4.2M forces a single-tile
+  grid → nothing to adjust + whole-picture `ms_ssim` == per-tile-optimized-part.
+  **Remaining structural gap (real, large):** per-tile RDLR for pictures
+  >4.2MP — the reference's `numSamplesPerLumaTile`=1M/`numSamplesPerChromaTile`=
+  0.5M makes `image_tiles`/`latent_tiles` multi-tile, `rdlr_y_iteration` per
+  `lat_tile`/`im_tile`/`optimized_part` + `ms_ssim` per tile (non-additive at
+  `ratio != 0`). Our `numSamples`=4.2M gate (vs reference 30M) is the deliberate
+  bound making this unreachable — a resource/design choice, not an unported
+  feature per se. A full per-tile RDLR port is a large restructure.
 Next high-value (unstarted):
 - **`d_psi` finite-diff** — `d(psi_s)` extraction in `compress_backward` is a
   subset of the oracle-verified `d_y` path but has NO reference oracle
