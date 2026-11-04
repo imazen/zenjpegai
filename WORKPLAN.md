@@ -121,8 +121,14 @@ construction, and say so in `PORTING.md`.
   `2^n` → `y·scale`. Implement as a `#[rite]`/`#[arcane]` `exp_lanes` on `f32x` + `sigmoid`/`elu_gate`
   SIMD paths (keep `#[autoversion]` scalar for tails); verify with `math_tiers` +
   `fast_vs_reference` tier bit-identity (the exp must match scalar `exp` bit-for-bit on every
-  input, every tier — the hard invariant). magetypes `exp_lowp`/`exp_midp` are different-precision
-  algorithms, NOT usable (not bit-identical).
+  input, every tier — the hard invariant). magetypes `exp_lowp`/`exp_midp`/`exp2_midp_precise`
+  are different-precision algorithms, NOT usable (not bit-identical).
+  **Concrete detail found:** the `2^n` scale is the only non-float step — it needs `i32x` lanes
+  (`n.to_i32()` → `+127` → `<<23` → `bitcast_f32`). `SimdF32` (conv.rs minimal trait: splat/load/
+  store/mul_add/add/sub) lacks `floor`/`min`/`max`/`to_i32`, so either (a) extend `SimdF32` +
+  add a `SimdI32` companion type (the safe, additive route — Lanes8 implements elementwise,
+  f32x8/f32x16 via magetypes `to_i32`/`bitcast_i32`), or (b) write `exp_lanes` per-concrete-type.
+  Dispatch via `#[arcane]` tier fns calling `exp_lanes::<f32xN<Token>>` exactly like `conv_row_*`.
 - **Regenerated-vector caveat (encode-side signature tests):** `make_reference_streams.sh all`
   now produces ~98 vectors on this box; every decode-side vector verifies bit-exact.
   Two encode-side tests diverge only on `img01` (the biggest, most float-sensitive input):
