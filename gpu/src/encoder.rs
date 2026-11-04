@@ -134,8 +134,8 @@ impl GpuEncoder {
         let src = src.into();
         let meta = src
             .meta(params.c_ver, params.c_hor)
-            .map_err(|e| GpuError::Codec(e.into()))?;
-        let input = preprocess(&src, &meta).map_err(|e| GpuError::Codec(e.into()))?;
+            .map_err(|e| GpuError::Codec(e))?;
+        let input = preprocess(&src, &meta).map_err(|e| GpuError::Codec(e))?;
         self.encode_input(&input.luma, &input.chroma, params.model_id as usize, params)
     }
 

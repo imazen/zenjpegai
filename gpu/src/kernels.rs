@@ -981,6 +981,7 @@ mod dump {
             icg4: 4,
             ocg4: 4,
             tile_ich: 0,
+            w16: false,
         };
         println!("{}", conv(&v));
         println!("{}", conv_transpose(4, 2, 4, 16));
