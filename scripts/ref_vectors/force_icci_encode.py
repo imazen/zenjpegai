@@ -31,36 +31,41 @@ from src.reco.coders.encoder import RecoEncoder, process_encoder  # noqa: E402
 
 
 def force_icci(sel):
-    sel_y, sel_uv = [int(x) for x in sel.split(":")]
-    assert 1 <= sel_y <= 10 and 1 <= sel_uv <= 10
+    # `sel` is a list of [y, u, v] triples, one per tile (cycled); a 0 leaves that
+    # plane unfiltered, so per-tile-different selections and single-chroma tiles are
+    # expressible.
+    for s in sel:
+        assert len(s) == 3 and all(0 <= x <= 10 for x in s)
     orig = EfficientICCIFilter.compress
 
     def compress(self, imgs, *a, **k):
         s_ver = self.get_owner_param("s_ver")
         s_hor = self.get_owner_param("s_hor")
         if s_ver == 1 and s_hor == 1:
-            return orig(self, imgs, *a, **k)
-        # Subsampled source: the stock body early-returns. Run it with the check hidden;
-        # the only other place it reads s_ver/s_hor is the final to_format_, which then
-        # keeps the filtered picture at 4:4:4, so convert it back below.
-        real_gop = self.get_owner_param
-
-        def gop(name, *aa, **kk):
-            return 1 if name in ("s_ver", "s_hor") else real_gop(name, *aa, **kk)
-
-        self.get_owner_param = gop
-        try:
             out = orig(self, imgs, *a, **k)
-        finally:
-            del self.get_owner_param
-        fmt = Image.get_format_from_subsampling(s_ver, s_hor)
-        out[0].to_format_(fmt)
+        else:
+            # Subsampled source: the stock body early-returns. Run it with the check
+            # hidden; the only other place it reads s_ver/s_hor is the final
+            # to_format_, which then keeps the filtered picture at 4:4:4, so convert
+            # it back below.
+            real_gop = self.get_owner_param
+
+            def gop(name, *aa, **kk):
+                return 1 if name in ("s_ver", "s_hor") else real_gop(name, *aa, **kk)
+
+            self.get_owner_param = gop
+            try:
+                out = orig(self, imgs, *a, **k)
+            finally:
+                del self.get_owner_param
+            fmt = Image.get_format_from_subsampling(s_ver, s_hor)
+            out[0].to_format_(fmt)
         # Force a non-empty selection on the long list: the RD search may pick [0,0,0]
-        # (no plane filtered), which exercises nothing.
+        # (no plane filtered), which exercises nothing. `sel` is a list of [y,u,v]
+        # triples, cycled over the tiles; a 0 leaves that plane unfiltered.
         self.models_idxes.use_short_list = False
-        self.models_idxes.model_state_per_tile = [
-            [sel_y, sel_uv, sel_uv] for _ in self.models_idxes.model_state_per_tile
-        ]
+        n = len(self.models_idxes.model_state_per_tile)
+        self.models_idxes.model_state_per_tile = [sel[i % len(sel)] for i in range(n)]
         return out
 
     EfficientICCIFilter.compress = compress
@@ -81,18 +86,23 @@ def code_icci_flag_for_420():
 def main():
     sep = sys.argv.index("--")
     opts, enc_args = sys.argv[1:sep], sys.argv[sep + 1:]
-    sel = "7:3"
+    # `--sel Y:UV` applies the same [y,uv,uv] to every tile; `--sel Y:U:V,...` gives a
+    # per-tile [y,u,v] triple (comma-separated, cycled), where a 0 leaves that plane
+    # unfiltered — exercises per-tile-different selections and single-chroma tiles.
+    sel = [[int(x) for x in t.split(":")] for t in "7:3".split(",")]
     flag420 = False
     i = 0
     while i < len(opts):
         if opts[i] == "--sel":
-            sel = opts[i + 1]
+            sel = [[int(x) for x in t.split(":")] for t in opts[i + 1].split(",")]
             i += 2
         elif opts[i] == "--flag420":
             flag420 = True
             i += 1
         else:
             raise SystemExit(f"unknown option {opts[i]}")
+    sel = [s + [s[-1]] * (3 - len(s)) if len(s) == 1 else s + [s[1]] * (3 - len(s)) for s in sel]
+    sel = [[s[0], s[1], s[2]] for s in sel]
     force_icci(sel)
     if flag420:
         code_icci_flag_for_420()

@@ -287,6 +287,15 @@ fn icci_img01_base_eiccitiles_lef_bpp050() {
     check_icci("img01_base_eiccitiles_lef_bpp050", true);
 }
 
+/// Forced per-tile-*different* selections (`force_icci_encode.py --sel 7:3:0,5:0:2,4:1:1`,
+/// cycled over six tiles): tiles picking different networks *and* single-chroma tiles —
+/// `use_yuv` `[1,1,0]` (U only), `[1,0,1]` (V only) and `[1,1,1]` — the `want=[u,v]`
+/// chroma path's every combination.
+#[test]
+fn icci_img01_eiccitiles_varsel_bpp050() {
+    check_icci("img01_eiccitiles_varsel_bpp050", true);
+}
+
 /// eICCI on a 4:2:2 source (`force_icci_encode.py`; the reference encoder never selects eICCI
 /// for subsampled sources, so the flag was forced): chroma bicubic-upsampled to 4:4:4,
 /// filtered, bilinear-downsampled back. A conformant stream — `icci_enable_flag` is coded
