@@ -139,7 +139,8 @@ impl GpuEncoder {
 
     /// Copy `t`'s HWC4 buffer back and unpack to planar `[C, H, W]`.
     fn read_latent(&self, plan: &Plan, t: T) -> Result<Vec<f32>> {
-        let bytes = (t.len4() * 4) as u64;
+        // `len4` is the vec4 count (`h*w*c4`) — 16 bytes each, not 4.
+        let bytes = (t.len4() * 16) as u64;
         let staging = self.ctx.device().create_buffer(&wgpu::BufferDescriptor {
             label: Some("latent staging"),
             size: bytes,
