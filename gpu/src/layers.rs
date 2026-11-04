@@ -134,7 +134,7 @@ impl GpuConv {
         let weight = if w16 {
             let bits: Vec<u16> = w
                 .iter()
-                .map(|&v| half::f16::from_f32(v).to_bits())
+                .map(|&v| zenjpegai::weights::f16::f32_to_f16(v))
                 .collect();
             storage16(ctx, "conv weight", &bits)
         } else {
@@ -194,7 +194,7 @@ impl GpuConvTranspose {
         let weight = if w16 {
             let bits: Vec<u16> = w
                 .iter()
-                .map(|&v| half::f16::from_f32(v).to_bits())
+                .map(|&v| zenjpegai::weights::f16::f32_to_f16(v))
                 .collect();
             storage16(ctx, "convt weight", &bits)
         } else {
@@ -246,7 +246,7 @@ impl GpuDepthwise {
         let weight = if w16 {
             let bits: Vec<u16> = w
                 .iter()
-                .map(|&v| half::f16::from_f32(v).to_bits())
+                .map(|&v| zenjpegai::weights::f16::f32_to_f16(v))
                 .collect();
             storage16(ctx, "depthwise weight", &bits)
         } else {
