@@ -162,6 +162,47 @@ fn conv2d_s2_phase_is_bit_identical() {
     }
 }
 
+/// The packed-tile (BLIS) dense-conv driver: im2col-packs each output row's
+/// input strip into a contiguous `[icb][taps][ow][V]` tile, then sweeps the
+/// output blocks at unit stride. Same accumulation order — bit-identical to
+/// the direct path on every tier and thread count.
+#[test]
+fn conv2d_blis_is_bit_identical() {
+    let mut rng = Rng(0xB115);
+    for &(in_ch, out_ch, k, st, pad, h, w) in &[
+        (32usize, 48usize, 3usize, 1usize, 1usize, 9usize, 23usize),
+        (32, 16, 3, 2, 1, 7, 58),
+        (16, 16, 1, 1, 0, 4, 129),
+        (8, 24, 3, 1, 1, 5, 2),
+        (128, 128, 3, 2, 1, 6, 33),
+        (32, 32, 3, 2, 1, 1, 1),
+    ] {
+        let conv = Conv2d::new(
+            in_ch,
+            out_ch,
+            (k, k),
+            st,
+            (pad, pad),
+            1,
+            rng.vec(out_ch * in_ch * k * k),
+            Some(rng.vec(out_ch)),
+        )
+        .unwrap();
+        let x = Tensor::from_vec(in_ch, h, w, rng.vec(in_ch * h * w)).unwrap();
+        let what = format!("blis {in_ch}->{out_ch} k{k} s{st} {h}x{w}");
+        for eng in engines() {
+            let v = eng.tier.block();
+            let packed = PackedConv::new(&conv, v, [0; 4]).unwrap();
+            let bx = BTensor::from_planar(&x, v).unwrap();
+            unsafe { std::env::set_var("ZENJPEGAI_CONV_NOBLIS", "1") };
+            let want = packed.forward(&eng, &bx).unwrap();
+            unsafe { std::env::remove_var("ZENJPEGAI_CONV_NOBLIS") };
+            let got = packed.forward(&eng, &bx).unwrap();
+            assert_eq!(want.data, got.data, "{what} {eng:?}: blis differs");
+        }
+    }
+}
+
 #[test]
 fn conv2d_extra_padding_matches_explicit_padding() {
     // The SOP upsampler pads one zero row/column at the bottom/right before a 2x2 convolution.

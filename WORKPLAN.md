@@ -188,13 +188,26 @@ Next high-value (unstarted):
   set per ocb — so every splat-load misses L2/LLC (~17 cycles/step).
   **ocb-sweep tested: ~12x SLOWER** (`forward_ocb_sweep`, opt-in
   `ZENJPEGAI_CONV_SWEEP`) — iterating position-blocks outer / ocbs inner
-  keeps the input strip hot but thrashes the *weights*: the full ~590KB
-  weight set cycles through L1 each position block, where the default
-  driver keeps each ocb's ~37KB weight L1-resident across all position
-  blocks (plus ~16x the per-`block` setup). The default loop order is
-  already well-tiled for this hierarchy: weights L1, input strip L2,
-  ~L2-latency-bound input reads that no loop reorder beats. The real
-  remaining levers are prefetch (needs intrinsics magetypes doesn't yet
-  expose), a BLIS-style 3-level packed-tile kernel, or GPU.
+  keeps the input strip hot but thrashes the *weights* (the ~590KB weight
+  set cycles through L1 each position block, vs the default keeping each
+  ocb's ~37KB weight L1-resident). **OCB2 register-tile: ~25x SLOWER**
+  (`forward_ocb2`, opt-in `ZENJPEGAI_CONV_OCB2`) — `acc[2][B]` halves the
+  input loads/FMA but the paired 74KB weight set exceeds L1, so both ocbs'
+  weights miss L1. The lesson across all four attempts (wino, phase,
+  sweep, ocb2): the default driver's weight-per-ocb-in-L1 is the linchpin
+  — any reorder that breaks it loses more than the read-side gains.
+- **Packed-tile (BLIS) dense driver — LANDED, default for `groups == 1`
+  (`forward_blis`, `ZENJPEGAI_CONV_NOBLIS` opt-out):** the input strip for
+  each output row is im2col-packed once into a contiguous
+  `[icb][ntaps][ow][V]` tile (one gather pass, amortised over all output
+  blocks), then every `ocb` reads it at unit stride `is: 1` with every
+  tap interior — sequential L1/L2-streamed reads instead of scattered
+  ones, while the weight-per-ocb L1 residency is preserved. **Measured:
+  ~15% faster on the conv micro-bench (140.8 vs 158 ms 1T, 10.1 vs 11.9 ms
+  24T) and ~5-6% faster end-to-end encode (511 vs 540 ms) — bit-identical
+  on every tier** (`conv2d_blis_is_bit_identical`). `coz::progress!()`
+  markers are wired in the pack + sweep loops behind the `coz` feature.
+  The ~64% backend-bound topdown (~29% mem + ~35% core) confirms the
+  packed reads attack the memory third.
 - f16-weight kernels, niche coverage vectors (per-tile eICCI, single-chroma
   tiles, 10-bit LEF/eICCI), GPU (separate workspace).
