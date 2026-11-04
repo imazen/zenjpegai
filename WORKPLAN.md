@@ -48,7 +48,17 @@ construction, and say so in `PORTING.md`.
   bypasses it). Remaining `encode_ref` failures: `msssim_matches` (needs bespoke
   `msssim_oracle`, no standard generator), `encoder_end_to_end`
   (`enc_img01_hop_m2_b0_indregions` `uv.z_hat` 1 value), `likelihood`/`tools_on_ctc`
-  (environment-sensitive — see below).
+  (environment-sensitive — see below). `msssim_oracle` generated via
+  `dump_filters.py --msssim` → `msssim_matches` passes (≤1e-5).
+  `encoder_end_to_end`: **26/27 `enc_*` vectors bit-exact** (`0 symbols moved`,
+  `+0.000%`, `0 samples differ`) — the encoder is essentially bit-exact. The
+  failures are a handful of borderline symbols on the *hardest* paths only
+  (`enc_img01_hop_m2_b0_indregions` `uv.z_hat` 1 value; `enc_img30_bop_m3_b400`
+  24 moves/worst 1; `enc_img01_hop_m2_b0` 4 moves/worst 4;
+  `enc_img30_hop_m2_b0_{rvsonly,grfsonly}` 2-3 moves/worst 1). All on img01
+  (largest, most float-sensitive) or the m3/indregions/RVS/GRFS analysis paths —
+  a small borderline-integerization divergence, not a systematic bug (most of
+  those same-path vectors are bit-exact elsewhere).
 - **Regenerated-vector caveat (encode-side signature tests):** `make_reference_streams.sh all`
   now produces ~98 vectors on this box; every decode-side vector verifies bit-exact.
   Two encode-side tests diverge only on `img01` (the biggest, most float-sensitive input):
