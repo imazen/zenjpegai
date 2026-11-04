@@ -479,7 +479,7 @@ pub fn run_container_headers(data: &[u8]) {
             zenjpegai::header::OperatingPoint::Bop,
             zenjpegai::header::OperatingPoint::Hop,
         ] {
-            let _ = zenjpegai::estimate_memory(&headers.picture, op);
+            let _ = zenjpegai::estimate_memory(&headers.picture, &headers.tools, op);
         }
     }
     // Thread splits are the framing the entropy stage relies on: probe each

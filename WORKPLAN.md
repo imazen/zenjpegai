@@ -67,31 +67,26 @@ construction, and say so in `PORTING.md`.
   (largest, most float-sensitive) or the m3/indregions/RVS/GRFS analysis paths —
   a small borderline-integerization divergence, not a systematic bug (most of
   those same-path vectors are bit-exact elsewhere).
-- **BUG (subsampled decode — latent, surfaced by populated format vectors):**
-  `decode_ref` `y.psi` diverges ~1.9–3.0 on every chroma-subsampled vector
+- **RESOLVED — stale oracle, not a decoder bug (subsampled `y.psi` ~1.9–3.0):**
+  `decode_ref` `y.psi` diverged ~1.9–3.0 on every chroma-subsampled vector
   (`img30yuv{420,422,444,420b10,444b10}_base_off_bpp050`,
   `img30_base_off_{c420,c422}_bpp050`, `img30cropyuv420_base_off_bpp075`) while all
-  non-subsampled streams stay bit-exact. The reference's `img30_base_off_c420`
-  `y.psi` is byte-identical to `img30_base_off` (444) — chroma subsample must not
-  touch luma — so our coded-420/subsampled decode's luma `y.psi` is wrong, not an
-  env/dump artefact. **Localized to the `ccs=0` entropy decode, not the psi
-  synthesis**: for `img30_base_off_c420` our `ent[0].z_hat`/`residual`/`ly.psi`
-  diverge from the 444 decode (`z_hat` nonzero 696 vs 1391, `residual` nonzero
-  7869 vs 48375, `z_sum` -610 vs -378) while `ent[0]`/`ent[1]` dims are identical
-  (`z_hat 14x9`, `residual 56x35`, `num_chs` 160/96) — `ent[0]` (luma) reads
-  different/wrong data. `s_ver`/`s_hor`/`c_ver`/`c_hor` bleeds into the `ccs=0`
-  entropy path (`decode_z`/`decode_y`/`component_scales_impl`/`num_chs`/
-  `num_decode`/`channel_step`/`num_threads`/`cube_flag_count`/`num_regions`/
-  `region_grid`/`hyper_latent_size`/`latent_size`/`component_size`/`num_decode`/
-  `max_channels`/`channel_step`/`num_threads`/`cube_flag_count`/`num_regions`/
-  `region_grid`/`hyper_latent_size`/`latent_size`/`component_size` at
-  `src/decoder/entropy.rs`/`mod.rs`/`tools/regions.rs`/`header.rs`). The luma
-  dims are right; the luma entropy *values* are wrong — the residual/substream
-  decode for `ccs=0` reads a different count or offset for `c_ver`/`c_hor`/`s_ver`/
-  `s_hor != 1`. Everything else: `decode_ref` 42/50,
-  `entropy_ref` 37/37, `weights_ref` 4/4, `api_ref` 6/6, `filters_efe` 17/17,
-  `filters_lef_icci` 19/19, `formats`/`efe_nl`/`eicci`/`msssim`/`encoder_end_to_end`
-  (26/27) — all bit-exact.
+  non-subsampled streams stayed bit-exact. It looked like a `ccs=0` entropy bug
+  (our `ent[0].z_hat`/`residual_q` read different data than the stored dump). A
+  **fresh** `dump_decode.py` run on the *current* `stream.bits` produces luma
+  tensors matching our decoder **exactly** (c420 `z_hat` nz 696 = ours 696;
+  `residual_q` nz 7869 = ours 7869; deterministic across reruns) — the stored
+  dumps were generated from an older/different stream (their `y.*` happens to be
+  byte-identical to the 444 `img30_base_off` dump, an impossible coincidence for a
+  real coded-420 decode whose `r_prim` residual substream is 6× smaller).
+  Regenerated all 8 vectors' dumps (`tensors.bin`/`manifest.txt`/`decoded.png`
+  via `dump_decode.py`); `decode_ref` is now **50/50**. Verified no other suite
+  depends on the stale values (`entropy_ref` 37/37, `api_ref` 6/6, `filters_efe`
+  17/17, `filters_lef_icci` 19/19, `memory_ref` 6/6, `format_roundtrip` 16/16,
+  `codec_ref` 6/6 — all bit-exact). Also fixed the `estimate_memory` signature
+  drift in `fuzz/fuzz_targets/common.rs` (`tools` arg). The remaining
+  encode-side `likelihood`/`tools_on_ctc`/`encoder_end_to_end` failures are the
+  documented environment-sensitive img01 cases below — unrelated.
 - **Regenerated-vector caveat (encode-side signature tests):** `make_reference_streams.sh all`
   now produces ~98 vectors on this box; every decode-side vector verifies bit-exact.
   Two encode-side tests diverge only on `img01` (the biggest, most float-sensitive input):

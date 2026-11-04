@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `decode_ref` chroma-subsampled vectors were failing `y.psi` by ~1.9–3.0 — **the stored
+  reference dumps were stale, not a decoder defect.** A fresh `dump_decode.py` on the current
+  `stream.bits` produces luma tensors matching our decode exactly (deterministic across
+  reruns); the stale dumps' `y.*` had been generated from an older stream (byte-identical to
+  the 444 decode, impossible for a real coded-420 stream). Regenerated the eight vectors'
+  dumps; `decode_ref` is now 50/50. Also fixed `estimate_memory`'s `tools`-arg call in
+  `fuzz/fuzz_targets/common.rs`.
+
 ### QUEUED BREAKING CHANGES
 <!-- Breaking changes that will ship together in the next major (or minor for 0.x) release. -->
 - `EncodeParams` no longer derives `Eq` (the new `eicci` config carries `f32` loss weights).
