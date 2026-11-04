@@ -111,6 +111,18 @@ construction, and say so in `PORTING.md`.
   BT.709 for raw latents (correct — raw latents carry no source metadata). `gpu_encode` RGB
   path unchanged (0-diff). Verified compiling + no regression; a Yuv-source GPU-encode parity
   test is a reasonable follow-up.
+- **D2 SIMD `exp` — spec for next pass (ops verified available, not yet implemented):** the
+  scalar Cephes `exp` (`nn/fast/math.rs:44`) is called per-element inside the `#[autoversion]`
+  `sigmoid_slice`/`elu_gate_slice` loops — autoversion vectorizes the loop but can't vectorize
+  the scalar `exp` (its `floor`/`from_bits`/int-cast), so the ELU/sigmoid exp stays scalar.
+  magetypes `f32x*` has every op needed for a **bit-identical** lane exp (all ops are IEEE-exact
+  or fixed-order FMA): `clamp`/`min`/`max` → `floor` (`n=floor(x·log2e+0.5)`) → FMA `r = x−n·LN2_HI−n·LN2_LO`
+  → degree-5 FMA poly → `y = p·r·r+r+1` → `to_i32` the `n`, `+127`, `<<23`, `bitcast_i32`→f32 for
+  `2^n` → `y·scale`. Implement as a `#[rite]`/`#[arcane]` `exp_lanes` on `f32x` + `sigmoid`/`elu_gate`
+  SIMD paths (keep `#[autoversion]` scalar for tails); verify with `math_tiers` +
+  `fast_vs_reference` tier bit-identity (the exp must match scalar `exp` bit-for-bit on every
+  input, every tier — the hard invariant). magetypes `exp_lowp`/`exp_midp` are different-precision
+  algorithms, NOT usable (not bit-identical).
 - **Regenerated-vector caveat (encode-side signature tests):** `make_reference_streams.sh all`
   now produces ~98 vectors on this box; every decode-side vector verifies bit-exact.
   Two encode-side tests diverge only on `img01` (the biggest, most float-sensitive input):
