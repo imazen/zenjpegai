@@ -410,8 +410,8 @@ impl<'a> Graph<'a> {
         let ic4 = x.c4() as u32;
         let (gx, gy) = grid2(ow, oh);
         self.push(
-            &format!("convt_k{k}_s{s}_ob{ob}_ic{ic4}"),
-            || kernels::conv_transpose(k, s, ob, ic4),
+            &format!("convt_k{k}_s{s}_ob{ob}_ic{ic4}_w{}", l.w16 as u8),
+            || kernels::conv_transpose(k, s, ob, ic4, l.w16),
             &[
                 x.h as u32,
                 x.w as u32,

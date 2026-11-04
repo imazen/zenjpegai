@@ -166,6 +166,8 @@ pub struct GpuConvTranspose {
     pub pad: usize,
     pub out_pad: usize,
     pub(crate) ob: usize,
+    /// `weight` holds `mat4x4<f16>` bits (`SHADER_F16` devices only).
+    pub(crate) w16: bool,
     pub(crate) weight: wgpu::Buffer,
     pub(crate) bias: wgpu::Buffer,
 }
@@ -188,6 +190,16 @@ impl GpuConvTranspose {
                 }
             }
         }
+        let w16 = ctx.has_f16();
+        let weight = if w16 {
+            let bits: Vec<u16> = w
+                .iter()
+                .map(|&v| half::f16::from_f32(v).to_bits())
+                .collect();
+            storage16(ctx, "convt weight", &bits)
+        } else {
+            storage(ctx, "convt weight", &w)
+        };
         Ok(Self {
             in_ch: c.in_ch,
             out_ch: c.out_ch,
@@ -196,7 +208,8 @@ impl GpuConvTranspose {
             pad: c.pad,
             out_pad: c.out_pad,
             ob,
-            weight: storage(ctx, "convt weight", &w),
+            w16,
+            weight,
             bias: storage(ctx, "convt bias", &bias_blocks(c.bias.as_deref(), oc4)),
         })
     }

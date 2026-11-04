@@ -397,13 +397,11 @@ fn main(
 /// `K * K` of them. At stride 2 that is 4 taps of 16 for `K = 4` and at most 4 of 9 for `K = 3`.
 /// `ic4` is baked in (see [`ConvVariant::icg4`] — the constant bound lets the tap loop unroll).
 /// Params: `in_h in_w in_c4 out_h out_w out_c4 pad`.
-pub fn conv_transpose(k: u32, stride: u32, ob: u32, ic4: u32) -> String {
+pub fn conv_transpose(k: u32, stride: u32, ob: u32, ic4: u32, w16: bool) -> String {
     let acc_step: String = (0..ob)
-        .map(|i| format!("        a0_{i} += wt[w + {i}u] * v;\n"))
+        .map(|i| format!("        a0_{i} += mat4x4<f32>(wt[w + {i}u]) * v;\n"))
         .collect();
-    // Transposed convs stay f32-weighted for now (the f16 stream is on the
-    // direct conv); their weight buffer is packed f32 in `GpuConvTranspose`.
-    let bindings = conv_bindings(false);
+    let bindings = conv_bindings(w16);
     format!(
         "{params}{bindings}
 const K: u32 = {k}u; const STRIDE: u32 = {stride}u; const OB: u32 = {ob}u; const IC4: u32 = {ic4}u;
