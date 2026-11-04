@@ -102,19 +102,21 @@ construction, and say so in `PORTING.md`.
 
 - [~] Niche coverage vectors: per-tile-different eICCI selections, single-chroma tiles,
   10-bit eICCI/LEF (needs reference decode support check first).
-  **10-bit LEF/eICCI — real bug found.** Reference env unblocked on this box
-  (built `src/codec/entropy_coding/lib_wrappers/{mans,direct}` ANS `.so`s;
-  import via `src.codec…` not `codec…` — see CLAUDE.md). Generated vector
-  `img30yuv444b10_base_lef_eicci_bpp050` (10-bit 4:4:4 + LEF + eICCI, bpp50,
-  in `/mnt/v/output/zenjpegai/reference/vectors/` + `filters_lef_icci` oracle
-  with `eicci.out.*`, `lef.{in,out}.*`, `lef.scale_log`). Registering it in
-  `tests/decode_ref.rs` (`check!` macro) decodes but diverges massively:
-  **994350/1491840 samples differ, worst by 732** — a genuine 10-bit decode
-  bug, not a bound issue. Next: isolate LEF vs eICCI via the
-  `filters_lef_icci` dump; suspects are the `range = (1<<bit_depth)-1`
-  normalization (`filters/icci.rs`) and LEF's `2^bit_depth-1` luma scale
-  (`filters/lef.rs`) — a 4x-off scaling (1023 vs 255) would look like this.
-  Test registration reverted until fixed (must not ship a failing test).
+  **10-bit LEF/eICCI — real bug found, isolated to eICCI chroma.** Reference
+  env unblocked on this box (built the `lib_wrappers/{mans,direct}` ANS `.so`s;
+  import via `src.codec…` — see CLAUDE.md). Vector
+  `img30yuv444b10_base_lef_eicci_bpp050` (10-bit 4:4:4 + LEF + eICCI, bpp50) +
+  `filters_lef_icci` oracle generated (`/mnt/v/output/zenjpegai/reference/vectors/`).
+  Whole-decode: 994350/1491840 differ, worst 732. **Per-filter isolation**
+  (`filters_lef_icci_ref` `check_lef`/`check_icci` on the vector):
+  eICCI **Y exact (~1.5e-5)** but **U diff ~208**; LEF luma diff ~1.19 (small drift,
+  gate wants exact 0). So the dominant defect is eICCI's **chroma** correction at
+  10-bit — `tile_input`/`tile_output`/`dwt2` are plane-agnostic and `data_range` is
+  a single tuple applied uniformly, so the suspect is the chroma network output /
+  `tile_output` `scale` / `chroma.forward`+`last_u`/`last_v` producing a wrong-scale
+  correction for `bit_depth = 10`. Next: compare our `chroma_corrections`/`tile_output`
+  U output to the dump's `eicci.out.b`. (Two `img30yuv444b10_*` tests were written and
+  isolated this; kept out of `check!`/`check_icci` registration so main stays green.)
 - [~] GPU work (separate workspace): shader-f16 conv *weights* landed (`GpuContext` requests `SHADER_F16`, `GpuConv` packs `mat4x4<f16>`, `conv()`/`conv_tiled()` widen to `mat4x4<f32>` — activations stay f32); conv_transpose/depthwise and f16 *activations* still f32. GPU pool ledger — parity-breaking.
 - [ ] Sweep `PORTING.md` after every landing: row update + what remains missing.
 
