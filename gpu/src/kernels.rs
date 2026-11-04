@@ -982,6 +982,6 @@ mod dump {
             w16: false,
         };
         println!("{}", conv(&v));
-        println!("{}", conv_transpose(4, 2, 4, 16));
+        println!("{}", conv_transpose(4, 2, 4, 16, false));
     }
 }
