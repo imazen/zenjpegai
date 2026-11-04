@@ -25,7 +25,19 @@ construction, and say so in `PORTING.md`.
 
 ## Next up
 
-- [~] **chroma / z RDLR** — chroma `process_y` DONE (c2fe1ec, `--num-ite-uv`); `process_z` pending (`cfg/tools/RDLR.json`: `numIteYLuma=8` shipped, `numIteYChroma`,
+- [~] **chroma / z RDLR — dead upstream at two levels, oracle blocked.** Enabling
+  `numIteYChroma`/`numIteZLuma`/`numIteZChroma` > 0 crashes the reference: first
+  `TileManager.set_alignment_size` (commented out at `tiling.py:89`; `dump_rdlr.py`
+  already patches it for the luma oracle), then `common_modules.py:177`
+  `quant_dequant`'s `data_q[~mask2_list] = 0` applies a **luma-shaped** `mask2`/`psi`
+  `[1,96,56,35]` to the **chroma** latent `[1,96,28,18]` (`IndexError`, chroma
+  `process_y` → `get_ref_rate_data` → `_compress_ar_scale`). Producing a chroma/z
+  RDLR oracle needs a deeper `dump_rdlr.py` patch fixing `quant_dequant`/`mask2`/`psi`
+  for the chroma dims — the same class as the documented multi-tile `mask2`/`psi`
+  dead code. Our `optimize_uv`/`optimize_z`/`process_z` (`rdlr.rs:723-2540`) are
+  construction-complete + self-consistent (`rdlr_roundtrip`, `num_ite_uv/z=2`),
+  unverifiable until that patch exists. chroma `process_y` machinery DONE (c2fe1ec);
+  `process_z` pending (`cfg/tools/RDLR.json`: `numIteYLuma=8` shipped, `numIteYChroma`,
   `numIteZLuma`, `numIteZChroma = 0`; set them >0 in a reference cfg → the path RUNS, so there
   IS an oracle — dump + compare). Three sub-parts:
     1. **chroma `process_y`** (`rdlr_comp_UV.py::RDLRCompUV.rdlr_y_iteration` /
