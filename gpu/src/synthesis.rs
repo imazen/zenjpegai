@@ -23,9 +23,9 @@ use crate::plan::{Graph, Plan, Pool, RETAIN_FACTOR, RETAIN_SLACK, T};
 
 // ---------------------------------------------------------------- checkpoint loading
 
-struct Loader<'a> {
-    ctx: &'a GpuContext,
-    ck: &'a Checkpoint<'a>,
+pub(crate) struct Loader<'a> {
+    pub(crate) ctx: &'a GpuContext,
+    pub(crate) ck: &'a Checkpoint<'a>,
 }
 
 impl Loader<'_> {
@@ -34,7 +34,7 @@ impl Loader<'_> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn conv2d(
+    pub(crate) fn conv2d(
         &self,
         prefix: &str,
         in_ch: usize,
@@ -70,23 +70,23 @@ impl Loader<'_> {
         )?)
     }
 
-    fn conv3x3(&self, prefix: &str, i: usize, o: usize, bias: bool) -> Result<GpuConv> {
+    pub(crate) fn conv3x3(&self, prefix: &str, i: usize, o: usize, bias: bool) -> Result<GpuConv> {
         GpuConv::new(self.ctx, &self.conv2d(prefix, i, o, 3, 1, 1, 1, bias)?)
     }
 
-    fn conv3x3_s2(&self, prefix: &str, c: usize) -> Result<GpuConv> {
+    pub(crate) fn conv3x3_s2(&self, prefix: &str, c: usize) -> Result<GpuConv> {
         GpuConv::new(self.ctx, &self.conv2d(prefix, c, c, 3, 2, 1, 1, true)?)
     }
 
-    fn conv1x1(&self, prefix: &str, i: usize, o: usize, bias: bool) -> Result<GpuConv> {
+    pub(crate) fn conv1x1(&self, prefix: &str, i: usize, o: usize, bias: bool) -> Result<GpuConv> {
         GpuConv::new(self.ctx, &self.conv2d(prefix, i, o, 1, 1, 0, 1, bias)?)
     }
 
-    fn depthwise(&self, prefix: &str, c: usize) -> Result<GpuDepthwise> {
+    pub(crate) fn depthwise(&self, prefix: &str, c: usize) -> Result<GpuDepthwise> {
         GpuDepthwise::new(self.ctx, &self.conv2d(prefix, c, c, 3, 1, 1, c, false)?)
     }
 
-    fn conv_t(
+    pub(crate) fn conv_t(
         &self,
         prefix: &str,
         i: usize,
@@ -110,11 +110,11 @@ impl Loader<'_> {
     }
 
     /// `conv3x3_t`: exactly doubles the size.
-    fn conv3x3_t(&self, prefix: &str, i: usize, o: usize) -> Result<GpuConvTranspose> {
+    pub(crate) fn conv3x3_t(&self, prefix: &str, i: usize, o: usize) -> Result<GpuConvTranspose> {
         self.conv_t(prefix, i, o, 3, 1, 1)
     }
 
-    fn layer_norm(&self, prefix: &str, dim: usize) -> Result<GpuLayerNorm> {
+    pub(crate) fn layer_norm(&self, prefix: &str, dim: usize) -> Result<GpuLayerNorm> {
         let (w, b) = (
             self.ck.f32(&format!("{prefix}.weight"))?,
             self.ck.f32(&format!("{prefix}.bias"))?,
@@ -129,13 +129,13 @@ impl Loader<'_> {
 // ---------------------------------------------------------------- building blocks
 
 /// `y = x * (1 + conv1x1(conv3x3_grouped(relu6(x))))`.
-struct ResAu {
+pub(crate) struct ResAu {
     conv: GpuConv,
     conv2: GpuConv,
 }
 
 impl ResAu {
-    fn load(l: &Loader<'_>, prefix: &str, chs: usize) -> Result<Self> {
+    pub(crate) fn load(l: &Loader<'_>, prefix: &str, chs: usize) -> Result<Self> {
         let name = format!("{prefix}.conv.weight");
         let per_group =
             l.ck.info(&name)
@@ -160,7 +160,7 @@ impl ResAu {
         })
     }
 
-    fn forward(&self, g: &mut Graph<'_>, x: T) -> Result<T> {
+    pub(crate) fn forward(&self, g: &mut Graph<'_>, x: T) -> Result<T> {
         let m = g.conv_ex(x, &self.conv, (0, 0), true, Act::None)?;
         g.conv_res(m, &self.conv2, Act::None, Res::Gate, x)
     }
@@ -172,7 +172,13 @@ enum Upsample {
 }
 
 impl Upsample {
-    fn load(l: &Loader<'_>, op: OperatingPoint, prefix: &str, i: usize, o: usize) -> Result<Self> {
+    pub(crate) fn load(
+        l: &Loader<'_>,
+        op: OperatingPoint,
+        prefix: &str,
+        i: usize,
+        o: usize,
+    ) -> Result<Self> {
         match op {
             OperatingPoint::Bop => Ok(Self::Transposed(l.conv_t(prefix, i, o, 4, 1, 0)?)),
             OperatingPoint::Sop => Ok(Self::Conv2x2Shuffle(GpuConv::new(
@@ -183,7 +189,7 @@ impl Upsample {
         }
     }
 
-    fn forward(&self, g: &mut Graph<'_>, x: T) -> Result<T> {
+    pub(crate) fn forward(&self, g: &mut Graph<'_>, x: T) -> Result<T> {
         match self {
             Self::Transposed(c) => g.conv_transpose(x, c),
             Self::Conv2x2Shuffle(c) => {
@@ -194,27 +200,27 @@ impl Upsample {
     }
 }
 
-struct ResidualBlock {
+pub(crate) struct ResidualBlock {
     conv1: GpuConv,
     conv2: GpuConv,
 }
 
 impl ResidualBlock {
-    fn load(l: &Loader<'_>, prefix: &str, chs: usize) -> Result<Self> {
+    pub(crate) fn load(l: &Loader<'_>, prefix: &str, chs: usize) -> Result<Self> {
         Ok(Self {
             conv1: l.conv3x3(&format!("{prefix}.conv1"), chs, chs, true)?,
             conv2: l.conv3x3(&format!("{prefix}.conv2"), chs, chs, true)?,
         })
     }
 
-    fn forward(&self, g: &mut Graph<'_>, x: T) -> Result<T> {
+    pub(crate) fn forward(&self, g: &mut Graph<'_>, x: T) -> Result<T> {
         let t = g.conv_ex(x, &self.conv1, (0, 0), false, Act::Relu)?;
         g.conv_res(t, &self.conv2, Act::None, Res::Add, x)
     }
 }
 
 /// `x + trunk(x) * sigmoid(mask(x))`, the mask computed at half resolution.
-struct Cab {
+pub(crate) struct Cab {
     trunk: [ResidualBlock; 2],
     subscale: GpuConv,
     mask2: ResidualBlock,
@@ -223,7 +229,7 @@ struct Cab {
 }
 
 impl Cab {
-    fn load(l: &Loader<'_>, prefix: &str, chs: usize) -> Result<Self> {
+    pub(crate) fn load(l: &Loader<'_>, prefix: &str, chs: usize) -> Result<Self> {
         let rb = |name: &str| ResidualBlock::load(l, &format!("{prefix}.{name}"), chs);
         Ok(Self {
             trunk: [rb("residual_trunk.0")?, rb("residual_trunk.1")?],
@@ -234,7 +240,7 @@ impl Cab {
         })
     }
 
-    fn forward(&self, g: &mut Graph<'_>, x: T) -> Result<T> {
+    pub(crate) fn forward(&self, g: &mut Graph<'_>, x: T) -> Result<T> {
         let t = self.trunk[0].forward(g, x)?;
         let trunk = self.trunk[1].forward(g, t)?;
         let m = g.conv(x, &self.subscale)?;
@@ -284,7 +290,7 @@ fn depthwise_slice(c: &Conv2d, first: usize, n: usize) -> Result<Conv2d> {
     )?)
 }
 
-struct TransformerBlock {
+pub(crate) struct TransformerBlock {
     prep_norm: GpuLayerNorm,
     prep_conv1: GpuConv,
     prep_conv2: GpuDepthwise,
@@ -301,7 +307,7 @@ struct TransformerBlock {
 }
 
 impl TransformerBlock {
-    fn load(l: &Loader<'_>, prefix: &str, dim: usize) -> Result<Self> {
+    pub(crate) fn load(l: &Loader<'_>, prefix: &str, dim: usize) -> Result<Self> {
         let hidden = dim * FFN_GAMMA;
         let p = |name: &str| format!("{prefix}.{name}");
         let temperature = l.ck.f32(&p("attn.temperature"))?;
@@ -345,7 +351,7 @@ impl TransformerBlock {
     }
 
     /// In place on `x`.
-    fn forward(&self, g: &mut Graph<'_>, x: T) -> Result<T> {
+    pub(crate) fn forward(&self, g: &mut Graph<'_>, x: T) -> Result<T> {
         let t = g.layer_norm(x, &self.prep_norm)?;
         let t = g.conv(t, &self.prep_conv1)?;
         let t = g.depthwise(t, &self.prep_conv2)?;
@@ -368,13 +374,13 @@ impl TransformerBlock {
     }
 }
 
-struct Tam {
+pub(crate) struct Tam {
     resample: Option<(GpuConv, GpuConvTranspose)>,
     blocks: [TransformerBlock; 2],
 }
 
 impl Tam {
-    fn load(l: &Loader<'_>, prefix: &str, dim: usize, downsample: bool) -> Result<Self> {
+    pub(crate) fn load(l: &Loader<'_>, prefix: &str, dim: usize, downsample: bool) -> Result<Self> {
         let resample = downsample
             .then(|| -> Result<_> {
                 Ok((
@@ -390,7 +396,7 @@ impl Tam {
         })
     }
 
-    fn forward(&self, g: &mut Graph<'_>, x: T) -> Result<T> {
+    pub(crate) fn forward(&self, g: &mut Graph<'_>, x: T) -> Result<T> {
         let x = match &self.resample {
             Some((ds, _)) => g.conv(x, ds)?,
             None => x,

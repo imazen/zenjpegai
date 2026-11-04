@@ -550,6 +550,31 @@ impl<'a> Graph<'a> {
         Ok(())
     }
 
+    /// Replicate-pad `x` bottom/right by `(ph, pw)` — the analysis
+    /// transform's `padding_layer` (`dst[y,x] = src[min(y,h-1), min(x,w-1)]`).
+    pub fn pad(&mut self, x: T, ph: usize, pw: usize) -> Result<T> {
+        if ph == 0 && pw == 0 {
+            return Ok(x);
+        }
+        let y = self.tensor(x.c, x.h + ph, x.w + pw)?;
+        let (row, dispatch) = grid1(y.len4(), 1);
+        self.push(
+            "pad",
+            || kernels::pad(),
+            &[
+                x.h as u32,
+                x.w as u32,
+                y.h as u32,
+                y.w as u32,
+                x.c4() as u32,
+                row,
+            ],
+            vec![Bind::Tensor(x.id), Bind::Tensor(y.id)],
+            dispatch,
+        );
+        Ok(y)
+    }
+
     /// An uninitialised map for operations that fill it piecewise.
     pub fn alloc(&mut self, c: usize, h: usize, w: usize) -> Result<T> {
         self.tensor(c, h, w)

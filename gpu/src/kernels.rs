@@ -487,6 +487,32 @@ fn main(
 /// Windowed channel copy: `dst[:, y, x][dc4 ..] = src[:, y + sy, x + sx][sc4off .. + n4]` for
 /// the `h x w` window. Does crops, latent tile windows, channel slices and concatenation.
 /// Params: `h w n4 src_w src_c4 sx sy src_c4off dst_w dst_c4 dst_c4off`.
+/// Replicate pad: `dst[y, x] = src[min(y, H-1), min(x, W-1)]` — the analysis
+/// transform's `padding_layer` (bottom/right edge replication). One
+/// invocation copies one `(x, y)` vec4 block.
+/// Params: `src_h src_w dst_h dst_w c4 row`.
+pub fn pad() -> String {
+    format!(
+        "{}{}{}",
+        params(&["src_h", "src_w", "dst_h", "dst_w", "c4", "row"]),
+        "@group(0) @binding(1) var<storage, read> src: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read_write> dst: array<vec4<f32>>;
+@compute @workgroup_size(",
+        r#"64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x + gid.y * p.row;
+  let n = p.dst_h * p.dst_w * p.c4;
+  if (i >= n) { return; }
+  let px = i / p.c4;
+  let c4 = i % p.c4;
+  let y = min(px / p.dst_w, p.src_h - 1u);
+  let x = min(px % p.dst_w, p.src_w - 1u);
+  dst[i] = src[(y * p.src_w + x) * p.c4 + c4];
+}
+"#
+    )
+}
+
 pub fn copy_channels() -> String {
     format!(
         "{params}

@@ -5,6 +5,7 @@
 //! shaders. See `README.md` for the API a browser build should call.
 #![forbid(unsafe_code)]
 
+mod analysis;
 mod context;
 mod decoder;
 mod error;
@@ -14,6 +15,7 @@ pub mod plan;
 mod present;
 mod synthesis;
 
+pub use analysis::GpuAnalysis;
 pub use context::{ContextOptions, GpuContext};
 pub use decoder::{GpuDecoded, GpuDecoder, GpuOut};
 pub use error::GpuError;
