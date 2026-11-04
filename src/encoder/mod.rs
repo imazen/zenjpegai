@@ -1062,7 +1062,7 @@ impl Encoder {
             (lo..=hi).collect()
         } else {
             (0..9)
-                .map(|k| lo + ((hi - lo) * k as i32 + 4) / 8)
+                .map(|k| lo + ((hi - lo) * k + 4) / 8)
                 .collect()
         };
         let mut best = (beta_y as i32, f64::INFINITY);

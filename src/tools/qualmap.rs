@@ -70,8 +70,8 @@ impl QualityMap {
         // `window` = 4 samples: the cell variance of `img[:, 0, 4i:4i+4, 4j:4j+4]`.
         let (ph, pw) = (plane.h, plane.w);
         let (vh, vw) = (
-            (ph + align - 1) / align * align / 4,
-            (pw + align - 1) / align * align / 4,
+            ph.div_ceil(align) * align / 4,
+            pw.div_ceil(align) * align / 4,
         );
         let mut var = alloc::vec![0f32; vh * vw];
         for i in 0..vh {

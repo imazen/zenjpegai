@@ -1306,7 +1306,7 @@ fn multi_block<F: SimdF32<V>, const V: usize, const B: usize, const S: usize>(
         let (w, _) = wf[*ocb * job.wlen..][..job.wlen].as_chunks::<V>();
         let bias: &[f32; V] = job.bias[*ocb * job.v..][..job.v].try_into().unwrap();
         let mut rj = RowJob {
-            out: &mut **row,
+            out: row,
             o0: job.o0,
             os: job.os,
             n: job.n,
@@ -1445,7 +1445,7 @@ fn block2<F: SimdF32<V>, const V: usize, const B: usize, const S: usize>(
     let (zp, _) = ZERO_PAD[..l * V].as_chunks::<V>();
     for icb in job.icb0..job.icb1 {
         let xbase = icb * job.ph * job.pw;
-        let mut sr: [&[[f32; V]]; MAX_TAPS] = [&zp[..]; MAX_TAPS];
+        let mut sr: [&[[f32; V]]; MAX_TAPS] = [zp; MAX_TAPS];
         for (k, (y, dx)) in job.taps.iter().enumerate() {
             if interior || y.is_some() {
                 sr[k] = &xp[xbase + y.unwrap_or(0) * job.pw + dx + j * S..][..l];

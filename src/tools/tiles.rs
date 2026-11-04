@@ -344,12 +344,12 @@ pub fn rdlr_tiles(
     // — 16 luma, 8 chroma); `z` is a further 4x (`/64` luma, `/32` chroma).
     let map = |t: &Area, f: usize, lh: usize, lw: usize| {
         let (x, y) = (t.x / f, t.y / f);
-        let h = if t.height % f == 0 {
+        let h = if t.height.is_multiple_of(f) {
             t.height / f
         } else {
             t.height.div_ceil(f)
         };
-        let w = if t.width % f == 0 {
+        let w = if t.width.is_multiple_of(f) {
             t.width / f
         } else {
             t.width.div_ceil(f)
