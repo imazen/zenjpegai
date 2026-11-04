@@ -16,3 +16,11 @@ Command: `./target/release/zenjpegai decode stream.bits /dev/null --discard --re
 `decode_ref` 50/50 across all streams). The first decode's model-load cost (~77 ms) is
 one-time; `pack-models` bundles shrink it further for shipped artefacts. The reference's
 own Python process wall (~1.4 s incl. model load) makes the end-to-end gap larger still.
+
+## Encode (fixed model 1, beta-disp 0, BOP — single-pass, no rate matching / RDLR)
+
+`./target/release/zenjpegai encode img30_560x888_8bit_444.yuv out.bits --model 1 --beta-disp 0 --op bop`:
+**0.165 s wall** (0.80 s user across threads) → 21445 bytes / 0.3450 bpp. The reference's
+Python pipeline takes multiple seconds for the same fixed-point encode (model load +
+oneDNN analysis + Python orchestration), so the single-pass encoder is an order of
+magnitude faster end-to-end even before the optimizer paths.
