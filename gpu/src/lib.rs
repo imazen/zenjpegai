@@ -8,6 +8,7 @@
 mod analysis;
 mod context;
 mod decoder;
+mod encoder;
 mod error;
 pub mod kernels;
 pub mod layers;
@@ -18,6 +19,7 @@ mod synthesis;
 pub use analysis::GpuAnalysis;
 pub use context::{ContextOptions, GpuContext};
 pub use decoder::{GpuDecoded, GpuDecoder, GpuOut};
+pub use encoder::GpuEncoder;
 pub use error::GpuError;
 pub use present::{Blitter, read_rgba8};
 pub use synthesis::{GpuPicture, GpuSynthesis, Timing, Workspace};

@@ -1077,7 +1077,7 @@ impl Plan {
         }
     }
 
-    fn buffer(&self, t: T) -> Result<&wgpu::Buffer> {
+    pub(crate) fn buffer(&self, t: T) -> Result<&wgpu::Buffer> {
         self.tensor_buffers
             .get(t.id)
             .and_then(|b| b.as_ref())
