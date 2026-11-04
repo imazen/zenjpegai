@@ -100,8 +100,14 @@ construction, and say so in `PORTING.md`.
 
 ## Also queued
 
-- [~] Niche coverage vectors: per-tile-different eICCI selections, single-chroma tiles,
-  10-bit eICCI/LEF (needs reference decode support check first).
+- [x] 10-bit eICCI/LEF — done + fixed a real bug. `img30yuv444b10_base_lef_eicci_bpp050`
+  (10-bit 4:4:4 + LEF + eICCI) generated + oracle-dumped; exposed a `data_range`
+  convention bug: the post-filter planes are the codec's 8-bit *core* `[0,255]` (extra
+  bits ride the LSB plane, recombined at output), but `icci::filter`/`lef::sharpen`
+  normalized by `2^bit_depth-1`=1023 → chroma diverged ~208, whole decode ~732.
+  Fixed `range` → `255.0` (`9bd3cffd`); both filters + whole decode now bit-identical.
+  Still missing: per-tile-*different* eICCI selections + single-chroma tiles (unexercised
+  shared paths — need a forced-selection multi-tile stream).
   **10-bit LEF/eICCI — real bug found, isolated to eICCI chroma.** Reference
   env unblocked on this box (built the `lib_wrappers/{mans,direct}` ANS `.so`s;
   import via `src.codec…` — see CLAUDE.md). Vector
