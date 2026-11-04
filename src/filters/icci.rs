@@ -221,16 +221,23 @@ pub fn filter(
         return Err(Error::InvalidArgument("eICCI: bit depth"));
     }
     // The reference lays the tiles out on the coded picture size but filters the displayed
-    // picture; with one tile that is the whole displayed picture.
-    let tiles = if h.tiling.is_some() {
-        if (ph, pw) != (hdr.height as usize, hdr.width as usize) {
-            return Err(Error::Unsupported(
-                "eICCI tiling on a picture with a non-displayed border",
-            ));
+    // picture; with one tile that is the whole displayed picture. A tile reaching into the
+    // non-displayed border is clamped to the displayed rectangle — the reference relies on
+    // Python slices clamping (`img[y:y+h, x:x+w]` silently narrows), so each tile's `image`
+    // (read) and `core` (write) are intersected with the displayed area; a tile lying fully
+    // in the border runs its network but writes nothing.
+    let tiles = {
+        let mut tiles = tile_layout(ph, pw, h.tiling)?;
+        let (dh, dw) = (hdr.height as usize, hdr.width as usize);
+        if (ph, pw) != (dh, dw) {
+            for t in &mut tiles {
+                t.image.width = dw.saturating_sub(t.image.x).min(t.image.width);
+                t.image.height = dh.saturating_sub(t.image.y).min(t.image.height);
+                t.core.width = dw.saturating_sub(t.core.x).min(t.core.width);
+                t.core.height = dh.saturating_sub(t.core.y).min(t.core.height);
+            }
         }
-        tile_layout(ph, pw, h.tiling)?
-    } else {
-        tile_layout(ph, pw, None)?
+        tiles
     };
     if tiles.len() != h.tiles.len() {
         return Err(Error::InvalidData(
@@ -246,6 +253,11 @@ pub fn filter(
     }
     for (tile, sel) in tiles.iter().zip(&h.tiles) {
         stop.check()?;
+        // A tile lying wholly in the non-displayed border clamps to an empty
+        // area — nothing to read or write (the reference's empty slice).
+        if tile.image.width == 0 || tile.image.height == 0 {
+            continue;
+        }
         let (net_y, net_uv) = selection(sel, op, hdr.model_id as usize)?;
         if net_y.is_none() && net_uv.is_none() {
             continue;
