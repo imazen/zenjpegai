@@ -141,8 +141,8 @@ pub(crate) fn rate_point_y(
     // inside (residual_q vs residual_dq). `psi` is `z_hat`'s hyper-decoder output —
     // fixed across `optimize_y`'s iterations — precomputed once by the caller.
     let out = compress_regions(
-        eng, hdr, 0, model, z_hat, y, mask, q, num_chs, original.h, original.w, y.h, y.w,
-        psi_in, stop,
+        eng, hdr, 0, model, z_hat, y, mask, q, num_chs, original.h, original.w, y.h, y.w, psi_in,
+        stop,
     )?;
     let mcm::Compressed {
         residual_q,
@@ -272,8 +272,21 @@ pub(crate) fn rate_point_uv(
     stop: &dyn enough::Stop,
 ) -> Result<RatePointUV> {
     let out = compress_regions(
-        eng, hdr, 1, model, z_hat, y, mask, q, num_chs, original.h * 2, original.w * 2,
-        y.h, y.w, psi_in, stop,
+        eng,
+        hdr,
+        1,
+        model,
+        z_hat,
+        y,
+        mask,
+        q,
+        num_chs,
+        original.h * 2,
+        original.w * 2,
+        y.h,
+        y.w,
+        psi_in,
+        stop,
     )?;
     let mcm::Compressed {
         residual_q,

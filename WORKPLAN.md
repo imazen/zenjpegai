@@ -121,29 +121,22 @@ ALL RDLR dead-paths now ported (`process_y` luma+chroma, `process_z` luma+chroma
 - [x] **`minimum_tile_size` / `_adjust_boundary_tiles`** — RESOLVED. The
   `_adjust_boundary_tiles` machinery is ported (`filters/icci.rs`,
   `MINIMUM_TILE_SIZE = 176`, oracle-verified `matches_reference_layout_with_adjusted_boundary`)
-  — it's the eICCI `numSamplesPerTile` tiling path. For RDLR it's dormant by
-  design: `numSamples` = `numSamplesPerLumaTile` = 4.2M forces a single-tile
-  grid → nothing to adjust + whole-picture `ms_ssim` == per-tile-optimized-part.
-  **Remaining structural gap (real, large):** per-tile RDLR for pictures
-  >4.2MP — the reference's `numSamplesPerLumaTile`=1M/`numSamplesPerChromaTile`=
-  0.5M makes `image_tiles`/`latent_tiles` multi-tile, `rdlr_y_iteration` per
-  `lat_tile`/`im_tile`/`optimized_part` + `ms_ssim` per tile (non-additive at
-  `ratio != 0`). Our `numSamples`=4.2M gate (vs reference 30M) is the deliberate
-  bound making this unreachable — a resource/design choice, not an unported
-  feature per se. A full per-tile RDLR port is a large restructure.
-  - **Per-tile RDLR concrete plan** (for a fresh session): `tools::tiles`'s
-    `SynthesisTile { image, latent, core, core_offset }` is the exact analog of
-    the reference's `image_tile`/`latent_tile`/`optimized_part_of_imgtile_rel_to_overlap`
-    — `image` = tile region w/ overlap, `latent` = the latent tile, `core` =
-    optimized part. `synthesis_tiles`/`region_tiles` already produce the grid;
-    reuse them for `numSamplesPerLumaTile`/`numSamplesPerChromaTile`-sized RDLR
-    tiles + apply the ported `_adjust_boundary_tiles` (`filters/icci.rs`) when
-    `minimum_tile_size` is set (`ratio != 0`). Then `optimize_y`/`optimize_uv`/
-    `optimize_z`/`rate_point_*`/`distortion`/`ms_ssim`/`compress` each take the
-    tile's `latent`/`image`/`core` (per-tile `ms_ssim`/`psnr` on `core`,
-    per-tile `Substract`/Adagrad on `latent`), with refined tile latents
-    scattered back into the whole latent — `numSamples` gate raised to 30M
-    alongside. ~500 lines across `rdlr.rs` + `mod.rs`.
+  — it's the eICCI `numSamplesPerTile` tiling path.
+- [x] **Per-tile RDLR** (`3f2e3f3`, `1da69c9`) — `setup_tiles_enc` +
+  `_init_image_tiles_with_overlap` + `init_latent_tiles` +
+  `_get_core_of_overlapping_tile` + `_adjust_boundary_tiles` ported as
+  `tools::tiles::rdlr_tiles` (`numSamplesPerLumaTile`=1M → 1024-tile,
+  `numSamplesPerChromaTile`=0.5M → 720-tile, overlap 64, alignment 16,
+  `minimum_tile_size`=240 when MS-SSIM loss mixed). `optimize_y`/`optimize_uv`
+  take `optimize_area` — the Adagrad leaf covers only `core_lat_rel` (overlap
+  frozen, matching upstream's `lat_tile_optimized_part`). `luma`/`chroma` loop
+  the tile grid; `get_luma_tile_rate`/`calc_additional_rate` ported as
+  `luma_tile_rate` (rate-only) → `ComponentPass::y_rate_parts`. `compress_regions`
+  derives grids from the passed tile dims for `regions == None`. Gate raised to
+  `numSamples`=30M. Upstream's multi-tile path is crash-dead (whole-picture
+  `scale_log`/`psi`/`mask2` vs tile `y`; `ref_data[3]` IndexErrors even
+  single-tile UV) — intended tile-local semantics implemented; no oracle exists.
+  Verified end-to-end on 2048×1536 (multi-tile luma+chroma → valid stream).
 Next high-value (unstarted):
 - **`d_psi` finite-diff** — `d(psi_s)` extraction in `compress_backward` is a
   subset of the oracle-verified `d_y` path but has NO reference oracle
