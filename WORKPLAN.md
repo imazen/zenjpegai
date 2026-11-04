@@ -25,6 +25,17 @@ construction, and say so in `PORTING.md`.
 
 ## Next up
 
+- [x] **GPU encode readback bug fixed + f16 verified on llvmpipe** (`9733784e`,
+  `ec99d7c8`). `GpuEncoder::encode`/`encode_input` *panicked* — `read_latent`
+  sized the staging buffer `t.len4() * 4` bytes, but `len4()` is the vec4 count
+  (`h*w*c4`), 16 bytes each → the HWC4→planar unpack overran a quarter-size
+  buffer. Fixed to `*16`. New `gpu/tests/encoder.rs::gpu_encode_matches_cpu_encode`
+  verifies `GpuEncoder::encode` ≈ `Encoder::encode` within the gpu-analysis
+  tolerance. **GPU verification is NOT fully hardware-gated:** llvmpipe
+  (`ZENJPEGAI_GPU_ALLOW_SOFTWARE=1 ZENJPEGAI_REF=… ZENJPEGAI_VECTORS=…`) runs the
+  whole `gpu-tests` suite — `analysis_matches_cpu` (f32 `3e-4`, f16 `1e-3`/`2e-2`
+  via `context().has_f16()`), all `decode_ref` streams, `gpu_encode` — on this box.
+  The RTX 2080 remains for *perf* (f16-throughput, tiled timing), not correctness.
 - [~] **chroma / z RDLR — dead upstream at two levels, oracle blocked.** Enabling
   `numIteYChroma`/`numIteZLuma`/`numIteZChroma` > 0 crashes the reference: first
   `TileManager.set_alignment_size` (commented out at `tiling.py:89`; `dump_rdlr.py`
