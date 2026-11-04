@@ -136,6 +136,13 @@ construction, and say so in `PORTING.md`.
   `pow2`; `pow2` (2^n) per-type: `f32x` via `to_i32→i32x::splat+127→shl<23>→bitcast_to_f32`
   (needs the backend token for the i32 splat — check `f32x`/`i32x` for a token-free `add_const`
   or `+` operator), `Lanes8` via `f32::from_bits(((n as i32+127) as u32)<<23)` per element.
+  **Resolved:** `f32x8`/`i32x8` are `Self(reg, token)` — the token is `self.1`, so
+  `pow2` = `self.to_i32x8()` → `n + i32x8::splat_t(n.1,127)` → `shl_const::<23>()` →
+  `bitcast_to_f32()`; `n.to_i32()` truncates, exact for the integral floor output.
+  **Full op set `SimdF32` needs extending with:** `mul`, `min`, `max`, `floor`, `pow2`, plus
+  `div` (sigmoid's `1/(1+e)`) and `select`/`blend` (elu_gate's `if x>0`) — both exist on
+  `f32x` (`simd_gt`+`select`) and as scalar ops on `Lanes8`. `elu_gate` needs the
+  `elu = select(x>0, x, exp(x)-1)` branch; keep it unfused `mul`/`add` throughout.
 - **Regenerated-vector caveat (encode-side signature tests):** `make_reference_streams.sh all`
   now produces ~98 vectors on this box; every decode-side vector verifies bit-exact.
   Two encode-side tests diverge only on `img01` (the biggest, most float-sensitive input):
