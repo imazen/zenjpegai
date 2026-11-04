@@ -117,6 +117,13 @@ construction, and say so in `PORTING.md`.
   correction for `bit_depth = 10`. Next: compare our `chroma_corrections`/`tile_output`
   U output to the dump's `eicci.out.b`. (Two `img30yuv444b10_*` tests were written and
   isolated this; kept out of `check!`/`check_icci` registration so main stays green.)
+  Ruled out: `tile_output`'s `plane * BANDS` indexing and `write_core` are correct
+  and luma works through the same `Trunk::load`/`folded_conv` path; `scaleU/V` are
+  loaded scalars like `scaleY`. Remaining suspects: (a) the chroma planes' stored
+  representation at 10-bit (signed/centered vs luma's unsigned — check what
+  `image.u`/`v` hold vs the reference's `eicci.in.b/c`), (b) the
+  `conv_firstUV`/`hidden_layer_UV` checkpoint's expected input ordering, (c) the
+  4:4:4-vs-subsampled chroma resample path for a 10-bit YUV source.
 - [~] GPU work (separate workspace): shader-f16 conv *weights* landed (`GpuContext` requests `SHADER_F16`, `GpuConv` packs `mat4x4<f16>`, `conv()`/`conv_tiled()` widen to `mat4x4<f32>` — activations stay f32); conv_transpose/depthwise and f16 *activations* still f32. GPU pool ledger — parity-breaking.
 - [ ] Sweep `PORTING.md` after every landing: row update + what remains missing.
 
