@@ -123,10 +123,14 @@ construction, and say so in `PORTING.md`.
   `img01_base_eiccitiles_lef` (uniform `[4,2,2]` — sel[0]=all) all pass. The
   `dump_filters_lef_icci.py` per-tile `eicci.tile{i}.rec/.dwt` capture (added
   for this) is retained as the per-tile input oracle.
-  **Verified against the full eICCI surface:** regenerated the missing vectors on
-  this box (`img30_base_{eicci,lef,on_025,on_100}`, `img30yuv{422,420}_base_eicci`,
-  `scripts/../tmp/gen_missing_filters.sh`) — all 14 decoder-side filter tests
-  pass (single-tile, six-tile natural + forced-varied, forced 422/420, 10-bit).
+  **Verified against the full eICCI surface:** regenerated every missing eICCI/LEF
+  vector on this box (`img30_base_{eicci,lef,on_025,on_100}`, `img30yuv{422,420}_base_eicci`
+  via `~/tmp/gen_missing_filters.sh`; `enc_img30_{sop_m0,hop_m2}_b0_eicci`,
+  `enc_img30_bop_{m0,m3}_b0_lef` via `~/tmp/gen_enc_filters.sh`; `dump_decode` on
+  `img01_base_eiccitiles_lef`) — **all 19 `filters_lef_icci_ref` tests pass**:
+  single-tile, six-tile natural + forced-varied selection, forced 422/420, 10-bit,
+  the hop/sop eICCI banks, LEF model-0/3 rows, and the whole-decode API across all
+  five filter streams. The `tile_idx=0` reproduction is confirmed end-to-end.
   **10-bit LEF/eICCI — real bug found, isolated to eICCI chroma.** Reference
   env unblocked on this box (built the `lib_wrappers/{mans,direct}` ANS `.so`s;
   import via `src.codec…` — see CLAUDE.md). Vector
