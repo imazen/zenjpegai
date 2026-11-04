@@ -65,7 +65,29 @@ def main():
                 d = self.get_decision_y(k.get("decisions", dict()))
                 captured["lef.scale_log"] = d.get("scale_log").clone()
                 notes.append(f"# lef channel {self.reference_channel_idx} model_id {self.get_base_model_id()}")
-            out = orig(self, imgs, *a, **k)
+            if tag == "eicci":
+                # Per-tile input + DWT sub-bands: `decompress_tile` is invoked on the
+                # in-place-filtered `img_flt` region (overlap margins already carry the
+                # left/top neighbours' filtered output). Captured to diff our tile_input.
+                orig_dt = self.decompress_tile
+
+                def decompress_tile(tile_data, tile_idx, _o=orig_dt):
+                    captured[f"eicci.tile{tile_idx}.rec"] = tile_data.clone()
+                    padded = tile_data.to(dtype=torch.float)
+                    import src.codec.coding_tools.filters.eICCI.icci_filter as icc_mod
+                    padded = icc_mod.padding_layer(padded)
+                    captured[f"eicci.tile{tile_idx}.dwt"] = (
+                        self.active_models[0].process_dwt444_2(padded)[0].clone()
+                    )
+                    return _o(tile_data, tile_idx)
+
+                self.decompress_tile = decompress_tile
+                try:
+                    out = orig(self, imgs, *a, **k)
+                finally:
+                    self.decompress_tile = orig_dt
+            else:
+                out = orig(self, imgs, *a, **k)
             for c in "abc":
                 captured[f"{tag}.out.{c}"] = out[0].get_component(c).clone()
             if tag == "eicci":

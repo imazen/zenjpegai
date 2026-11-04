@@ -255,14 +255,23 @@ pub fn filter(
             *s /= range;
         }
     }
-    for (tile, sel) in tiles.iter().zip(&h.tiles) {
+    // Upstream quirk (`decompress` in icci_filter.py): `tile_idx` is initialised
+    // to 0 and never incremented, so `get_model_index(0)` returns
+    // `model_state_per_tile[0]` for *every* tile — the per-tile selections
+    // signalled in the header are ignored on decode. A conformant decoder
+    // reproduces it: the first tile's selection filters all of them.
+    let sel = h
+        .tiles
+        .first()
+        .ok_or(Error::InvalidData("eICCI: no tile selection"))?;
+    let (net_y, net_uv) = selection(sel, op, hdr.model_id as usize)?;
+    for tile in &tiles {
         stop.check()?;
         // A tile lying wholly in the non-displayed border clamps to an empty
         // area — nothing to read or write (the reference's empty slice).
         if tile.image.width == 0 || tile.image.height == 0 {
             continue;
         }
-        let (net_y, net_uv) = selection(sel, op, hdr.model_id as usize)?;
         if net_y.is_none() && net_uv.is_none() {
             continue;
         }
