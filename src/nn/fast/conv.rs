@@ -648,12 +648,6 @@ impl PackedConv {
         if self.groups == 1 && sweep() {
             return self.forward_ocb_sweep(eng, x, oh, ow);
         }
-        // BLIS register tile (`ZENJPEGAI_CONV_OCB2`): pairs of output blocks
-        // run one micro-kernel — `acc[2][B]` shares each input splat across 2
-        // FMAs, ~halving the ~1.08 loads/FMA the single-ocb kernel spends.
-        if self.groups == 1 && ocb2() && self.out_ch >= 2 * v {
-            return self.forward_ocb2(eng, x, oh, ow);
-        }
         // Packed-tile (BLIS) dense driver is the default: each output row's
         // input strip is im2col-packed once into a contiguous
         // `[icb][taps][ow][V]` tile, then every output block reads it at unit
@@ -1087,195 +1081,6 @@ impl PackedConv {
         Ok(out)
     }
 
-    /// Paired output blocks (`acc[2][B]` register tile): same driver as
-    /// [`Self::forward`] but each row call runs [`block2`] on a pair of
-    /// output blocks — one input splat-load feeds two FMAs.
-    fn forward_ocb2(&self, eng: &Engine, x: &BTensor, oh: usize, ow: usize) -> Result<BTensor> {
-        let v = self.v;
-        let st = self.stride;
-        let (h, w) = (x.h, x.w);
-        let [pt, pl, _, _] = self.pad;
-        let ntaps = self.kh * self.kw;
-        let icbg = self.in_ch.div_ceil(v);
-        let ocb_total = self.out_ch.div_ceil(v);
-        let pairs = ocb_total / 2;
-        let wlen = icbg * v * ntaps * v;
-        let mut out = BTensor::scratch(self.out_ch, oh, ow, v)?;
-        let j0 = pl.div_ceil(st).min(ow);
-        let j1 = if w + pl >= self.kw {
-            ((w + pl - self.kw) / st + 1).clamp(j0, ow)
-        } else {
-            j0
-        };
-        let tier = eng.tier;
-        // `units[oy]` = `(ocb0, row0, row1)` for every block pair; `tail[oy]`
-        // = the odd block's row, if any.
-        let mut units: Vec<Vec<(usize, &mut [f32], &mut [f32])>> =
-            (0..oh).map(|_| Vec::with_capacity(pairs)).collect();
-        let mut tail: Vec<Option<(usize, &mut [f32])>> = (0..oh).map(|_| None).collect();
-        let mut rest: &mut [f32] = &mut out.data;
-        for p in 0..pairs {
-            let (d, r) = rest.split_at_mut(2 * oh * ow * v);
-            rest = r;
-            let (mut s0, mut s1) = d.split_at_mut(oh * ow * v);
-            for rows in units.iter_mut() {
-                let (a, r0) = s0.split_at_mut(ow * v);
-                s0 = r0;
-                let (b, r1) = s1.split_at_mut(ow * v);
-                s1 = r1;
-                rows.push((2 * p, a, b));
-            }
-        }
-        if !rest.is_empty() {
-            let mut s0 = rest;
-            for rows in tail.iter_mut() {
-                let (a, r) = s0.split_at_mut(ow * v);
-                s0 = r;
-                *rows = Some((2 * pairs, a));
-            }
-        }
-        let run = |oy: usize,
-                   rows: &mut Vec<(usize, &mut [f32], &mut [f32])>,
-                   t_row: &mut Option<(usize, &mut [f32])>| {
-            let in_row = |ky: usize| (oy * st + ky).checked_sub(pt).filter(|&iy| iy < h);
-            if j1 > j0 {
-                let mut taps = [(None, 0usize); MAX_TAPS];
-                for ky in 0..self.kh {
-                    for kx in 0..self.kw {
-                        taps[ky * self.kw + kx] = (in_row(ky), j0 * st + kx - pl);
-                    }
-                }
-                for (ocb0, r0, r1) in rows.iter_mut() {
-                    let ocb0 = *ocb0;
-                    run_row2(
-                        tier,
-                        &mut RowJob2 {
-                            out0: r0,
-                            out1: r1,
-                            o0: j0,
-                            os: 1,
-                            n: j1 - j0,
-                            xp: &x.data,
-                            ph: h,
-                            pw: w,
-                            icb0: 0,
-                            icb1: icbg,
-                            is: st,
-                            taps: &taps[..ntaps],
-                            w0: &self.weight[ocb0 * wlen..][..wlen],
-                            w1: &self.weight[(ocb0 + 1) * wlen..][..wlen],
-                            bias0: &self.bias[ocb0 * v..][..v],
-                            bias1: &self.bias[(ocb0 + 1) * v..][..v],
-                        },
-                    );
-                }
-                if let Some((ocbt, rt)) = t_row {
-                    let mut job = RowJob {
-                        out: &mut *rt,
-                        o0: j0,
-                        os: 1,
-                        n: j1 - j0,
-                        xp: &x.data,
-                        ph: h,
-                        pw: w,
-                        icb_base: 0,
-                        icb0: 0,
-                        icb1: icbg,
-                        in_ch: self.in_ch,
-                        is: st,
-                        taps: &taps[..ntaps],
-                        w: &self.weight[*ocbt * wlen..][..wlen],
-                        bias: &self.bias[*ocbt * v..][..v],
-                    };
-                    run_row(tier, &mut job);
-                }
-            }
-            let bwl = if j0 > 0 { (j0 - 1) * st + self.kw } else { 0 };
-            let bwr = if ow > j1 {
-                (ow - j1 - 1) * st + self.kw
-            } else {
-                0
-            };
-            if bwl + bwr > 0 {
-                border_buf(icbg * self.kh * (bwl + bwr) * v, |buf| {
-                    for (side, (ja, jb)) in [(0, j0), (j1, ow)].into_iter().enumerate() {
-                        if jb <= ja {
-                            continue;
-                        }
-                        let bw = (jb - ja - 1) * st + self.kw;
-                        let buf =
-                            &mut buf[side * icbg * self.kh * bwl * v..][..icbg * self.kh * bw * v];
-                        self.border_row(&x.data, h, w, in_row, 0, icbg, ja, bw, buf);
-                        let mut taps = [(None, 0usize); MAX_TAPS];
-                        for ky in 0..self.kh {
-                            for kx in 0..self.kw {
-                                taps[ky * self.kw + kx] = (Some(ky), kx);
-                            }
-                        }
-                        for (ocb0, r0, r1) in rows.iter_mut() {
-                            let ocb0 = *ocb0;
-                            run_row2(
-                                tier,
-                                &mut RowJob2 {
-                                    out0: r0,
-                                    out1: r1,
-                                    o0: ja,
-                                    os: 1,
-                                    n: jb - ja,
-                                    xp: buf,
-                                    ph: self.kh,
-                                    pw: bw,
-                                    icb0: 0,
-                                    icb1: icbg,
-                                    is: st,
-                                    taps: &taps[..ntaps],
-                                    w0: &self.weight[ocb0 * wlen..][..wlen],
-                                    w1: &self.weight[(ocb0 + 1) * wlen..][..wlen],
-                                    bias0: &self.bias[ocb0 * v..][..v],
-                                    bias1: &self.bias[(ocb0 + 1) * v..][..v],
-                                },
-                            );
-                        }
-                        if let Some((ocbt, rt)) = t_row {
-                            let mut job = RowJob {
-                                out: &mut *rt,
-                                o0: ja,
-                                os: 1,
-                                n: jb - ja,
-                                xp: buf,
-                                ph: self.kh,
-                                pw: bw,
-                                icb_base: 0,
-                                icb0: 0,
-                                icb1: icbg,
-                                in_ch: self.in_ch,
-                                is: st,
-                                taps: &taps[..ntaps],
-                                w: &self.weight[*ocbt * wlen..][..wlen],
-                                bias: &self.bias[*ocbt * v..][..v],
-                            };
-                            run_row(tier, &mut job);
-                        }
-                    }
-                });
-            }
-        };
-        #[cfg(feature = "parallel")]
-        if eng.parallel {
-            use rayon::prelude::*;
-            units
-                .par_iter_mut()
-                .zip(tail.par_iter_mut())
-                .enumerate()
-                .for_each(|(oy, (rows, t_row))| run(oy, rows, t_row));
-            return Ok(out);
-        }
-        for (oy, (rows, t_row)) in units.iter_mut().zip(tail.iter_mut()).enumerate() {
-            run(oy, rows, t_row);
-        }
-        Ok(out)
-    }
-
     /// Packed-tile (BLIS) driver: for each output row the input strip is
     /// im2col-packed once into a contiguous `[icb][ntaps][ow][V]` tile —
     /// every tap's positions unit-stride — then each output block runs the
@@ -1333,6 +1138,57 @@ impl PackedConv {
                 let mut taps = [(None, 0usize); MAX_TAPS];
                 for tt in 0..ntaps {
                     taps[tt] = (Some(tt), 0);
+                }
+                if ocb2() {
+                    // Register tile on the packed tile: each input splat feeds
+                    // two output blocks' FMAs.
+                    for pair in rows.chunks_mut(2) {
+                        if let [p0, p1] = pair {
+                            run_row2(
+                                tier,
+                                &mut RowJob2 {
+                                    out0: p0.1,
+                                    out1: p1.1,
+                                    o0: 0,
+                                    os: 1,
+                                    n: ow,
+                                    xp: &*a,
+                                    ph: ntaps,
+                                    pw: ow,
+                                    icb0: 0,
+                                    icb1: icbg,
+                                    is: 1,
+                                    taps: &taps[..ntaps],
+                                    w0: &self.weight[p0.0 * wlen..][..wlen],
+                                    w1: &self.weight[p1.0 * wlen..][..wlen],
+                                    bias0: &self.bias[p0.0 * v..][..v],
+                                    bias1: &self.bias[p1.0 * v..][..v],
+                                },
+                            );
+                        } else if let [p0] = pair {
+                            run_row(
+                                tier,
+                                &mut RowJob {
+                                    out: p0.1,
+                                    o0: 0,
+                                    os: 1,
+                                    n: ow,
+                                    xp: &*a,
+                                    ph: ntaps,
+                                    pw: ow,
+                                    icb_base: 0,
+                                    icb0: 0,
+                                    icb1: icbg,
+                                    in_ch: self.in_ch,
+                                    is: 1,
+                                    taps: &taps[..ntaps],
+                                    w: &self.weight[p0.0 * wlen..][..wlen],
+                                    bias: &self.bias[p0.0 * v..][..v],
+                                },
+                            );
+                        }
+                    }
+                    return;
                 }
                 for (ocb, row) in rows.iter_mut() {
                     let ocb = *ocb;
@@ -1954,8 +1810,8 @@ fn sweep() -> bool {
     false
 }
 
-/// Benchmark knob: `ZENJPEGAI_CONV_OCB2` opts dense convs into the paired
-/// output-block register-tile kernel (bit-identical — an A/B switch).
+/// Benchmark knob: `ZENJPEGAI_CONV_OCB2` pairs output blocks in the
+/// packed-tile driver — the `acc[2][B]` register tile (bit-identical).
 #[cfg(feature = "std")]
 fn ocb2() -> bool {
     std::env::var_os("ZENJPEGAI_CONV_OCB2").is_some()
