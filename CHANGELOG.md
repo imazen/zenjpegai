@@ -14,6 +14,8 @@
 
 ### Fixed
 
+- Propagate opt-in std through SIMD dependencies and supply private libm-backed float methods on bare-metal no_std targets. The std numerical path is unchanged; the fixed w24 consumer compiles for aarch64-unknown-none.
+
 - `decode_ref` chroma-subsampled vectors were failing `y.psi` by ~1.9–3.0 — **the stored
   reference dumps were stale, not a decoder defect.** A fresh `dump_decode.py` on the current
   `stream.bits` produces luma tensors matching our decode exactly (deterministic across

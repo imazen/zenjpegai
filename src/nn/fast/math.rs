@@ -14,6 +14,9 @@
 //!
 //! Against PyTorch these are bounded differences like the convolutions' (`PORTING.md`).
 
+#[cfg(not(feature = "std"))]
+use crate::float_ext::FloatExt;
+
 use alloc::vec::Vec;
 
 use archmage::prelude::*;

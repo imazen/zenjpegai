@@ -16,6 +16,9 @@
 //! with `Y` the luma plane sampled at the chroma positions. Float order follows the reference's
 //! two convolutions: taps in input-channel order, bias last (bound in `PORTING.md`).
 
+#[cfg(not(feature = "std"))]
+use crate::float_ext::FloatExt;
+
 use alloc::vec::Vec;
 
 use super::{FilterContext, FilterState};
