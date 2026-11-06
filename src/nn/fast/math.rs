@@ -21,8 +21,20 @@ use alloc::vec::Vec;
 
 use archmage::prelude::*;
 
-use magetypes::simd::backends::{F32x8Convert, F32x16Convert};
-use magetypes::simd::generic::{f32x8, f32x16, i32x8, i32x16};
+#[cfg(any(
+    target_arch = "x86_64",
+    target_arch = "aarch64",
+    target_arch = "wasm32"
+))]
+use magetypes::simd::{
+    backends::F32x8Convert,
+    generic::{f32x8, i32x8},
+};
+#[cfg(all(target_arch = "x86_64", feature = "avx512"))]
+use magetypes::simd::{
+    backends::F32x16Convert,
+    generic::{f32x16, i32x16},
+};
 
 use super::{Engine, Tier, for_each_row};
 use crate::error::{Error, Result};
@@ -89,6 +101,11 @@ fn elu_gate_slice(a: &mut [f32], b: &[f32]) {
 /// `2^n` scale and `blend` selects — so every lane is per-lane deterministic.
 /// The sub-lane tail falls back to the scalar slices, which are bit-identical
 /// for the same reason. Modelled on `zenmetrics-math`'s `expf_libm_lanes!`.
+#[cfg(any(
+    target_arch = "x86_64",
+    target_arch = "aarch64",
+    target_arch = "wasm32"
+))]
 macro_rules! exp_lanes {
     ($cexp:ident, $sig:ident, $elu:ident, $sexp:ident, $elub:ident, $F:ident, $I:ident, $conv:ident) => {
         /// Cephes `exp` on one `$F` lane vector, bit-identical to [`exp`].
@@ -204,6 +221,11 @@ macro_rules! exp_lanes {
     };
 }
 
+#[cfg(any(
+    target_arch = "x86_64",
+    target_arch = "aarch64",
+    target_arch = "wasm32"
+))]
 exp_lanes!(
     cephes_exp8,
     sigmoid8,
@@ -214,6 +236,7 @@ exp_lanes!(
     i32x8,
     F32x8Convert
 );
+#[cfg(all(target_arch = "x86_64", feature = "avx512"))]
 exp_lanes!(
     cephes_exp16,
     sigmoid16,

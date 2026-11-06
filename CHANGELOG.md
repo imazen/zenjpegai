@@ -20,6 +20,10 @@
 
 ### Fixed
 
+- Match the fuzz workspace's codec/pixel patches to the root and compile SIMD
+  transcendental helpers only on targets that call them; restore fuzz resolution
+  and i686 warning-free Clippy without suppressing checks.
+
 - Propagate opt-in std through SIMD dependencies and supply private libm-backed float methods on bare-metal no_std targets. The std numerical path is unchanged; the fixed w24 consumer compiles for aarch64-unknown-none.
 
 - `decode_ref` chroma-subsampled vectors were failing `y.psi` by ~1.9–3.0 — **the stored

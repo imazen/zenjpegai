@@ -53,6 +53,10 @@ doc = false
 # Structural inventories are unreleased; match the root manifest.
 [patch.crates-io]
 zencodec = { git = "https://github.com/imazen/zencodec", rev = "1fb997bb88e7405e6a315bf1f0b22f71e99be272" }
+zenpixels = { git = "https://github.com/imazen/zenpixels", rev = "fde59b96632557592cffa9b7301acd8db96ed078" }
+zenpixels-convert = { git = "https://github.com/imazen/zenpixels", rev = "fde59b96632557592cffa9b7301acd8db96ed078" }
+zenpng = { git = "https://github.com/imazen/zenpng", rev = "559faa9d35d844fa1f7af5a8c9f13ee6819c5fc2" }
+zenflate = { git = "https://github.com/imazen/zenflate", rev = "878cf35c70e3c3e0b63bac0d855de710f9f7f430" }
 
 linear-srgb = { git = "https://github.com/imazen/linear-srgb", rev = "52896f4b24664315586bd60e5f048253b1f69052" }
 
