@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+- Restore no_std compilation of analysis helpers and gate AVX-512-only
+  transcendental wrappers. Admit published SIMD beta.2 and state fused-native
+  versus unfused-Wasm accumulation explicitly.
+- Read unpadded stride-1 pointwise inputs directly without im2col packing.
+  Verified through a full MicroSalNet w24 scalar/SIMD consumer.
+
 ### Fixed
 
 - `decode_ref` chroma-subsampled vectors were failing `y.psi` by ~1.9–3.0 — **the stored

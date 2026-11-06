@@ -9,6 +9,7 @@
 //! y_hat_chroma)`) and produces both chroma planes at *luma* resolution; subsampling to the
 //! coded chroma format happens afterwards.
 
+use alloc::boxed::Box;
 use alloc::format;
 
 use enough::{Stop, Unstoppable};

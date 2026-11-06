@@ -654,7 +654,11 @@ impl PackedConv {
         // stride — sequential L1/L2-streamed reads instead of scattered ones.
         // Bit-identical, ~11-15 % faster in measurements.
         // `ZENJPEGAI_CONV_NOBLIS` selects the strided-read driver for A/B.
-        if self.groups == 1 && !no_blis() {
+        // A zero-pad 1x1 stride-1 convolution already has the packed tile's
+        // layout. Read it directly rather than im2col-copying every row and
+        // allocating the row/output-block schedule.
+        let pointwise = self.kh == 1 && self.kw == 1 && self.stride == 1 && self.pad == [0; 4];
+        if self.groups == 1 && !pointwise && !no_blis() {
             return self.forward_blis(eng, x, oh, ow);
         }
         let mut out = BTensor::scratch(self.out_ch, oh, ow, v)?;

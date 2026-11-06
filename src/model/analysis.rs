@@ -18,6 +18,11 @@
 //! checkpoint carries `clip_thres.E{stage}` — dormant upstream because no shipped
 //! checkpoint carries it and `clipping_mode = 0`.
 
+use alloc::{string::String, vec::Vec};
+#[cfg(feature = "std")]
+use crate::encoder::stage;
+#[cfg(not(feature = "std"))]
+macro_rules! stage { ($label:literal, $expr:expr) => { $expr }; }
 use enough::Stop;
 
 use crate::error::{Error, Result};
@@ -178,29 +183,29 @@ impl Trunk {
         if clip && let Some(b) = &self.clip[0] {
             load::clip_channels(&mut c1, b);
         }
-        let x = crate::encoder::stage!("  norm+conv1+act1", self.act1.forward(eng, c1))?;
+        let x = stage!("  norm+conv1+act1", self.act1.forward(eng, c1))?;
         stop.check()?;
         let mut x = pad_for(x, h, w, 2)?;
         if let Some(tam) = &self.tam {
-            x = crate::encoder::stage!("  tam", tam.forward(eng, x))?;
+            x = stage!("  tam", tam.forward(eng, x))?;
             stop.check()?;
         }
         let mut c2 = self.conv2.forward(eng, &x)?;
         if clip && let Some(b) = &self.clip[1] {
             load::clip_channels(&mut c2, b);
         }
-        let x = crate::encoder::stage!("  conv2+act2", self.act2.forward(eng, c2))?;
+        let x = stage!("  conv2+act2", self.act2.forward(eng, c2))?;
         stop.check()?;
         let mut x = pad_for(x, h, w, 4)?;
         if let Some(cab) = &self.cab {
-            x = crate::encoder::stage!("  cab", cab.forward(eng, &x))?;
+            x = stage!("  cab", cab.forward(eng, &x))?;
             stop.check()?;
         }
         let mut c3 = self.conv3.forward(eng, &x)?;
         if clip && let Some(b) = &self.clip[2] {
             load::clip_channels(&mut c3, b);
         }
-        let x = crate::encoder::stage!("  conv3+act3", self.act3.forward(eng, c3))?;
+        let x = stage!("  conv3+act3", self.act3.forward(eng, c3))?;
         stop.check()?;
         Ok(x)
     }

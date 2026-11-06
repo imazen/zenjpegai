@@ -11,6 +11,7 @@
 //! and lose exactly that growth again (region branch of `_get_core_of_overlapping_tile`), so no
 //! tile reads latents of another region.
 
+use alloc::vec;
 use alloc::vec::Vec;
 
 use super::regions::{Area, RegionGrid};

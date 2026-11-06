@@ -1,5 +1,6 @@
 //! Helpers for pulling layers out of a checkpoint with shape validation.
 
+use alloc::vec::Vec;
 use alloc::format;
 
 use crate::error::{Error, Result};

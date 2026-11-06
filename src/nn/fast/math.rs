@@ -222,6 +222,7 @@ exp_lanes!(
     F32x16Convert
 );
 
+#[cfg(feature = "avx512")]
 #[arcane]
 fn sigmoid_v4(t: X64V4Token, data: &mut [f32]) {
     sigmoid16::<X64V4Token>(t, data)
@@ -240,6 +241,7 @@ fn sigmoid_wasm(t: Wasm128Token, data: &mut [f32]) {
     sigmoid8::<Wasm128Token>(t, data)
 }
 
+#[cfg(feature = "avx512")]
 #[arcane]
 fn elu_v4(t: X64V4Token, a: &mut [f32], b: &[f32]) {
     elu16::<X64V4Token>(t, a, b)
@@ -288,6 +290,7 @@ fn run_elu_gate_slice(tier: Tier, a: &mut [f32], b: &[f32]) {
     }
 }
 
+#[cfg(feature = "avx512")]
 #[arcane]
 fn softmax_v4(t: X64V4Token, data: &mut [f32], m: f32) {
     softmax_exp16::<X64V4Token>(t, data, m)
@@ -325,6 +328,7 @@ fn run_softmax_exp_slice(tier: Tier, data: &mut [f32], m: f32) {
     }
 }
 
+#[cfg(feature = "avx512")]
 #[arcane]
 fn elu_bwd_v4(t: X64V4Token, d: &[f32], a: &[f32], b: &[f32], da: &mut [f32], db: &mut [f32]) {
     elu_bwd16::<X64V4Token>(t, d, a, b, da, db)
