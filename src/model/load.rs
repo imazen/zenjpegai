@@ -1,7 +1,7 @@
 //! Helpers for pulling layers out of a checkpoint with shape validation.
 
-use alloc::vec::Vec;
 use alloc::format;
+use alloc::vec::Vec;
 
 use crate::error::{Error, Result};
 use crate::nn::{Conv2d, ConvTranspose2d};

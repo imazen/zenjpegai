@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Pin standalone codec/pixel operation dependencies to the verified saliency consumer cohort; other optional/dev SIMD bounds remain unresolved.
+
 - Restore no_std compilation of analysis helpers and gate AVX-512-only
   transcendental wrappers. Admit published SIMD beta.2 and state fused-native
   versus unfused-Wasm accumulation explicitly.

@@ -18,11 +18,15 @@
 //! checkpoint carries `clip_thres.E{stage}` — dormant upstream because no shipped
 //! checkpoint carries it and `clipping_mode = 0`.
 
-use alloc::{string::String, vec::Vec};
 #[cfg(feature = "std")]
 use crate::encoder::stage;
+use alloc::{string::String, vec::Vec};
 #[cfg(not(feature = "std"))]
-macro_rules! stage { ($label:literal, $expr:expr) => { $expr }; }
+macro_rules! stage {
+    ($label:literal, $expr:expr) => {
+        $expr
+    };
+}
 use enough::Stop;
 
 use crate::error::{Error, Result};
