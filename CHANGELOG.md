@@ -4,7 +4,13 @@
 
 ### Changed
 
-- Pin standalone codec/pixel operation dependencies to the verified saliency consumer cohort; other optional/dev SIMD bounds remain unresolved.
+- Serial packed convolution borrows output rows directly, reuses one packing
+  scratch across rows, and initializes only missing borders. Parallel row
+  scheduling and per-output arithmetic are preserved. Tensor zeros use
+  bytemuck's fallible zeroed allocator; padding and concatenation reuse scratch.
+- Disable the optional PNG dependency's unused palette-quantizer default,
+  resolving the standalone core's incompatible SIMD dependency requirement.
+- Pin standalone codec/pixel operation dependencies to the verified saliency consumer cohort.
 
 - Restore no_std compilation of analysis helpers and gate AVX-512-only
   transcendental wrappers. Admit published SIMD beta.2 and state fused-native

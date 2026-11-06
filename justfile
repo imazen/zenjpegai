@@ -22,6 +22,10 @@ ref := env_var_or_default("ZENJPEGAI_REF", env_var("HOME") / "work/zen/jpeg-ai-r
 test:
     cargo test --lib --tests --examples --features unstable-internals 2>&1 | tee ~/tmp/zenjpegai-test.log
 
+# Shared pool and environment selectors require one test thread for isolation.
+test-nn-memory:
+    cargo test -p zenjpegai --lib --tests --examples --features unstable-internals -- --test-threads=1
+
 # Tests that read the upstream checkpoints / reference vectors. Missing data fails loudly.
 test-ref:
     ZENJPEGAI_REF={{ref}} cargo test --lib --tests --examples --features reference-tests,zencodec 2>&1 | tee ~/tmp/zenjpegai-test-ref.log

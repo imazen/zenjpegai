@@ -1,5 +1,15 @@
 # PORTING.md — the Python/C++ → Rust map
 
+2026-11-06 allocation follow-up: serial BLIS execution borrows output rows
+directly and keeps one packing scratch loan across the convolution. Packing
+writes valid elements and explicit zero borders without clearing the whole
+tile first. Tensor zeros use fallible bytemuck allocation; padding and cat
+reuse tensor scratch. Per-output arithmetic is unchanged. `fast_vs_reference`
+passes every operator case (serial and threaded), `nn_vectors` passes the
+stored numeric vectors, memory accounting/pool-limit tests pass, and the
+non-reference suite plus all-target/all-feature Clippy pass. Full checkpoint
+and codec reference-vector tests were not rerun for this change.
+
 Auditability index: for each Rust module, the upstream reference-software source it ports and
 the parity test that gates it. Upstream is the JPEG AI reference software at commit `b9e573f`
 (`https://gitlab.com/wg1/jpeg-ai/jpeg-ai-reference-software`), referred to below as `ref/`.

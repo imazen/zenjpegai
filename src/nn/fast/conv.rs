@@ -1096,116 +1096,132 @@ impl PackedConv {
     /// The pack is one gather pass amortised over all output blocks.
     fn forward_blis(&self, eng: &Engine, x: &BTensor, oh: usize, ow: usize) -> Result<BTensor> {
         let v = self.v;
+        let mut out = BTensor::scratch(self.out_ch, oh, ow, v)?;
+        let scratch_len = self.in_ch.div_ceil(v) * self.kh * self.kw * ow * v;
+        #[cfg(feature = "parallel")]
+        if eng.parallel {
+            use rayon::prelude::*;
+            // Only parallel execution needs disjoint row ownership in advance.
+            let mut units: Vec<Vec<(usize, &mut [f32])>> = (0..oh)
+                .map(|_| Vec::with_capacity(self.out_ch.div_ceil(v)))
+                .collect();
+            for (ocb, plane) in out.data.chunks_exact_mut(oh * ow * v).enumerate() {
+                for (rows, row) in units.iter_mut().zip(plane.chunks_exact_mut(ow * v)) {
+                    rows.push((ocb, row));
+                }
+            }
+            units.par_iter_mut().enumerate().for_each(|(oy, rows)| {
+                scratch_buf(scratch_len, |a| {
+                    self.blis_row(
+                        eng.tier,
+                        x,
+                        ow,
+                        oy,
+                        a,
+                        rows.iter_mut().map(|(ocb, row)| (*ocb, &mut **row)),
+                    );
+                });
+            });
+            return Ok(out);
+        }
+        // Serial execution borrows each output row directly. One scratch loan
+        // spans the whole convolution (also one allocation without std/TLS).
+        scratch_buf(scratch_len, |a| {
+            for oy in 0..oh {
+                self.blis_row(
+                    eng.tier,
+                    x,
+                    ow,
+                    oy,
+                    a,
+                    out.data
+                        .chunks_exact_mut(oh * ow * v)
+                        .enumerate()
+                        .map(|(ocb, plane)| (ocb, &mut plane[oy * ow * v..][..ow * v])),
+                );
+            }
+        });
+        Ok(out)
+    }
+
+    fn blis_row<'a>(
+        &self,
+        tier: Tier,
+        x: &BTensor,
+        ow: usize,
+        oy: usize,
+        a: &mut [f32],
+        mut rows: impl Iterator<Item = (usize, &'a mut [f32])>,
+    ) {
+        let v = self.v;
         let st = self.stride;
         let (h, w) = (x.h, x.w);
         let [pt, pl, _, _] = self.pad;
         let ntaps = self.kh * self.kw;
         let icbg = self.in_ch.div_ceil(v);
-        let ocb_total = self.out_ch.div_ceil(v);
         let wlen = icbg * v * ntaps * v;
-        let mut out = BTensor::scratch(self.out_ch, oh, ow, v)?;
-        let mut units: Vec<Vec<(usize, &mut [f32])>> =
-            (0..oh).map(|_| Vec::with_capacity(ocb_total)).collect();
-        let mut rest: &mut [f32] = &mut out.data;
-        for ocb in 0..ocb_total {
-            let (d, r) = rest.split_at_mut(oh * ow * v);
-            rest = r;
-            let mut d = d;
-            for rows in units.iter_mut() {
-                let (s, rr) = d.split_at_mut(ow * v);
-                d = rr;
-                rows.push((ocb, s));
+        #[cfg(feature = "coz")]
+        coz::progress!();
+        // Every packed element is written. Only out-of-image borders need
+        // zeros; clearing the entire tile before gathering writes it twice.
+        for icb in 0..icbg {
+            let xs = &x.data[icb * h * w * v..];
+            for ky in 0..self.kh {
+                let iy = (oy * st + ky).wrapping_sub(pt);
+                for kx in 0..self.kw {
+                    let tt = ky * self.kw + kx;
+                    let dst = &mut a[(icb * ntaps + tt) * ow * v..][..ow * v];
+                    if iy >= h {
+                        dst.fill(0.0);
+                        continue;
+                    }
+                    let first = pl.saturating_sub(kx).div_ceil(st).min(ow);
+                    let end = (w + pl).saturating_sub(kx).div_ceil(st).clamp(first, ow);
+                    dst[..first * v].fill(0.0);
+                    dst[end * v..].fill(0.0);
+                    let xrow = &xs[iy * w * v..][..w * v];
+                    for m in first..end {
+                        let ix = m * st + kx - pl;
+                        dst[m * v..][..v].copy_from_slice(&xrow[ix * v..][..v]);
+                    }
+                }
             }
         }
-        let tier = eng.tier;
-        let run = |oy: usize, rows: &mut Vec<(usize, &mut [f32])>| {
-            // `a[icb][(ky,kx)][m][..v]` — output position `m`'s input value.
-            border_buf(icbg * ntaps * ow * v, |a| {
-                #[cfg(feature = "coz")]
-                coz::progress!();
-                for icb in 0..icbg {
-                    let xs = &x.data[icb * h * w * v..];
-                    for ky in 0..self.kh {
-                        let iy = (oy * st + ky).wrapping_sub(pt);
-                        for kx in 0..self.kw {
-                            let tt = ky * self.kw + kx;
-                            let dst = &mut a[(icb * ntaps + tt) * ow * v..][..ow * v];
-                            if iy < h {
-                                let xrow = &xs[iy * w * v..][..w * v];
-                                for m in 0..ow {
-                                    let ix = (m * st + kx).wrapping_sub(pl);
-                                    if ix < w {
-                                        dst[m * v..m * v + v]
-                                            .copy_from_slice(&xrow[ix * v..ix * v + v]);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                let mut taps = [(None, 0usize); MAX_TAPS];
-                for (tt, tap) in taps.iter_mut().enumerate().take(ntaps) {
-                    *tap = (Some(tt), 0);
-                }
-                if ocb2() {
-                    // Register tile on the packed tile: each input splat feeds
-                    // two output blocks' FMAs.
-                    for pair in rows.chunks_mut(2) {
-                        if let [p0, p1] = pair {
-                            run_row2(
-                                tier,
-                                &mut RowJob2 {
-                                    out0: p0.1,
-                                    out1: p1.1,
-                                    o0: 0,
-                                    os: 1,
-                                    n: ow,
-                                    xp: &*a,
-                                    ph: ntaps,
-                                    pw: ow,
-                                    icb0: 0,
-                                    icb1: icbg,
-                                    is: 1,
-                                    taps: &taps[..ntaps],
-                                    w0: &self.weight[p0.0 * wlen..][..wlen],
-                                    w1: &self.weight[p1.0 * wlen..][..wlen],
-                                    bias0: &self.bias[p0.0 * v..][..v],
-                                    bias1: &self.bias[p1.0 * v..][..v],
-                                },
-                            );
-                        } else if let [p0] = pair {
-                            run_row(
-                                tier,
-                                &mut RowJob {
-                                    out: p0.1,
-                                    o0: 0,
-                                    os: 1,
-                                    n: ow,
-                                    xp: &*a,
-                                    ph: ntaps,
-                                    pw: ow,
-                                    icb_base: 0,
-                                    icb0: 0,
-                                    icb1: icbg,
-                                    in_ch: self.in_ch,
-                                    is: 1,
-                                    taps: &taps[..ntaps],
-                                    w: &self.weight[p0.0 * wlen..][..wlen],
-                                    bias: &self.bias[p0.0 * v..][..v],
-                                },
-                            );
-                        }
-                    }
-                    return;
-                }
-                for (ocb, row) in rows.iter_mut() {
-                    let ocb = *ocb;
-                    #[cfg(feature = "coz")]
-                    coz::progress!();
+        let mut taps = [(None, 0usize); MAX_TAPS];
+        for (tt, tap) in taps.iter_mut().enumerate().take(ntaps) {
+            *tap = (Some(tt), 0);
+        }
+        if ocb2() {
+            // Register tile on the packed tile: each input splat feeds
+            // two output blocks' FMAs.
+            while let Some(p0) = rows.next() {
+                if let Some(p1) = rows.next() {
+                    run_row2(
+                        tier,
+                        &mut RowJob2 {
+                            out0: p0.1,
+                            out1: p1.1,
+                            o0: 0,
+                            os: 1,
+                            n: ow,
+                            xp: &*a,
+                            ph: ntaps,
+                            pw: ow,
+                            icb0: 0,
+                            icb1: icbg,
+                            is: 1,
+                            taps: &taps[..ntaps],
+                            w0: &self.weight[p0.0 * wlen..][..wlen],
+                            w1: &self.weight[p1.0 * wlen..][..wlen],
+                            bias0: &self.bias[p0.0 * v..][..v],
+                            bias1: &self.bias[p1.0 * v..][..v],
+                        },
+                    );
+                } else {
                     run_row(
                         tier,
                         &mut RowJob {
-                            out: row,
+                            out: p0.1,
                             o0: 0,
                             os: 1,
                             n: ow,
@@ -1218,26 +1234,38 @@ impl PackedConv {
                             in_ch: self.in_ch,
                             is: 1,
                             taps: &taps[..ntaps],
-                            w: &self.weight[ocb * wlen..][..wlen],
-                            bias: &self.bias[ocb * v..][..v],
+                            w: &self.weight[p0.0 * wlen..][..wlen],
+                            bias: &self.bias[p0.0 * v..][..v],
                         },
                     );
                 }
-            });
-        };
-        #[cfg(feature = "parallel")]
-        if eng.parallel {
-            use rayon::prelude::*;
-            units
-                .par_iter_mut()
-                .enumerate()
-                .for_each(|(oy, rows)| run(oy, rows));
-            return Ok(out);
+            }
+            return;
         }
-        for (oy, rows) in units.iter_mut().enumerate() {
-            run(oy, rows);
+        for (ocb, row) in rows {
+            #[cfg(feature = "coz")]
+            coz::progress!();
+            run_row(
+                tier,
+                &mut RowJob {
+                    out: row,
+                    o0: 0,
+                    os: 1,
+                    n: ow,
+                    xp: &*a,
+                    ph: ntaps,
+                    pw: ow,
+                    icb_base: 0,
+                    icb0: 0,
+                    icb1: icbg,
+                    in_ch: self.in_ch,
+                    is: 1,
+                    taps: &taps[..ntaps],
+                    w: &self.weight[ocb * wlen..][..wlen],
+                    bias: &self.bias[ocb * v..][..v],
+                },
+            );
         }
-        Ok(out)
     }
 }
 

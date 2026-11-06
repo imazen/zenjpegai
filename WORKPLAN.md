@@ -9,6 +9,13 @@ construction, and say so in `PORTING.md`.
 
 ## Landed
 
+- [x] **Fixed-runtime allocation follow-up (2026-11-06):** remove serial BLIS
+  row-descriptor allocations and redundant packing clears; reuse padding/cat
+  buffers and use fallible zeroed tensor allocation. Standalone independent
+  operator parity, memory-accounting tests, the non-reference suite and
+  all-target/all-feature Clippy pass after disabling an unused PNG palette
+  default. No arithmetic or public API change.
+
 - [x] **UV-beta search** (`independent_beta_UV = 0`, upstream crashes on `import
   hyperopt`): `EncodeParams::uv_beta_search` + `--uv-beta-search` (`--bpp` only);
   `Encoder::find_uv_beta` sweeps ≤9 ints in `[min(βY/32,0.1·βY), max(5·βY,3·βY)]`,
