@@ -20,6 +20,14 @@
 
 ### Fixed
 
+- Make the nested clipping checkpoint unit fixture self-contained using a
+  deterministic Python pickle/ZIP-generated hex fixture, preserving all list
+  checks and adding tensor-value coverage. Use u64 for the finite-difference
+  direction generator so i686 sees the same values without integer overflow.
+- Route model-dependent format roundtrips through the documented
+  `reference-tests` feature, and include CLI roundtrips in `just test-ref`.
+  Their assertions and missing-data hard failures remain intact.
+
 - Match the fuzz workspace's codec/pixel patches to the root and compile SIMD
   transcendental helpers only on targets that call them; restore fuzz resolution
   and i686 warning-free Clippy without suppressing checks.

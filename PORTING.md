@@ -7,8 +7,11 @@ tile first. Tensor zeros use fallible bytemuck allocation; padding and cat
 reuse tensor scratch. Per-output arithmetic is unchanged. `fast_vs_reference`
 passes every operator case (serial and threaded), `nn_vectors` passes the
 stored numeric vectors, memory accounting/pool-limit tests pass, and the
-non-reference suite plus all-target/all-feature Clippy pass. Full checkpoint
-and codec reference-vector tests were not rerun for this change.
+non-reference suite plus all-target/all-feature Clippy pass. All sixteen
+model-dependent format roundtrips pass with the explicit `reference-tests`
+feature and local checkpoints. Their assertions are unchanged; the caller
+now selects them through `just test-ref`. Full codec reference-vector suites
+were not rerun at this point.
 
 Auditability index: for each Rust module, the upstream reference-software source it ports and
 the parity test that gates it. Upstream is the JPEG AI reference software at commit `b9e573f`

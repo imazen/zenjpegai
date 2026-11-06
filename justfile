@@ -26,9 +26,12 @@ test:
 test-nn-memory:
     cargo test -p zenjpegai --lib --tests --examples --features unstable-internals -- --test-threads=1
 
+clip-fixture:
+    python3 scripts/ref_vectors/clip_checkpoint_fixture.py src/weights/fixtures/clip_test.pth.hex
+
 # Tests that read the upstream checkpoints / reference vectors. Missing data fails loudly.
 test-ref:
-    ZENJPEGAI_REF={{ref}} cargo test --lib --tests --examples --features reference-tests,zencodec 2>&1 | tee ~/tmp/zenjpegai-test-ref.log
+    ZENJPEGAI_REF={{ref}} cargo test --lib --tests --examples --features reference-tests,zencodec,cli 2>&1 | tee ~/tmp/zenjpegai-test-ref.log
 
 build-release:
     ~/work/zen/scripts/run-heavy -- cargo build --release 2>&1 | tee ~/tmp/zenjpegai-build.log

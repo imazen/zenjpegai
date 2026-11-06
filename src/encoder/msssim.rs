@@ -607,7 +607,7 @@ mod tests {
         let (dx, dy) = ms_ssim_vjp(&eng, &x, &y0, 1.0).unwrap();
         let mut v = x.clone();
         for (i, p) in v.data.iter_mut().enumerate() {
-            *p = ((i * 2_654_435_761usize) % 997) as f32 / 997.0 - 0.5;
+            *p = ((i as u64 * 2_654_435_761u64) % 997) as f32 / 997.0 - 0.5;
         }
         let lhs: f64 = dx
             .data
