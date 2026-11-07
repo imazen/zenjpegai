@@ -2008,7 +2008,17 @@ impl PackedConvTranspose {
         }
         let oh = (x.h - 1) * 2 + self.k + self.out_pad - 2 * self.pad;
         let ow = (x.w - 1) * 2 + self.k + self.out_pad - 2 * self.pad;
-        let xp = x.pad_par(eng, EXT, EXT, EXT, EXT)?;
+        // A non-overlapping 2x2 upsample has exactly one tap per parity:
+        // every read is (oy/2, ox/2), so the input already supplies all rows.
+        // Keep the same phase weights and micro-kernel accumulation order.
+        let direct = self.k == 2 && self.pad == 0 && self.out_pad == 0;
+        let padded = if direct {
+            None
+        } else {
+            Some(x.pad_par(eng, EXT, EXT, EXT, EXT)?)
+        };
+        let xp = padded.as_ref().unwrap_or(x);
+        let extra = if direct { 0 } else { EXT };
         let mut out = BTensor::scratch(self.out_ch, oh, ow, v)?;
         let icb = self.in_ch.div_ceil(v);
         let tier = eng.tier;
@@ -2026,9 +2036,9 @@ impl PackedConvTranspose {
                 let wlen = icb * v * ntaps * v;
                 let mut taps = [(None, 0usize); MAX_TAPS];
                 for (a, &ky) in phase.ky.iter().enumerate() {
-                    let iy = (oy as isize + pad - ky as isize).div_euclid(2) + EXT as isize;
+                    let iy = (oy as isize + pad - ky as isize).div_euclid(2) + extra as isize;
                     for (b, &kx) in phase.kx.iter().enumerate() {
-                        let ix = (q as isize + pad - kx as isize).div_euclid(2) + EXT as isize;
+                        let ix = (q as isize + pad - kx as isize).div_euclid(2) + extra as isize;
                         taps[a * phase.kx.len() + b] = (Some(iy as usize), ix as usize);
                     }
                 }

@@ -9,6 +9,11 @@ construction, and say so in `PORTING.md`.
 
 ## Landed
 
+- [x] **Direct 2x2 upsampling (2026-11-07):** the non-overlapping transposed
+  convolution reads its original input without padding. Existing phase weights
+  and FMA order remain unchanged. Tiny/odd/channel-tail operator cases and all
+  50 stored decoder-reference tests pass, including tier/thread bit parity.
+
 - [x] **Fixed-runtime allocation follow-up (2026-11-06):** remove serial BLIS
   row-descriptor allocations and redundant packing clears; reuse padding/cat
   buffers and use fallible zeroed tensor allocation. Standalone independent

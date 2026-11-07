@@ -4,6 +4,10 @@
 
 ### Changed
 
+- Non-overlapping 2x2 transposed convolution reads the original input directly,
+  retaining its existing parity weights and accumulation order without a padded
+  copy. Independent planar-reference checks cover tiny/odd shapes and channel tails.
+
 - Serial packed convolution borrows output rows directly, reuses one packing
   scratch across rows, and initializes only missing borders. Parallel row
   scheduling and per-output arithmetic are preserved. Tensor zeros use

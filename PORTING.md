@@ -10,8 +10,12 @@ stored numeric vectors, memory accounting/pool-limit tests pass, and the
 non-reference suite plus all-target/all-feature Clippy pass. All sixteen
 model-dependent format roundtrips pass with the explicit `reference-tests`
 feature and local checkpoints. Their assertions are unchanged; the caller
-now selects them through `just test-ref`. Full codec reference-vector suites
-were not rerun at this point.
+now selects them through `just test-ref`. The follow-up removes padding from
+non-overlapping 2x2 transposed convolution while keeping the original phase
+weights and micro-kernel. All 50 stored decoder-reference tests pass, including
+the tier/thread bit-parity property. Encode-reference and other reference
+suites were not rerun for this follow-up. The complete log is retained by the
+zensally memory study (2026-11-06/07).
 
 Auditability index: for each Rust module, the upstream reference-software source it ports and
 the parity test that gates it. Upstream is the JPEG AI reference software at commit `b9e573f`
