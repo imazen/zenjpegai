@@ -18,6 +18,9 @@
 //! identity-matrix stream is three identical planes. There is no trustworthy oracle; such
 //! streams are rejected (`scripts/ref_vectors/probe_colour_transform2.py`, PORTING.md).
 
+#[cfg(not(feature = "std"))]
+use crate::float_ext::FloatExt;
+
 use alloc::vec::Vec;
 
 use super::reconstruct::Planes;

@@ -13,6 +13,9 @@
 // that correspondence.
 #![allow(clippy::needless_range_loop)]
 
+#[cfg(not(feature = "std"))]
+use crate::float_ext::FloatExt;
+
 use alloc::format;
 use alloc::vec::Vec;
 

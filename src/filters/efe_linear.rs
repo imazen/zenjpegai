@@ -20,6 +20,9 @@
 //! Float order: every tap is a separate multiply and add, taps in `(ky, kx)` order, bias last.
 //! Versus PyTorch the result differs by float summation order only (bound in `PORTING.md`).
 
+#[cfg(not(feature = "std"))]
+use crate::float_ext::FloatExt;
+
 use alloc::vec;
 use alloc::vec::Vec;
 

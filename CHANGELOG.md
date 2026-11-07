@@ -2,7 +2,41 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Non-overlapping 2x2 transposed convolution reads the original input directly,
+  retaining its existing parity weights and accumulation order without a padded
+  copy. Independent planar-reference checks cover tiny/odd shapes and channel tails.
+
+- Serial packed convolution borrows output rows directly, reuses one packing
+  scratch across rows, and initializes only missing borders. Parallel row
+  scheduling and per-output arithmetic are preserved. Tensor zeros use
+  bytemuck's fallible zeroed allocator; padding and concatenation reuse scratch.
+- Disable the optional PNG dependency's unused palette-quantizer default,
+  resolving the standalone core's incompatible SIMD dependency requirement.
+- Pin standalone codec/pixel operation dependencies to the verified saliency consumer cohort.
+
+- Restore no_std compilation of analysis helpers and gate AVX-512-only
+  transcendental wrappers. Admit published SIMD beta.2 and state fused-native
+  versus unfused-Wasm accumulation explicitly.
+- Read unpadded stride-1 pointwise inputs directly without im2col packing.
+  Verified through a full MicroSalNet w24 scalar/SIMD consumer.
+
 ### Fixed
+
+- Make the nested clipping checkpoint unit fixture self-contained using a
+  deterministic Python pickle/ZIP-generated hex fixture, preserving all list
+  checks and adding tensor-value coverage. Use u64 for the finite-difference
+  direction generator so i686 sees the same values without integer overflow.
+- Route model-dependent format roundtrips through the documented
+  `reference-tests` feature, and include CLI roundtrips in `just test-ref`.
+  Their assertions and missing-data hard failures remain intact.
+
+- Match the fuzz workspace's codec/pixel patches to the root and compile SIMD
+  transcendental helpers only on targets that call them; restore fuzz resolution
+  and i686 warning-free Clippy without suppressing checks.
+
+- Propagate opt-in std through SIMD dependencies and supply private libm-backed float methods on bare-metal no_std targets. The std numerical path is unchanged; the fixed w24 consumer compiles for aarch64-unknown-none.
 
 - `decode_ref` chroma-subsampled vectors were failing `y.psi` by ~1.9–3.0 — **the stored
   reference dumps were stale, not a decoder defect.** A fresh `dump_decode.py` on the current

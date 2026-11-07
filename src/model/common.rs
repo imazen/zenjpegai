@@ -3,6 +3,9 @@
 //!
 //! Loaded from `models/VM_common_int/{Y,UV}_<beta>.pth`.
 
+#[cfg(not(feature = "std"))]
+use crate::float_ext::FloatExt;
+
 use alloc::format;
 use alloc::vec::Vec;
 

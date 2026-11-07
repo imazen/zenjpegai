@@ -14,12 +14,27 @@
 //!
 //! Against PyTorch these are bounded differences like the convolutions' (`PORTING.md`).
 
+#[cfg(not(feature = "std"))]
+use crate::float_ext::FloatExt;
+
 use alloc::vec::Vec;
 
 use archmage::prelude::*;
 
-use magetypes::simd::backends::{F32x8Convert, F32x16Convert};
-use magetypes::simd::generic::{f32x8, f32x16, i32x8, i32x16};
+#[cfg(any(
+    target_arch = "x86_64",
+    target_arch = "aarch64",
+    target_arch = "wasm32"
+))]
+use magetypes::simd::{
+    backends::F32x8Convert,
+    generic::{f32x8, i32x8},
+};
+#[cfg(all(target_arch = "x86_64", feature = "avx512"))]
+use magetypes::simd::{
+    backends::F32x16Convert,
+    generic::{f32x16, i32x16},
+};
 
 use super::{Engine, Tier, for_each_row};
 use crate::error::{Error, Result};
@@ -86,6 +101,11 @@ fn elu_gate_slice(a: &mut [f32], b: &[f32]) {
 /// `2^n` scale and `blend` selects — so every lane is per-lane deterministic.
 /// The sub-lane tail falls back to the scalar slices, which are bit-identical
 /// for the same reason. Modelled on `zenmetrics-math`'s `expf_libm_lanes!`.
+#[cfg(any(
+    target_arch = "x86_64",
+    target_arch = "aarch64",
+    target_arch = "wasm32"
+))]
 macro_rules! exp_lanes {
     ($cexp:ident, $sig:ident, $elu:ident, $sexp:ident, $elub:ident, $F:ident, $I:ident, $conv:ident) => {
         /// Cephes `exp` on one `$F` lane vector, bit-identical to [`exp`].
@@ -201,6 +221,11 @@ macro_rules! exp_lanes {
     };
 }
 
+#[cfg(any(
+    target_arch = "x86_64",
+    target_arch = "aarch64",
+    target_arch = "wasm32"
+))]
 exp_lanes!(
     cephes_exp8,
     sigmoid8,
@@ -211,6 +236,7 @@ exp_lanes!(
     i32x8,
     F32x8Convert
 );
+#[cfg(all(target_arch = "x86_64", feature = "avx512"))]
 exp_lanes!(
     cephes_exp16,
     sigmoid16,
@@ -222,6 +248,7 @@ exp_lanes!(
     F32x16Convert
 );
 
+#[cfg(feature = "avx512")]
 #[arcane]
 fn sigmoid_v4(t: X64V4Token, data: &mut [f32]) {
     sigmoid16::<X64V4Token>(t, data)
@@ -240,6 +267,7 @@ fn sigmoid_wasm(t: Wasm128Token, data: &mut [f32]) {
     sigmoid8::<Wasm128Token>(t, data)
 }
 
+#[cfg(feature = "avx512")]
 #[arcane]
 fn elu_v4(t: X64V4Token, a: &mut [f32], b: &[f32]) {
     elu16::<X64V4Token>(t, a, b)
@@ -288,6 +316,7 @@ fn run_elu_gate_slice(tier: Tier, a: &mut [f32], b: &[f32]) {
     }
 }
 
+#[cfg(feature = "avx512")]
 #[arcane]
 fn softmax_v4(t: X64V4Token, data: &mut [f32], m: f32) {
     softmax_exp16::<X64V4Token>(t, data, m)
@@ -325,6 +354,7 @@ fn run_softmax_exp_slice(tier: Tier, data: &mut [f32], m: f32) {
     }
 }
 
+#[cfg(feature = "avx512")]
 #[arcane]
 fn elu_bwd_v4(t: X64V4Token, d: &[f32], a: &[f32], b: &[f32], da: &mut [f32], db: &mut [f32]) {
     elu_bwd16::<X64V4Token>(t, d, a, b, da, db)

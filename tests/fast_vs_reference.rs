@@ -250,7 +250,7 @@ fn conv2d_extra_padding_matches_explicit_padding() {
 #[test]
 fn conv_transpose2d_bit_identical() {
     let mut rng = Rng(0xD1B54A32D192ED03);
-    for &(k, pad, out_pad) in &[(4usize, 1usize, 0usize), (3, 1, 1)] {
+    for &(k, pad, out_pad) in &[(4usize, 1usize, 0usize), (3, 1, 1), (2, 0, 0)] {
         for &(in_ch, out_ch, h, w) in &[
             (16, 16, 1, 1),
             (32, 16, 3, 5),

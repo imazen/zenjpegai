@@ -21,6 +21,9 @@
 
 extern crate alloc;
 
+#[cfg(not(feature = "std"))]
+mod float_ext;
+
 whereat::define_at_crate_info!();
 
 // Internal modules: the crate-external API is the one-call `Decoder` re-exported below (plus

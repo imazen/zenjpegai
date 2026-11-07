@@ -41,7 +41,16 @@ impl<T: F32x8Backend + Send + Sync> SimdF32<8> for f32x8<T> {
     }
     #[inline(always)]
     fn mul_add(self, a: Self, b: Self) -> Self {
-        f32x8::mul_add(self, a, b)
+        {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                f32x8::mul_add_fused(self, a, b)
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                self * a + b
+            }
+        }
     }
     #[inline(always)]
     fn add(self, a: Self) -> Self {
@@ -69,7 +78,16 @@ impl<T: F32x16Backend + Send + Sync> SimdF32<16> for f32x16<T> {
     }
     #[inline(always)]
     fn mul_add(self, a: Self, b: Self) -> Self {
-        f32x16::mul_add(self, a, b)
+        {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                f32x16::mul_add_fused(self, a, b)
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                self * a + b
+            }
+        }
     }
     #[inline(always)]
     fn add(self, a: Self) -> Self {

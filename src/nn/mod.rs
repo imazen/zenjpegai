@@ -28,6 +28,9 @@
 //! bit-identical across wasm engines, tiers and thread counts, and differ from native results
 //! by rounding only (measured in `PORTING.md`).
 
+#[cfg(not(feature = "std"))]
+use crate::float_ext::FloatExt;
+
 pub mod fast;
 pub mod reference;
 mod resample;

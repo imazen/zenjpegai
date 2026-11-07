@@ -141,6 +141,57 @@ pub fn pool_limit() -> usize {
     0
 }
 
+#[cfg(test)]
+mod allocation_tests {
+    use super::*;
+
+    #[test]
+    fn zeroed_allocation_reports_impossible_layout_without_panicking() {
+        let rows = isize::MAX as usize / (8 * core::mem::size_of::<f32>()) + 1;
+        assert!(matches!(
+            BTensor::zeros(1, rows, 1, 8),
+            Err(Error::LimitExceeded("tensor allocation failed"))
+        ));
+    }
+
+    #[test]
+    fn recycled_padding_and_concatenation_write_all_elements() {
+        for v in [8, 16] {
+            let mut poison = BTensor::zeros(32, 32, 32, v).unwrap();
+            poison.data.fill(f32::NAN);
+            drop(poison);
+            let zeros = BTensor::zeros(32, 32, 32, v).unwrap();
+            assert!(zeros.data.iter().all(|x| x.to_bits() == 0));
+            let mut x = BTensor::zeros(v, 5, 7, v).unwrap();
+            for (i, value) in x.data.iter_mut().enumerate() {
+                *value = if i % 7 == 0 { -0.0 } else { i as f32 - 100.0 };
+            }
+            let padded = x.pad(2, 3, 4, 1).unwrap();
+            for y in 0..padded.h {
+                for col in 0..padded.w {
+                    for lane in 0..v {
+                        let expected = if (2..7).contains(&y) && (3..10).contains(&col) {
+                            x.data[((y - 2) * x.w + col - 3) * v + lane]
+                        } else {
+                            0.0
+                        };
+                        assert_eq!(
+                            padded.data[(y * padded.w + col) * v + lane].to_bits(),
+                            expected.to_bits()
+                        );
+                    }
+                }
+            }
+            let cat = BTensor::cat(&[&x, &x]).unwrap();
+            let expected: Vec<u32> = x.data.iter().chain(&x.data).map(|v| v.to_bits()).collect();
+            assert_eq!(
+                cat.data.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                expected
+            );
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct BTensor {
     pub c: usize,
@@ -234,9 +285,23 @@ impl BTensor {
             .and_then(|n| n.checked_mul(w))
             .and_then(|n| n.checked_mul(v))
             .ok_or(Error::LimitExceeded("tensor size overflow"))?;
-        // `vec![0.0; n]` is one `calloc`: fresh pages arrive zeroed from the kernel and are only
-        // touched by whoever writes them first. Reserve-then-fill would write everything twice.
-        let data = alloc::vec![0.0f32; n];
+        #[cfg(feature = "std")]
+        if let Some(mut data) = pool::take(n) {
+            data.fill(0.0);
+            let charge = crate::mem::Charge::of_vec(&data);
+            return Ok(Self {
+                c,
+                h,
+                w,
+                v,
+                data,
+                charge,
+            });
+        }
+        // Keep the zeroed allocator's lazy-page behavior while reporting OOM
+        // through this Result, rather than reserve followed by an eager fill.
+        let data = bytemuck::allocation::try_zeroed_vec(n)
+            .map_err(|()| Error::LimitExceeded("tensor allocation failed"))?;
         let charge = crate::mem::Charge::of_vec(&data);
         Ok(Self {
             c,
@@ -368,12 +433,19 @@ impl BTensor {
     /// Zero-padded copy.
     pub fn pad(&self, top: usize, left: usize, bottom: usize, right: usize) -> Result<Self> {
         let (ph, pw) = (self.h + top + bottom, self.w + left + right);
-        let mut out = Self::zeros(self.c, ph, pw, self.v)?;
+        let mut out = Self::scratch(self.c, ph, pw, self.v)?;
         let v = self.v;
         for b in 0..self.blocks() {
-            for y in 0..self.h {
-                let src = &self.data[(b * self.h + y) * self.w * v..][..self.w * v];
-                out.data[((b * ph + y + top) * pw + left) * v..][..self.w * v].copy_from_slice(src);
+            for y in 0..ph {
+                let row = &mut out.data[(b * ph + y) * pw * v..][..pw * v];
+                if y >= top && y < top + self.h {
+                    let src = &self.data[(b * self.h + y - top) * self.w * v..][..self.w * v];
+                    row[..left * v].fill(0.0);
+                    row[left * v..][..self.w * v].copy_from_slice(src);
+                    row[(left + self.w) * v..].fill(0.0);
+                } else {
+                    row.fill(0.0);
+                }
             }
         }
         Ok(out)
@@ -415,19 +487,17 @@ impl BTensor {
                 ));
             }
         }
-        let mut data = Vec::with_capacity(parts.iter().map(|p| p.data.len()).sum());
+        let channels = parts
+            .iter()
+            .try_fold(0usize, |n, p| n.checked_add(p.c))
+            .ok_or(Error::LimitExceeded("cat channel overflow"))?;
+        let mut out = Self::scratch(channels, h, w, v)?;
+        let mut offset = 0;
         for p in parts {
-            data.extend_from_slice(&p.data);
+            out.data[offset..][..p.data.len()].copy_from_slice(&p.data);
+            offset += p.data.len();
         }
-        let charge = crate::mem::Charge::of_vec(&data);
-        Ok(Self {
-            c: parts.iter().map(|p| p.c).sum(),
-            h,
-            w,
-            v,
-            data,
-            charge,
-        })
+        Ok(out)
     }
 
     /// Channels `c0..c1`; `c0` must be block-aligned.

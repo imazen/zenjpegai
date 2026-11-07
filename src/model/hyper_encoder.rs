@@ -10,6 +10,7 @@
 //! The weights live next to the decoder-side modules in `models/VM_common_int/*.pth` under
 //! `hyper_encoder.*`.
 
+use alloc::vec::Vec;
 use enough::Stop;
 
 use crate::error::{Error, Result};

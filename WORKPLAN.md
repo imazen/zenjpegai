@@ -9,6 +9,18 @@ construction, and say so in `PORTING.md`.
 
 ## Landed
 
+- [x] **Direct 2x2 upsampling (2026-11-07):** the non-overlapping transposed
+  convolution reads its original input without padding. Existing phase weights
+  and FMA order remain unchanged. Tiny/odd/channel-tail operator cases and all
+  50 stored decoder-reference tests pass, including tier/thread bit parity.
+
+- [x] **Fixed-runtime allocation follow-up (2026-11-06):** remove serial BLIS
+  row-descriptor allocations and redundant packing clears; reuse padding/cat
+  buffers and use fallible zeroed tensor allocation. Standalone independent
+  operator parity, memory-accounting tests, the non-reference suite and
+  all-target/all-feature Clippy pass after disabling an unused PNG palette
+  default. No arithmetic or public API change.
+
 - [x] **UV-beta search** (`independent_beta_UV = 0`, upstream crashes on `import
   hyperopt`): `EncodeParams::uv_beta_search` + `--uv-beta-search` (`--bpp` only);
   `Encoder::find_uv_beta` sweeps ≤9 ints in `[min(βY/32,0.1·βY), max(5·βY,3·βY)]`,

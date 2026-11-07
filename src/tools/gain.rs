@@ -7,6 +7,9 @@
 //! linear domain it is `exp(log * log_k / 128)` rounded to 10 fractional bits; residuals are
 //! *divided* by it on the decoder side.
 
+#[cfg(not(feature = "std"))]
+use crate::float_ext::FloatExt;
+
 use alloc::vec::Vec;
 
 /// `log_k = (ln(sigma_max) - ln(sigma_min)) / (levels - 1)` with the effective
